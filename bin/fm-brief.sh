@@ -201,7 +201,9 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+    # bash 3.2 (macOS system bash) cannot parse a single quote inside a
+    # heredoc within $(...), so read this heredoc (it contains one) directly.
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -218,7 +220,7 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
+    DOD=${DOD%$'\n'}
     ;;
 esac
 
