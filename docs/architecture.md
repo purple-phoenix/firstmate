@@ -116,7 +116,9 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report and optional supporting evidence under `data/<id>/` and never push.
+The captain-invocable `user-journey-audit` skill composes that scout lifecycle with in-place promotion for its first authorized ordinary bug-fix group, separate ship tasks for additional groups, and evidence-linked queued feature work.
+The skill owns the persona, evidence, selection, and authority rules rather than duplicating them here.
 
 ## Dispatch profiles
 
