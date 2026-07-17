@@ -126,7 +126,7 @@ Use synthetic values and redact sensitive material before it enters a durable ar
 Keep large raw captures bounded and prefer the smallest evidence that proves the observation.
 
 After the first behavioral pass, load `diagnostic-reasoning` before investigating a possible defect.
-Source inspection is permitted only then and only to reproduce, disconfirm, or explain a specific observed failure.
+Outside the bounded review-rendering exception in section 8, source inspection is permitted only then and only to reproduce, disconfirm, or explain a specific observed failure.
 Separate confirmed behavior, hypotheses, and unresolved uncertainty.
 
 ## 8. Classify the report
@@ -146,6 +146,9 @@ For feature opportunities, also name the user goal and journey evidence that jus
 Do not convert uncertainty or subjective preference into a defect.
 Do not brainstorm features that no observed journey motivated.
 
+Freeze the behavioral notes, persona derivation, journey results, and finding classifications before preparing the HTML review surface.
+After that freeze, the scout may inspect only the application's design tokens, theme configuration, shared styles, component primitives, and brand assets needed to follow the current Lavish design guidance and match the application's visual system.
+That bounded design-system inspection is solely for rendering the review surface and must not script, add, remove, or revise personas, journeys, expected behavior, or findings.
 Render the report as a self-contained HTML review surface under `data/<id>/evidence/` and record its path for Firstmate.
 The scout must not open, poll, share, or end the Lavish review or solicit captain feedback.
 Keep the Markdown report authoritative and complete even when the visual surface is used.
@@ -153,12 +156,16 @@ Keep the Markdown report authoritative and complete even when the visual surface
 ## 9. Complete decisions before routing work
 
 Load `decision-hold-lifecycle` before treating the report or visual review as complete.
-The scout reports review-ready only after the report, structured notes, evidence, rendered review surface, and candidate decision notes are complete.
+The task-specific brief must tell the scout not to report `done` when the initial report and rendered HTML are ready because Firstmate's review and the shared completion gate remain outstanding.
+After the report, structured notes, evidence, rendered review surface, and candidate decision notes are ready, the scout appends `working: report and rendered HTML ready at <paths>` to the supported status channel and remains available for steering.
 Firstmate reads the complete report, opens and supervises the rendered surface with `lavish-axi` when available, and collects the captain's review feedback itself.
 After the review feedback is complete, Firstmate inventories genuine captain product decisions from both the report and the review and registers each one in the authoritative home.
 An ordinary confirmed defect with no sensitive or product-choice boundary is not a captain decision merely because it will be fixed automatically.
 A feature opportunity that depends on product positioning, policy, destructive behavior, privacy, billing, or another captain choice must receive a decision record.
 Firstmate runs the decision completion command with the full inventory, including an explicit no-decision result when applicable, before treating the report or visual review as complete.
+Firstmate then steers the scout with the review feedback and tells it that the decision inventory is complete.
+The scout reconciles the feedback into the authoritative report and rendered surface, verifies the shared decision-completion gate through `decision-hold-lifecycle`, and only then appends the supported `done` status.
+If reconciliation exposes a new captain decision, the scout emits another supported `working` status and Firstmate repeats review and decision completion before the scout verifies and reports `done`.
 Do not ask the scout to communicate with the captain or wait on human review.
 Do not tear it down yet when an eligible defect may be promoted.
 
