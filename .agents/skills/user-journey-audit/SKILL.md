@@ -11,7 +11,7 @@ metadata:
 # user-journey-audit
 
 This skill is the single owner of Firstmate's user-journey audit procedure.
-One invocation audits one explicitly resolved application or project, then stops.
+One invocation audits one explicitly resolved application, then stops.
 It never schedules, repeats, or initiates an audit without a new captain invocation.
 
 The audit is an evidence-producing scout whose confirmed ordinary reversible defects carry narrow implementation authority from the invocation itself.
@@ -23,7 +23,11 @@ Grounded feature opportunities are backlog inputs only and are never implementat
 Resolve the project through `AGENTS.md` section 7 before creating any work.
 An explicit project wins, and a clear follow-up inherits its referent.
 Otherwise match the request against the project registry, work under way, and user-facing project documentation.
-Proceed only when exactly one target is confidently resolved, name it to the captain, and ask one concise question when multiple or no projects plausibly match.
+After resolving the project, resolve exactly one application within it before creating audit work.
+An application explicitly named by the captain wins.
+Otherwise use the request, project registry, user-facing documentation, and documented operator commands to identify the runnable user-facing application.
+A repository or project is not itself a resolved application when it contains multiple applications.
+Proceed only when exactly one application is confidently resolved, name both the project and application to the captain, and ask one concise question when multiple or no applications plausibly match.
 Never combine applications, repositories, deployments, or unrelated product surfaces in one invocation.
 
 Resolve the fitting secondmate scope before using the main home.
@@ -142,17 +146,20 @@ For feature opportunities, also name the user goal and journey evidence that jus
 Do not convert uncertainty or subjective preference into a defect.
 Do not brainstorm features that no observed journey motivated.
 
-Render the report as an HTML review surface under `data/<id>/evidence/` and open it with `lavish-axi` when available.
+Render the report as a self-contained HTML review surface under `data/<id>/evidence/` and record its path for Firstmate.
+The scout must not open, poll, share, or end the Lavish review or solicit captain feedback.
 Keep the Markdown report authoritative and complete even when the visual surface is used.
 
 ## 9. Complete decisions before routing work
 
 Load `decision-hold-lifecycle` before treating the report or visual review as complete.
-Inventory genuine captain product decisions and register each one in the authoritative home before the scout reports done.
+The scout reports review-ready only after the report, structured notes, evidence, rendered review surface, and candidate decision notes are complete.
+Firstmate reads the complete report, opens and supervises the rendered surface with `lavish-axi` when available, and collects the captain's review feedback itself.
+After the review feedback is complete, Firstmate inventories genuine captain product decisions from both the report and the review and registers each one in the authoritative home.
 An ordinary confirmed defect with no sensitive or product-choice boundary is not a captain decision merely because it will be fixed automatically.
 A feature opportunity that depends on product positioning, policy, destructive behavior, privacy, billing, or another captain choice must receive a decision record.
-
-The scout reports done only after the report, structured notes, evidence, and decision inventory are complete.
+Firstmate runs the decision completion command with the full inventory, including an explicit no-decision result when applicable, before treating the report or visual review as complete.
+Do not ask the scout to communicate with the captain or wait on human review.
 Do not tear it down yet when an eligible defect may be promoted.
 
 ## 10. Select automatic bug-fix work

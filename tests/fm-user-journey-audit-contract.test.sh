@@ -23,8 +23,14 @@ test_skill_is_discoverable_and_single_owner() {
 }
 
 test_one_target_and_idle_contract() {
-  assert_grep 'One invocation audits one explicitly resolved application or project' "$SKILL" \
-    "skill does not limit an invocation to one resolved target"
+  assert_grep 'One invocation audits one explicitly resolved application, then stops' "$SKILL" \
+    "skill does not limit an invocation to one resolved application"
+  assert_grep 'After resolving the project, resolve exactly one application within it before creating audit work' "$SKILL" \
+    "skill does not resolve an application after project selection"
+  assert_grep 'A repository or project is not itself a resolved application when it contains multiple applications' "$SKILL" \
+    "skill can mistake a multi-application project for one application"
+  assert_grep 'name both the project and application to the captain' "$SKILL" \
+    "skill does not make application resolution explicit"
   assert_grep 'Never combine applications, repositories, deployments, or unrelated product surfaces' "$SKILL" \
     "skill can combine multiple targets"
   assert_grep 'never schedules, repeats, or initiates an audit' "$SKILL" \
@@ -91,6 +97,22 @@ test_durable_evidence_and_report_classes() {
     "evidence contract does not protect secrets"
   assert_grep 'lavish-axi' "$SKILL" "skill does not produce the settled rendered review surface"
   pass "structured notes, durable evidence, report classes, and visual review are required"
+}
+
+test_firstmate_owns_visual_review_and_decisions() {
+  for phrase in \
+    'record its path for Firstmate' \
+    'The scout must not open, poll, share, or end the Lavish review or solicit captain feedback' \
+    'The scout reports review-ready only after' \
+    'Firstmate reads the complete report, opens and supervises the rendered surface with `lavish-axi`' \
+    'Firstmate inventories genuine captain product decisions from both the report and the review' \
+    'Firstmate runs the decision completion command with the full inventory' \
+    'Do not ask the scout to communicate with the captain or wait on human review'; do
+    assert_grep "$phrase" "$SKILL" "visual review ownership is missing '$phrase'"
+  done
+  assert_no_grep 'and open it with `lavish-axi`' "$SKILL" \
+    "skill still assigns opening the Lavish review to the scout"
+  pass "Firstmate owns captain-facing visual review and decision completion"
 }
 
 test_ordinary_bug_fix_authority_is_bounded() {
@@ -166,6 +188,7 @@ test_safe_browser_environment
 test_personas_are_dynamic_bounded_and_complete
 test_journey_matrix_covers_realistic_paths
 test_durable_evidence_and_report_classes
+test_firstmate_owns_visual_review_and_decisions
 test_ordinary_bug_fix_authority_is_bounded
 test_fix_routing_uses_promotion_clean_base_and_deduplication
 test_features_are_queued_but_never_implemented
