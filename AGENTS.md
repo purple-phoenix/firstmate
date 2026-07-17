@@ -80,6 +80,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/evidence/     optional scout supporting artifacts; survives teardown with the report
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -305,6 +306,9 @@ Before treating the investigation or any visual review as complete, load `decisi
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path.
 Scratch commits and debug edits never ride along, and a reproduced bug becomes the regression test.
+
+When the captain invokes `/user-journey-audit` or explicitly asks for a user-journey audit, load `user-journey-audit`.
+That invocation narrowly authorizes confirmed ordinary reversible bug implementation, never feature implementation or merge, and the skill owns the conditional procedure.
 
 ## 8. Supervision protocol
 

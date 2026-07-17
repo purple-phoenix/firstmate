@@ -308,6 +308,23 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_scout_preserves_structured_notes_and_evidence() {
+  local home id brief
+  home="$TMP_ROOT/scout-evidence-home"
+  mkdir -p "$home/data"
+  id="journey-audit-evidence"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "$home/data/$id/evidence/" "$brief" \
+    "scout brief does not preserve supporting evidence outside the scratch worktree"
+  assert_grep "structured notes under \`$home/data/$id/\`" "$brief" \
+    "scout brief does not permit durable structured notes"
+  assert_grep "with captures under \`$home/data/$id/evidence/\`" "$brief" \
+    "scout definition of done does not require durable capture placement"
+  pass "fm-brief.sh: scouts preserve structured notes and evidence under their durable data directory"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -321,3 +338,4 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_scout_preserves_structured_notes_and_evidence
