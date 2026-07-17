@@ -310,6 +310,9 @@ Scratch commits and debug edits never ride along, and a reproduced bug becomes t
 When the captain invokes `/user-journey-audit` or explicitly asks for a user-journey audit, load `user-journey-audit`.
 That invocation narrowly authorizes confirmed ordinary reversible bug implementation, never feature implementation or merge, and the skill owns the conditional procedure.
 
+When the captain invokes `/capacity` or asks about capacity, bottlenecks, pipeline utilization, work supply, idle lanes, or maximizing fleet throughput, load `capacity`.
+That read-mostly skill owns the conditional procedure and must never invent work, dispatch for utilization, or weaken lifecycle safety.
+
 ## 8. Supervision protocol
 
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.

@@ -35,6 +35,9 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override a valid structured summary.
+#     The embedded registry records preserve the route's summary, scope, and
+#     projects fields when its canonical one-line syntax is parseable, so projections
+#     can describe routing alignment without reopening data/secondmates.md.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted; captain holds appear in
 #     decisions_open and are also preserved in queued with hold metadata.
@@ -617,7 +620,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          priority:((.priority // null) | if . == null then null else trunc(40) end),
+          body_excerpt:((.body_excerpt // null) | if . == null then null else trunc(240) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
@@ -741,8 +746,14 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
+        | (capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>[^;)]*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[^)]*\\)[[:space:]]*$")?) as $route
         | (capture("\\(home:[[:space:]]*(?<home>[^;)]*);")?) as $home
-        | {id:$id.id,home:($home.home // null),registered:true,
+        | {id:$id.id,
+           home:($route.home // $home.home // null),
+           summary:($route.summary // null),
+           scope:($route.scope // null),
+           projects:(($route.projects // "") | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))),
+           registered:true,
            registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
