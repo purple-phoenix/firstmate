@@ -9,8 +9,8 @@
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverables are a report at
-#   data/<task-id>/report.md and optional supporting artifacts under
-#   data/<task-id>/evidence/ (no branch, no push, no PR); the worktree is scratch.
+#   data/<task-id>/report.md plus optional structured notes and supporting artifacts
+#   under data/<task-id>/ (no branch, no push, no PR); the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -235,7 +235,7 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report and supporting artifacts under \`$DATA/$ID/evidence/\` are the only things that survive, so anything worth keeping must be in those paths.
+The report, structured notes, and supporting artifacts under \`$DATA/$ID/\` are the only things that survive, so anything worth keeping must be in that task directory.
 
 # Rules
 1. Never push to any remote and never open a PR.

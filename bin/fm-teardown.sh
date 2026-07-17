@@ -26,9 +26,9 @@
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md plus optional artifacts
-# under data/<task-id>/evidence/ are the work products. Teardown proceeds only
-# once the report exists and the shared
+# declared scratch and the report at data/<task-id>/report.md plus optional notes
+# and artifacts under data/<task-id>/ are the work products. Teardown proceeds
+# only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
