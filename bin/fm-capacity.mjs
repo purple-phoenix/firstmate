@@ -333,7 +333,7 @@ function bodyHasAcceptance(record) {
   if (!match) return false;
   const criteria = match[1].trim().replace(/^[*-]\s*/, "");
   if (criteria.length < 8) return false;
-  const placeholder = /^(?:(?:todo|tbd|fixme|wip|placeholder|draft|pending|forthcoming|undefined|unknown|undecided|unresolved)\b|(?:to be|will be|not yet)\s+(?:defined|determined|written|added|confirmed|finalized)\b)/i;
+  const placeholder = /^(?:(?:todo|tbd|fixme|wip|placeholder|draft|pending|forthcoming|undefined|unknown|undecided|unresolved|none|n\/?a|not applicable|not defined)\b|(?:to be|will be|not yet)\s+(?:defined|determined|written|added|confirmed|finalized)\b)/i;
   return !placeholder.test(criteria) && (criteria.match(/[a-z0-9][\w-]*/gi) || []).length >= 2;
 }
 
@@ -347,7 +347,7 @@ function definitionGaps(record, crossHome = false) {
   if (!record.kind || !["ship", "scout"].includes(record.kind)) gaps.push("deliverable kind missing");
   if (!record.title || record.title.trim().length < 12 || /^(todo|tbd|fix|investigate|work item)$/i.test(record.title.trim())) gaps.push("scope is insufficient");
   if (!bodyHasAcceptance(record)) gaps.push(crossHome && record.body_excerpt === undefined ? "acceptance evidence unavailable" : "acceptance criteria missing");
-  if (/\b(?:depends?|after|blocked)\b/i.test(`${record.title || ""} ${record.body_excerpt || ""}`) && !record.blocked_by) gaps.push("dependency definition missing");
+  if (/\b(?:depends?\s+on|blocked\s+by)\b|\bdependency\s*:/i.test(`${record.title || ""} ${record.body_excerpt || ""}`) && !record.blocked_by) gaps.push("dependency definition missing");
   return gaps;
 }
 
@@ -717,16 +717,23 @@ function classify(snapshot, environment) {
   }
 
   const secondmateLanded = snapshot.secondmate_landed;
-  const recentLandingsComplete = Boolean(
-    snapshot.backlog?.present === true
-    && Array.isArray(snapshot.backlog?.records)
-    && secondmateLanded
+  const mainLandingsComplete = snapshot.backlog?.present === true && Array.isArray(snapshot.backlog?.records);
+  const secondmateLandingsComplete = Boolean(
+    secondmateLanded
     && Array.isArray(secondmateLanded.records)
     && Array.isArray(secondmateLanded.truncated)
     && secondmateLanded.truncated.length === 0
     && Array.isArray(secondmateLanded.unreadable)
     && secondmateLanded.unreadable.length === 0
   );
+  const recentLandingsComplete = mainLandingsComplete && secondmateLandingsComplete;
+  const incompleteLandingSources = [
+    ...(mainLandingsComplete ? [] : ["Main backlog completion evidence"]),
+    ...(secondmateLandingsComplete ? [] : ["Bounded secondmate landing projections"]),
+  ];
+  const recentLandingsProvenance = recentLandingsComplete
+    ? "Main backlog completions and bounded secondmate landing projections are complete."
+    : `${incompleteLandingSources.join(" and ")} ${incompleteLandingSources.length === 1 ? "is" : "are"} incomplete; the displayed count is an observed lower bound.`;
   const landed = [
     ...mainRecords.filter((record) => record.state === "done" && record.structured && record.kind !== "captain").map((record) => ({ ...record, owner: "main" })),
     ...(secondmateLanded?.records || []).map((record) => ({ ...record, owner: record.home_id || "secondmate" })),
@@ -742,6 +749,15 @@ function classify(snapshot, environment) {
   const laneMismatch = !environment.dispatch.valid || availableLanes.length === 0 || !environment.backend.available;
   const approvalReadyCards = pipeline.pr_ci_approval.filter((card) => card.approval_ready === true);
   const captainApprovalCards = approvalReadyCards.filter((card) => card.captain_approval_required === true);
+  const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
+  const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
+    task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
+  ).length;
+  const githubBoundWork = (snapshot.tasks || []).some((task) =>
+    task.kind !== "secondmate"
+    && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
+    && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state)
+  );
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
@@ -756,7 +772,7 @@ function classify(snapshot, environment) {
     "Discuss or decide the listed holds, starting with the one that releases the most downstream work.",
     "Approve CAP-01: walk me through the open captain decisions in dependency order and route each answer through the normal decision lifecycle."
   );
-  if (environment.github_auth.status !== "available") recommend(
+  if (environment.github_auth.status !== "available" && githubBoundWork) recommend(
     "CAP-02", "credentials", 10,
     `GitHub authentication is ${environment.github_auth.status}: ${environment.github_auth.evidence}.`,
     "PR discovery, push, and CI handoff may stop even when implementation capacity exists.",
@@ -804,7 +820,6 @@ function classify(snapshot, environment) {
     "Prioritize genuinely parked validation gates, failing CI, or authority-approved merge and local landing actions over adding overlapping work.",
     "Handle CAP-07: inspect the validation and PR/CI gates and advance only actions already authorized by the normal delivery lifecycle."
   );
-  const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
   if (readinessComplete && ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && blockedRows.length === 0 && decisions.length === 0) recommend(
     "CAP-08", "demand shortage", 80,
     "No grounded ready work, active delivery, definition gaps, explicit gates, or captain decisions are visible in the bounded snapshot.",
@@ -814,7 +829,8 @@ function classify(snapshot, environment) {
     "Approve CAP-08: help me turn the next captain-grounded outcome into normal scoped backlog work; do not invent busywork."
   );
   const idleUsefulMates = mates.filter((mate) => mate.ready_in_scope > 0 && mate.active_children === 0 && mate.current !== "unknown");
-  if (laneMismatch || idleUsefulMates.length > 0) recommend(
+  const laneRepairRelevant = laneMismatch && (ready.some((candidate) => candidate.owner === "main") || ephemeralActiveCount > 0);
+  if (laneRepairRelevant || idleUsefulMates.length > 0) recommend(
     "CAP-09", "lane mismatch", 25,
     `${availableLanes.length} configured ephemeral dispatch lane${availableLanes.length === 1 ? " is" : "s are"} executable; backend ${environment.backend.name} is ${environment.backend.available ? "available" : "unavailable"}; ${idleUsefulMates.length} idle secondmate${idleUsefulMates.length === 1 ? " has" : "s have"} grounded ready in-scope work.`,
     "Correcting a real lane mismatch can release existing supply; idle secondmates with no matching work remain healthy.",
@@ -854,9 +870,7 @@ function classify(snapshot, environment) {
       secondmates: "Validated structured-home summaries with registered-table route metadata; fallback parent events never override readable home state.",
       decisions: "Structured backlog captain holds and keyed open-decision folds only; scout reports and visual artifacts are not scraped.",
       environment: "Authoritative backend functions, configured dispatch profiles, executable presence, and bootstrap-equivalent GitHub auth status; quota is not observed or guessed.",
-      recent_landings: recentLandingsComplete
-        ? "Main backlog completions and bounded secondmate landing projections are complete."
-        : "Recent secondmate landing projections are incomplete; the displayed count is an observed lower bound.",
+      recent_landings: recentLandingsProvenance,
     },
     measures: {
       useful_ready_work: ready.length,
@@ -895,7 +909,7 @@ function classify(snapshot, environment) {
       "Natural-language secondmate scopes and project names are withheld and not machine-guessed against main-home work.",
       "Backlog bodies are used only for bounded definition checks and are never rendered.",
       "Status tails, terminal chat, scout report contents, and visual artifacts are not consulted.",
-      ...(recentLandingsComplete ? [] : ["Recent secondmate landings are incomplete; the displayed count is an observed lower bound."]),
+      ...(recentLandingsComplete ? [] : [recentLandingsProvenance]),
     ],
   };
   return sanitizeDeep(model);

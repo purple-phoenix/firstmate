@@ -265,15 +265,20 @@ test_definition_and_time_markers_require_whole_evidence() {
       {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."},
       {"order":18,"state":"queued","structured":true,"id":"noun-criteria","title":"Protect failover data integrity","repo":"rho","kind":"ship","body_excerpt":"Acceptance criteria: zero data loss under failover."},
       {"order":19,"state":"queued","structured":true,"id":"modal-criteria","title":"Export reports as portable documents","repo":"sigma","kind":"ship","body_excerpt":"Acceptance criteria: users can export PDF."},
-      {"order":20,"state":"queued","structured":true,"id":"todo-with-verb","title":"Implement the unfinished test workflow","repo":"tau","kind":"ship","body_excerpt":"Acceptance criteria: TODO: tests pass eventually."}
+      {"order":20,"state":"queued","structured":true,"id":"todo-with-verb","title":"Implement the unfinished test workflow","repo":"tau","kind":"ship","body_excerpt":"Acceptance criteria: TODO: tests pass eventually."},
+      {"order":21,"state":"queued","structured":true,"id":"not-defined","title":"Implement the explicitly undefined workflow","repo":"upsilon","kind":"ship","body_excerpt":"Acceptance criteria: not defined."},
+      {"order":22,"state":"queued","structured":true,"id":"none-defined","title":"Implement the absent criteria workflow","repo":"phi","kind":"ship","body_excerpt":"Acceptance criteria: none provided."},
+      {"order":23,"state":"queued","structured":true,"id":"not-applicable","title":"Implement the inapplicable criteria workflow","repo":"chi","kind":"ship","body_excerpt":"Acceptance criteria: n/a pending review."},
+      {"order":24,"state":"queued","structured":true,"id":"after-login","title":"Load the dashboard after login","repo":"psi","kind":"ship","body_excerpt":"Acceptance criteria: the dashboard loads after login."}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "definition-marker capacity run failed"
   printf '%s' "$json" | jq -e '
-    .measures.useful_ready_work == 7
-    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 7
+    .measures.useful_ready_work == 8
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 10
+    and ([.readiness.definition_gaps[] | select(.gaps | index("dependency definition missing"))] | length) == 0
     and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
   ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
   pass "capacity requires explicit acceptance and whole-word time-gate markers"
@@ -381,7 +386,8 @@ test_recent_landings_report_incomplete_projection() {
     fail "missing-main-landings capacity run failed"
   printf '%s' "$json" | jq -e '
     .measures.recently_landed_complete == false
-    and (.provenance.recent_landings | contains("observed lower bound"))
+    and (.provenance.recent_landings | startswith("Main backlog completion evidence is incomplete"))
+    and (.provenance.recent_landings | contains("secondmate") | not)
   ' >/dev/null || fail "missing main landing source was presented as complete: $json"
   pass "recent landing counts expose bounded projection incompleteness"
 }
@@ -490,12 +496,32 @@ EOF
 EOF
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "empty capacity run failed"
   printf '%s' "$json" | jq -e '
-    .primary_bottleneck.id == "CAP-02"
+    .primary_bottleneck.id == "CAP-08"
     and (.recommendations | any(.id == "CAP-08" and .classification == "demand shortage"))
-    and (.recommendations | any(.id == "CAP-09" and .classification == "lane mismatch"))
+    and (.recommendations | any(.id == "CAP-02") | not)
+    and (.recommendations | any(.id == "CAP-09") | not)
+    and .lanes.ephemeral_workers.github_auth.status == "unavailable"
+    and .lanes.ephemeral_workers.backend.available == false
+  ' >/dev/null || fail "idle lane maintenance displaced true demand shortage: $json"
+
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"pr-bound","title":"Complete the PR-bound delivery","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
+    ]
+    | .tasks = [
+      {"id":"pr-bound","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"working","source":"pane","detail":"implementing"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"pr-bound","repo":"omega","kind":"ship"}}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "blocked-delivery lane capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .primary_bottleneck.id == "CAP-02"
+    and (.recommendations | any(.id == "CAP-02"))
+    and (.recommendations | any(.id == "CAP-09"))
     and (.recommendations[] | select(.id == "CAP-09") | .safety_authority_boundary | contains("Quota is explicitly unobserved"))
-  ' >/dev/null || fail "credentials, demand shortage, and lane mismatch were conflated: $json"
-  pass "capacity keeps credentials, lane mismatch, and true demand shortage distinct"
+  ' >/dev/null || fail "lane repairs were not recommended for grounded blocked delivery: $json"
+  pass "capacity recommends lane repairs only for grounded delivery demand"
 }
 
 test_html_is_private_escaped_accessible_and_responsive() {
