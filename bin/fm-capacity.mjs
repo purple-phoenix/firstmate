@@ -333,7 +333,9 @@ function bodyHasAcceptance(record) {
   if (!match) return false;
   const criteria = match[1].trim().replace(/^[*-]\s*/, "");
   if (criteria.length < 8) return false;
-  return !/^(?:tbd|todo|none|n\/a|na|not applicable|not defined|undefined|pending|to be determined)(?:\b|[.!,:;\-])/i.test(criteria);
+  const outcomeVerb = /\b(?:pass(?:es)?|rejects?|prevents?|preserves?|supports?|returns?|produces?|renders?|completes?|succeeds?|fails?|match(?:es)?|includes?|excludes?|allows?|requires?|contains?|responds?|loads?|builds?|runs?|works?|reports?|opens?|lands?|merges?|publish(?:es)?|ships?|exists?|covers?)\b/i;
+  const outcomeState = /\b(?:is|are|remains?|stays?|equals?)\s+(?!tbd\b|todo\b|pending\b|forthcoming\b|undefined\b|unknown\b|undecided\b|unresolved\b|to\s+be\b)(?:not\s+)?[a-z0-9][\w-]*/i;
+  return outcomeVerb.test(criteria) || outcomeState.test(criteria);
 }
 
 function isSuperseded(record) {
@@ -352,10 +354,33 @@ function definitionGaps(record, crossHome = false) {
 
 function futureTimeGate(record, now) {
   const text = `${record.title || ""} ${record.blocked_reason || ""} ${record.body_excerpt || ""}`;
-  const match = text.match(/\b(?:after|until|not before|on)\s+(20\d{2}-\d{2}-\d{2})/i);
+  const match = text.match(/\b(?:after|until|not before)\s+(20\d{2}-\d{2}-\d{2})/i);
   if (!match) return null;
   const gate = Date.parse(`${match[1]}T00:00:00Z`);
   return Number.isFinite(gate) && gate > now ? match[1] : null;
+}
+
+function priorityRank(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (/^p?\d+$/.test(normalized)) return Number(normalized.replace(/^p/, ""));
+  return {
+    critical: 0,
+    urgent: 0,
+    highest: 0,
+    high: 1,
+    medium: 2,
+    normal: 2,
+    low: 3,
+    lowest: 4,
+  }[normalized] ?? Number.MAX_SAFE_INTEGER;
+}
+
+function candidateOrder(a, b) {
+  const priorityDifference = priorityRank(a.record.priority) - priorityRank(b.record.priority);
+  if (priorityDifference !== 0) return priorityDifference;
+  const aOrder = Number.isInteger(a.record.order) ? a.record.order : Number.MAX_SAFE_INTEGER;
+  const bOrder = Number.isInteger(b.record.order) ? b.record.order : Number.MAX_SAFE_INTEGER;
+  return aOrder - bOrder || `${a.owner}/${a.record.id}`.localeCompare(`${b.owner}/${b.record.id}`);
 }
 
 function taskStage(task) {
@@ -612,10 +637,11 @@ function classify(snapshot, environment) {
     }
     const activeCount = mate.active_children?.length || 0;
     const mateId = opaqueRef("home", mate.id);
-    mateAvailability.set(mateId, !mateIncomplete);
+    const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
+    mateAvailability.set(mateId, !mateIncomplete && scopeAvailable);
     mates.push({
       id: mateId,
-      scope: route.scope ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
+      scope: scopeAvailable ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
       projects: route.projects?.length ? [`${route.projects.length} registered project route(s); names withheld`] : [],
       current: safeState(mate.current?.state),
       provenance: mate.provenance?.selected === "structured-home" ? "validated structured-home summary" : "unavailable",
@@ -627,7 +653,7 @@ function classify(snapshot, environment) {
 
   const chosenProjects = new Set(activeProjects);
   const ready = [];
-  candidates.sort((a, b) => `${a.owner}/${a.record.id}`.localeCompare(`${b.owner}/${b.record.id}`));
+  candidates.sort(candidateOrder);
   for (const candidate of candidates) {
     const projectKey = candidate.record.repo || null;
     const activeConflict = projectKey && activeProjects.has(projectKey);
@@ -664,9 +690,18 @@ function classify(snapshot, environment) {
           : "healthy idle - no grounded ready in-scope work";
   }
 
+  const secondmateLanded = snapshot.secondmate_landed;
+  const recentLandingsComplete = Boolean(
+    secondmateLanded
+    && Array.isArray(secondmateLanded.records)
+    && Array.isArray(secondmateLanded.truncated)
+    && secondmateLanded.truncated.length === 0
+    && Array.isArray(secondmateLanded.unreadable)
+    && secondmateLanded.unreadable.length === 0
+  );
   const landed = [
     ...mainRecords.filter((record) => record.state === "done" && record.structured && record.kind !== "captain").map((record) => ({ ...record, owner: "main" })),
-    ...(snapshot.secondmate_landed?.records || []).map((record) => ({ ...record, owner: record.home_id || "secondmate" })),
+    ...(secondmateLanded?.records || []).map((record) => ({ ...record, owner: record.home_id || "secondmate" })),
   ].sort((a, b) => `${b.completion?.date || ""}/${b.id}`.localeCompare(`${a.completion?.date || ""}/${a.id}`)).slice(0, 12);
   for (const record of landed) {
     const completionDate = /^\d{4}-\d{2}-\d{2}$/.test(record.completion?.date || "") ? record.completion.date : "recent completion";
@@ -791,6 +826,9 @@ function classify(snapshot, environment) {
       secondmates: "Validated structured-home summaries with registered-table route metadata; fallback parent events never override readable home state.",
       decisions: "Structured backlog captain holds and keyed open-decision folds only; scout reports and visual artifacts are not scraped.",
       environment: "Authoritative backend functions, configured dispatch profiles, executable presence, and bootstrap-equivalent GitHub auth status; quota is not observed or guessed.",
+      recent_landings: recentLandingsComplete
+        ? "Main backlog completions and bounded secondmate landing projections are complete."
+        : "Recent secondmate landing projections are incomplete; the displayed count is an observed lower bound.",
     },
     measures: {
       useful_ready_work: ready.length,
@@ -799,6 +837,7 @@ function classify(snapshot, environment) {
       waiting_work: pipeline.queued.length + pipeline.blocked.length + pipeline.pr_ci_approval.length,
       open_captain_actions: decisions.length + captainApprovalCards.length,
       recently_landed: pipeline.recently_landed.length,
+      recently_landed_complete: recentLandingsComplete,
     },
     primary_bottleneck: { id: primary.id, classification: primary.classification, evidence: primary.evidence },
     pipeline,
@@ -828,6 +867,7 @@ function classify(snapshot, environment) {
       "Natural-language secondmate scopes and project names are withheld and not machine-guessed against main-home work.",
       "Backlog bodies are used only for bounded definition checks and are never rendered.",
       "Status tails, terminal chat, scout report contents, and visual artifacts are not consulted.",
+      ...(recentLandingsComplete ? [] : ["Recent secondmate landings are incomplete; the displayed count is an observed lower bound."]),
     ],
   };
   return sanitizeDeep(model);
@@ -979,7 +1019,7 @@ function renderHtml(model) {
       <div class="section-title"><h2>Definition health and landed context</h2><p>Nominal queue depth is separated from dispatch-grade supply, with recent outcomes retained for context.</p></div>
       <section class="health-grid">
         <div class="list-panel"><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
-        <div class="list-panel"><h3>Recently landed</h3><ul class="clean-list">${landed}</ul></div>
+        <div class="list-panel"><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
       </section>
     </main>
     <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>

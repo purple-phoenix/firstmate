@@ -59,7 +59,7 @@ EOF
     "shown": 3,
     "truncated": 0
   },
-  "secondmate_landed": {"records":[],"truncated":[],"unreadable":["$home/unknown"]}
+  "secondmate_landed": {"records":[],"truncated":[],"unreadable":[]}
 }
 EOF
   cat > "$environment" <<'EOF'
@@ -259,18 +259,89 @@ test_definition_and_time_markers_require_whole_evidence() {
       {"order":11,"state":"queued","structured":true,"id":"version-date","title":"Support Version 2026-08-01 compatibility","repo":"theta","kind":"ship","body_excerpt":"Acceptance criteria: compatibility remains intact."},
       {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."},
       {"order":13,"state":"queued","structured":true,"id":"placeholder-criteria","title":"Implement the placeholder-defined workflow","repo":"kappa","kind":"ship","body_excerpt":"Acceptance criteria: TBD"},
-      {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","kind":"ship","body_excerpt":"No acceptance criteria defined"}
+      {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","kind":"ship","body_excerpt":"No acceptance criteria defined"},
+      {"order":15,"state":"queued","structured":true,"id":"defined-later","title":"Implement the later-defined workflow","repo":"nu","kind":"ship","body_excerpt":"Acceptance criteria: to be defined"},
+      {"order":16,"state":"queued","structured":true,"id":"forthcoming-criteria","title":"Implement the forthcoming workflow","repo":"omicron","kind":"ship","body_excerpt":"Acceptance criteria: forthcoming"},
+      {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "definition-marker capacity run failed"
   printf '%s' "$json" | jq -e '
-    .measures.useful_ready_work == 4
-    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 4
+    .measures.useful_ready_work == 5
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 6
     and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
   ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
   pass "capacity requires explicit acceptance and whole-word time-gate markers"
+}
+
+test_secondmate_scope_is_required_for_lane_readiness() {
+  local home="$TMP_ROOT/scope-home" snapshot="$TMP_ROOT/scope-snapshot.json" environment="$TMP_ROOT/scope-environment.json" output="$TMP_ROOT/scope.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.registry.records[0].scope = null' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "missing-scope capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.lanes.persistent_secondmates | any(
+      .scope == "Registered routing scope unavailable"
+      and .ready_in_scope == 0
+      and .utilization == "unavailable"
+    ))
+    and (.recommendations | any(.id == "CAP-09") | not)
+  ' >/dev/null || fail "secondmate work was called in-scope without registered scope evidence: $json"
+  pass "secondmate lane readiness requires registered scope provenance"
+}
+
+test_ready_selection_preserves_priority_and_order() {
+  local home="$TMP_ROOT/order-home" snapshot="$TMP_ROOT/order-snapshot.json" environment="$TMP_ROOT/order-environment.json" output="$TMP_ROOT/order.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"priority":"low","state":"queued","structured":true,"id":"lexically-first","title":"Ship the lower priority option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: lower option passes."},
+      {"order":2,"priority":"high","state":"queued","structured":true,"id":"lexically-second","title":"Ship the higher priority option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: higher option passes."}
+    ]
+    | .tasks = []
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "priority selection capacity run failed"
+  printf '%s' "$json" | jq -e '.pipeline.ready[0].id == "item-02" and .pipeline.queued[0].id == "item-01"' >/dev/null ||
+    fail "higher-priority work did not win conservative serialization: $json"
+
+  jq '
+    .backlog.records[0].priority = null
+    | .backlog.records[0].order = 2
+    | .backlog.records[1].priority = null
+    | .backlog.records[1].order = 1
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "backlog-order selection capacity run failed"
+  printf '%s' "$json" | jq -e '.pipeline.ready[0].id == "item-02" and .pipeline.queued[0].id == "item-01"' >/dev/null ||
+    fail "earlier authoritative backlog order did not win conservative serialization: $json"
+  pass "ready serialization preserves authoritative priority and backlog order"
+}
+
+test_recent_landings_report_incomplete_projection() {
+  local home="$TMP_ROOT/landings-home" snapshot="$TMP_ROOT/landings-snapshot.json" environment="$TMP_ROOT/landings-environment.json" output="$TMP_ROOT/landings.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_landed.truncated = ["design"] | .secondmate_landed.unreadable = ["quiet"]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "incomplete-landings capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.recently_landed_complete == false
+    and (.provenance.recent_landings | contains("observed lower bound"))
+    and (.omissions | any(contains("observed lower bound")))
+  ' >/dev/null || fail "incomplete recent landings were presented as complete: $json"
+  assert_grep 'Recently landed (observed; incomplete)' "$output" "dashboard did not qualify incomplete recent landings"
+  pass "recent landing counts expose bounded projection incompleteness"
 }
 
 test_secondmate_captain_holds_are_pipeline_waiting_work() {
@@ -459,6 +530,9 @@ test_secondmate_readiness_uses_final_serialized_supply
 test_incomplete_sources_fail_closed
 test_unresolved_active_projects_fail_closed
 test_definition_and_time_markers_require_whole_evidence
+test_secondmate_scope_is_required_for_lane_readiness
+test_ready_selection_preserves_priority_and_order
+test_recent_landings_report_incomplete_projection
 test_secondmate_captain_holds_are_pipeline_waiting_work
 test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct
