@@ -152,6 +152,7 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
     and (.readiness.conservative_overlap_gates | length) == 4
     and (.pipeline.blocked | length) == 5
     and (.aging | any(.state == "held" and .age_days == 16))
+    and (.aging | any(.state == "blocked" and .age_days == 7))
     and .readiness.queued_considered == 9
   ' >/dev/null || fail "cross-home overlap, held work, supersession, or active flow count is wrong: $json"
   pass "capacity serializes projects fleet-wide and retains held secondmate flow without superseded work"
@@ -216,6 +217,60 @@ test_incomplete_sources_fail_closed() {
   pass "capacity suppresses readiness and demand claims for incomplete bounded sources"
 }
 
+test_unresolved_active_projects_fail_closed() {
+  local home="$TMP_ROOT/project-gap-home" snapshot="$TMP_ROOT/project-gap-snapshot.json" environment="$TMP_ROOT/project-gap-environment.json" output="$TMP_ROOT/project-gap.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records[0].repo = null
+    | .tasks[0].project = null
+    | .tasks[0].backlog.repo = null
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unresolved main project capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .readiness.available == false
+    and .measures.useful_ready_work == 0
+    and (.recommendations | any(.id == "CAP-03"))
+    and (.recommendations | any(.id == "CAP-06") | not)
+  ' >/dev/null || fail "unresolved main project did not suppress readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmate_current.records[0].active_children = [
+      {"id":"child-without-project","kind":"ship","state":"working","doing":"working"}
+    ]
+    | .secondmate_current.records[0].counts.active_children = 1
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unresolved secondmate project capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false and .measures.useful_ready_work == 0' >/dev/null ||
+    fail "unresolved secondmate child project did not suppress readiness: $json"
+  pass "capacity fails closed when active project provenance is unresolved"
+}
+
+test_definition_and_time_markers_require_whole_evidence() {
+  local home="$TMP_ROOT/markers-home" snapshot="$TMP_ROOT/markers-snapshot.json" environment="$TMP_ROOT/markers-environment.json" output="$TMP_ROOT/markers.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records += [
+      {"order":10,"state":"queued","structured":true,"id":"latest-only","title":"Use the latest version safely","repo":"eta","kind":"ship","body_excerpt":"Use the latest version with compatibility checks."},
+      {"order":11,"state":"queued","structured":true,"id":"version-date","title":"Support Version 2026-08-01 compatibility","repo":"theta","kind":"ship","body_excerpt":"Acceptance criteria: compatibility remains intact."},
+      {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "definition-marker capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.useful_ready_work == 4
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 2
+    and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
+  ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
+  pass "capacity requires explicit acceptance and whole-word time-gate markers"
+}
+
 test_secondmate_captain_holds_are_pipeline_waiting_work() {
   local home="$TMP_ROOT/captain-hold-home" snapshot="$TMP_ROOT/captain-hold-snapshot.json" environment="$TMP_ROOT/captain-hold-environment.json" output="$TMP_ROOT/captain-hold.html" json
   make_fixture "$home" "$snapshot" "$environment"
@@ -267,6 +322,33 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
   case "$json" in
     *"Jane Doe"*) fail "privacy-safe approval signal leaked raw status detail" ;;
   esac
+
+  jq '
+    .tasks[0].mode = "direct-PR"
+    | .tasks[0].current_state.detail = "PR opened"
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "direct-PR approval capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.pr_ci_approval | any(.approval_ready == true))
+    and .measures.open_captain_actions == 1
+    and (.recommendations | any(.id == "CAP-07"))
+  ' >/dev/null || fail "direct-PR terminal readiness was not an approval signal: $json"
+
+  jq '
+    .tasks[0].mode = "local-only"
+    | .tasks[0].pr.url = null
+    | .tasks[0].current_state.detail = "ready in branch"
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "local-only approval capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.pr_ci_approval | any(.approval_ready == true))
+    and .measures.open_captain_actions == 1
+    and (.recommendations | any(.id == "CAP-07"))
+  ' >/dev/null || fail "local-only terminal readiness was not an approval signal: $json"
   pass "approval readiness and supported max effort survive safe normalization"
 }
 
@@ -361,6 +443,8 @@ test_classification_priority_overlap_and_idle_semantics
 test_cross_home_overlap_holds_supersession_and_active_count
 test_secondmate_readiness_uses_final_serialized_supply
 test_incomplete_sources_fail_closed
+test_unresolved_active_projects_fail_closed
+test_definition_and_time_markers_require_whole_evidence
 test_secondmate_captain_holds_are_pipeline_waiting_work
 test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct

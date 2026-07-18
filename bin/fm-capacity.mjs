@@ -321,11 +321,11 @@ function dateAgeDays(value, now) {
 }
 
 function bodyHasAcceptance(record) {
-  return /acceptance|acceptance criteria|done when|definition of done|success criteria|verify|test/i.test(record.body_excerpt || "");
+  return /\b(?:acceptance criteria|done when|definition of done|success criteria)\b|\b(?:acceptance|verify|verification|tests?)\s*:/i.test(record.body_excerpt || "");
 }
 
 function isSuperseded(record) {
-  return /SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED/i.test(record.body_excerpt || "");
+  return /\b(?:SUPERSEDED|DEFERRED)\b|\bNOT(?:\s+|-)REQUIRED\b/i.test(record.body_excerpt || "");
 }
 
 function definitionGaps(record, crossHome = false) {
@@ -334,13 +334,13 @@ function definitionGaps(record, crossHome = false) {
   if (!record.kind || !["ship", "scout"].includes(record.kind)) gaps.push("deliverable kind missing");
   if (!record.title || record.title.trim().length < 12 || /^(todo|tbd|fix|investigate|work item)$/i.test(record.title.trim())) gaps.push("scope is insufficient");
   if (!bodyHasAcceptance(record)) gaps.push(crossHome && record.body_excerpt === undefined ? "acceptance evidence unavailable" : "acceptance criteria missing");
-  if (/depends|after|blocked/i.test(`${record.title || ""} ${record.body_excerpt || ""}`) && !record.blocked_by) gaps.push("dependency definition missing");
+  if (/\b(?:depends?|after|blocked)\b/i.test(`${record.title || ""} ${record.body_excerpt || ""}`) && !record.blocked_by) gaps.push("dependency definition missing");
   return gaps;
 }
 
 function futureTimeGate(record, now) {
   const text = `${record.title || ""} ${record.blocked_reason || ""} ${record.body_excerpt || ""}`;
-  const match = text.match(/(?:after|until|not before|on)\s+(20\d{2}-\d{2}-\d{2})/i);
+  const match = text.match(/\b(?:after|until|not before|on)\s+(20\d{2}-\d{2}-\d{2})/i);
   if (!match) return null;
   const gate = Date.parse(`${match[1]}T00:00:00Z`);
   return Number.isFinite(gate) && gate > now ? match[1] : null;
@@ -359,9 +359,12 @@ function taskStage(task) {
 }
 
 function taskApprovalReady(task) {
-  if (!task.pr?.url) return false;
+  if (task.current_state?.state !== "done") return false;
   const detail = task.current_state?.detail || "";
-  return /\b(?:checks?|ci)(?:\s+(?:are|is))?\s+green\b|\bready\s+for\s+(?:approval|merge)\b|\bawaiting\s+(?:captain\s+)?approval\b/i.test(detail);
+  if (task.mode === "direct-PR") return Boolean(task.pr?.url);
+  if (task.mode === "local-only") return /\bready\s+in\s+branch\b/i.test(detail);
+  return Boolean(task.pr?.url)
+    && /\b(?:checks?|ci)(?:\s+(?:are|is))?\s+green\b|\bready\s+for\s+(?:approval|merge)\b|\bawaiting\s+(?:captain\s+)?approval\b/i.test(detail);
 }
 
 function cardFromBacklog(record, owner, stage, reason = null) {
@@ -417,6 +420,14 @@ function classify(snapshot, environment) {
   if (registry?.available === false || registry?.complete === false) {
     markUnavailable("secondmate-registry", "main", "registry projection incomplete");
   }
+  for (const record of mainRecords.filter((item) => item.state === "in_flight" && item.structured)) {
+    const task = taskById.get(record.id);
+    const repo = record.repo || task?.project || null;
+    if (repo) activeProjects.add(repo);
+    if (!task || !repo) {
+      markUnavailable(itemRef("main", record.id), "main", "in-flight work lacks current task or project provenance");
+    }
+  }
 
   for (const task of snapshot.tasks || []) {
     if (task.kind === "secondmate") continue;
@@ -424,13 +435,17 @@ function classify(snapshot, environment) {
     const stage = taskStage(task);
     const ageDays = dateAgeDays(backlog.since, now);
     const taskRepo = backlog.repo || task.project || null;
-    if (taskRepo) activeProjects.add(taskRepo);
+    if (taskRepo) {
+      activeProjects.add(taskRepo);
+    } else {
+      markUnavailable(itemRef("main", task.id), "main", "in-flight work lacks project provenance");
+    }
     const open = task.hints?.open_decisions || [];
     for (const decision of open) decisions.push({ owner: "main", task: itemRef("main", task.id), key: itemRef("decision", decision.key || task.id) });
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
     }
-    if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing"].includes(stage)) {
+    if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "blocked"].includes(stage)) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
     pipeline[stage].push({
@@ -512,7 +527,13 @@ function classify(snapshot, environment) {
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       heldIds.add(hold.id);
-      if (hold.source === "child-state" && hold.repo) activeProjects.add(hold.repo);
+      if (hold.source === "child-state") {
+        if (hold.repo) {
+          activeProjects.add(hold.repo);
+        } else {
+          markUnavailable(itemRef(mate.id, hold.id), ownerRef(mate.id), "in-flight held work lacks project provenance");
+        }
+      }
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
       pipeline.blocked.push(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"));
@@ -523,7 +544,11 @@ function classify(snapshot, environment) {
     for (const child of mate.active_children || []) {
       const detail = child.doing || child.state || "working";
       const stage = /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
-      if (child.repo) activeProjects.add(child.repo);
+      if (child.repo) {
+        activeProjects.add(child.repo);
+      } else {
+        markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "active child work lacks project provenance");
+      }
       const ageDays = dateAgeDays(child.since, now);
       pipeline[stage].push({
         id: itemRef(mate.id, child.id),
