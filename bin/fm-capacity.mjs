@@ -27,6 +27,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -240,11 +241,76 @@ function liveEnvironment(snapshot) {
 }
 
 function normalizeEnvironment(environment) {
+  const backendName = typeof environment.backend?.name === "string" && /^[a-z0-9-]+$/.test(environment.backend.name)
+    ? environment.backend.name
+    : "unknown";
+  const authStatus = ["available", "unavailable", "unknown"].includes(environment.github_auth?.status)
+    ? environment.github_auth.status
+    : "unknown";
+  const dispatchValid = environment.dispatch?.valid === true;
   return {
-    backend: environment.backend || { name: "unknown", available: false, evidence: "not supplied" },
-    github_auth: environment.github_auth || { status: "unknown", evidence: "not supplied" },
-    dispatch: environment.dispatch || { config_present: false, valid: false, reason: "not supplied", lanes: [] },
+    backend: {
+      name: backendName,
+      available: environment.backend?.available === true,
+      evidence: environment.backend?.available === true ? "required runtime surface available" : "required runtime surface unavailable",
+      owner: "bin/fm-backend.sh",
+    },
+    github_auth: {
+      status: authStatus,
+      evidence: authStatus === "available" ? "credential check passed" : "credential check unavailable",
+      owner: "bin/fm-bootstrap.sh",
+    },
+    dispatch: {
+      config_present: environment.dispatch?.config_present === true,
+      valid: dispatchValid,
+      reason: dispatchValid ? null : "dispatch configuration unavailable",
+      lanes: (environment.dispatch?.lanes || []).map((lane) => ({
+        harness: VERIFIED_HARNESSES.has(lane.harness) ? lane.harness : "unknown",
+        model: null,
+        effort: ["low", "medium", "high", "xhigh"].includes(lane.effort) ? lane.effort : null,
+        when: lane.when === "default" ? "configured default" : "configured dispatch rule",
+        available: lane.available === true,
+        availability_evidence: lane.available === true ? "configured executable present" : "configured executable unavailable",
+        quota: "not observed - capacity never guesses quota",
+      })),
+    },
   };
+}
+
+const opaqueRefs = new Map();
+
+function opaqueRef(kind, value) {
+  const key = `${kind}\0${String(value ?? "")}`;
+  if (!opaqueRefs.has(key)) {
+    const count = [...opaqueRefs.keys()].filter((entry) => entry.startsWith(`${kind}\0`)).length + 1;
+    opaqueRefs.set(key, `${kind}-${String(count).padStart(2, "0")}`);
+  }
+  return opaqueRefs.get(key);
+}
+
+function itemRef(owner, id) {
+  return opaqueRef("item", `${owner}/${id}`);
+}
+
+function ownerRef(owner) {
+  if (owner === "main" || owner === "ephemeral worker") return owner;
+  return `persistent ${opaqueRef("home", String(owner).replace(/^secondmate\s+/, ""))}`;
+}
+
+function projectRef(repo) {
+  return repo ? opaqueRef("project", repo) : null;
+}
+
+function safeState(state) {
+  return ["working", "parked", "blocked", "paused", "done", "failed", "unknown", "no_active_work", "active_child_work", "captain_decision", "externally_held"].includes(state)
+    ? state
+    : "unknown";
+}
+
+function safeSource(source) {
+  return ["pane", "run-step", "status-fold", "backlog", "child-state", "structured-home"].includes(source)
+    ? source
+    : "authoritative current-state owner";
 }
 
 function dateAgeDays(value, now) {
@@ -294,19 +360,19 @@ function taskStage(task) {
 
 function cardFromBacklog(record, owner, stage, reason = null) {
   return {
-    id: record.id || "unstructured",
-    title: record.title || record.raw || "Unstructured backlog entry",
-    owner,
-    repo: record.repo || null,
-    kind: record.kind || null,
+    id: itemRef(owner, record.id || "unstructured"),
+    title: `${STAGE_LABELS[stage]} work item`,
+    owner: ownerRef(owner),
+    repo: projectRef(record.repo),
+    kind: ["ship", "scout", "captain"].includes(record.kind) ? record.kind : null,
     stage,
-    reason,
-    artifact: record.pr_url || record.report_path || null,
-    provenance: owner === "main" ? "main structured backlog" : `${owner} structured-home backlog`,
+    reason: reason || "Structured operational detail withheld",
+    artifact: null,
+    provenance: owner === "main" ? "main structured backlog" : "validated structured-home backlog",
   };
 }
 
-function classify(snapshot, environment, dashboardPath) {
+function classify(snapshot, environment) {
   if (snapshot.schema !== "fm-fleet-snapshot.v1") throw new Error(`unsupported snapshot schema: ${snapshot.schema || "missing"}`);
   const now = Date.parse(snapshot.generated) || Date.now();
   const pipeline = Object.fromEntries(STAGES.map((stage) => [stage, []]));
@@ -321,31 +387,55 @@ function classify(snapshot, environment, dashboardPath) {
   const overlapRows = [];
   const mates = [];
   let secondmateQueuedConsidered = 0;
+  let readinessComplete = true;
+
+  function markUnavailable(id, owner, evidence) {
+    unavailable.push({ id, owner, evidence });
+    readinessComplete = false;
+  }
+
+  if (snapshot.backlog?.present !== true || !Array.isArray(snapshot.backlog?.records)) {
+    markUnavailable("main-backlog", "main", "main structured backlog unavailable");
+  }
+  if (!Array.isArray(snapshot.tasks)) {
+    markUnavailable("main-tasks", "main", "main current-task inventory unavailable");
+  }
+  if (!snapshot.secondmate_current
+    || !Array.isArray(snapshot.secondmate_current.records)
+    || !Number.isInteger(snapshot.secondmate_current.truncated)
+    || snapshot.secondmate_current.truncated > 0) {
+    markUnavailable("secondmate-inventory", "main", "bounded secondmate inventory incomplete");
+  }
+  const registry = snapshot.secondmate_current?.registry;
+  if (registry?.available === false || registry?.complete === false) {
+    markUnavailable("secondmate-registry", "main", "registry projection incomplete");
+  }
 
   for (const task of snapshot.tasks || []) {
     if (task.kind === "secondmate") continue;
     const backlog = task.backlog || mainRecords.find((record) => record.structured && record.id === task.id) || {};
     const stage = taskStage(task);
     const ageDays = dateAgeDays(backlog.since, now);
-    if (backlog.repo && ["building", "validating_fixing", "pr_ci_approval"].includes(stage)) activeProjects.add(backlog.repo);
+    const taskRepo = backlog.repo || task.project || null;
+    if (taskRepo && ["building", "validating_fixing", "pr_ci_approval"].includes(stage)) activeProjects.add(taskRepo);
     const open = task.hints?.open_decisions || [];
-    for (const decision of open) decisions.push({ owner: "main", task: task.id, key: decision.key || task.id, summary: decision.summary || "Captain decision required" });
+    for (const decision of open) decisions.push({ owner: "main", task: itemRef("main", task.id), key: itemRef("decision", decision.key || task.id) });
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
-      unavailable.push({ id: task.id, owner: "main", evidence: task.current_state?.detail || "current state unavailable" });
+      markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
     }
     if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing"].includes(stage)) {
-      aging.push({ id: task.id, owner: "main", age_days: ageDays, state: task.current_state?.state, evidence: `backlog since ${backlog.since}; current source ${task.current_state?.source || "unknown"}` });
+      aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
     pipeline[stage].push({
-      id: task.id,
-      title: backlog.title || task.id,
+      id: itemRef("main", task.id),
+      title: `${STAGE_LABELS[stage]} work item`,
       owner: "ephemeral worker",
-      repo: backlog.repo || task.project || null,
-      kind: task.kind,
+      repo: projectRef(taskRepo),
+      kind: ["ship", "scout"].includes(task.kind) ? task.kind : null,
       stage,
-      reason: task.current_state?.detail || task.current_state?.state,
-      artifact: task.pr?.url || (task.paths?.report?.present ? task.paths.report.path : null),
-      provenance: `current state from ${task.current_state?.source || "unknown"}`,
+      reason: `Authoritative current state: ${safeState(task.current_state?.state)}`,
+      artifact: null,
+      provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
     });
   }
@@ -354,37 +444,36 @@ function classify(snapshot, environment, dashboardPath) {
   const candidates = [];
   for (const record of queue) {
     if (!record.structured) {
-      readinessRows.push({ id: "unstructured", owner: "main", status: "definition_gap", gaps: ["unstructured backlog row"] });
+      readinessRows.push({ id: itemRef("main", "unstructured"), owner: "main", status: "definition_gap", gaps: ["unstructured backlog row"] });
       pipeline.queued.push(cardFromBacklog(record, "main", "queued", "Unstructured backlog entry"));
       continue;
     }
     if (isSuperseded(record)) continue;
     if (record.kind === "captain" && record.hold_kind === "captain") {
-      decisions.push({ owner: "main", task: record.id, key: record.id, summary: `${record.title}: ${record.hold_reason || "captain hold"}` });
-      blockedRows.push({ id: record.id, owner: "main", reason: record.hold_reason || "captain hold" });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", record.hold_reason || "Captain hold"));
+      decisions.push({ owner: "main", task: itemRef("main", record.id), key: itemRef("decision", record.id) });
+      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
+      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Captain hold"));
       continue;
     }
     if (record.blocked_by || record.hold_reason) {
-      const reason = record.blocked_reason || record.hold_reason || `depends on ${record.blocked_by}`;
-      blockedRows.push({ id: record.id, owner: "main", reason });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", reason));
+      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "dependency or structured hold" });
+      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Dependency or structured hold"));
       continue;
     }
     const timeGate = futureTimeGate(record, now);
     if (timeGate) {
       const reason = `time gate until ${timeGate}`;
-      blockedRows.push({ id: record.id, owner: "main", reason });
+      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
       pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", reason));
       continue;
     }
     const gaps = definitionGaps(record);
     if (gaps.length > 0) {
-      readinessRows.push({ id: record.id, owner: "main", status: "definition_gap", gaps });
+      readinessRows.push({ id: itemRef("main", record.id), owner: "main", status: "definition_gap", gaps });
       pipeline.queued.push(cardFromBacklog(record, "main", "queued", gaps.join("; ")));
     } else {
       candidates.push({ record, owner: "main" });
-      readinessRows.push({ id: record.id, owner: "main", status: "grounded_candidate", gaps: [] });
+      readinessRows.push({ id: itemRef("main", record.id), owner: "main", status: "grounded_candidate", gaps: [] });
     }
   }
 
@@ -392,61 +481,90 @@ function classify(snapshot, environment, dashboardPath) {
     const route = (snapshot.secondmate_current?.registry?.records || []).find((record) => record.id === mate.id) || {};
     const readyOwn = [];
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
-    if (mateUnknown) unavailable.push({ id: mate.id, owner: "persistent secondmate", evidence: mate.current?.reason || "structured home unavailable" });
+    const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
+    const mateIncomplete = mateUnknown
+      || !Array.isArray(mate.active_children)
+      || !Array.isArray(mate.holds)
+      || !Array.isArray(mate.queued)
+      || omittedSurfaces.has("active_children")
+      || omittedSurfaces.has("queued")
+      || !Number.isInteger(mate.counts?.active_children)
+      || !Number.isInteger(mate.counts?.holds)
+      || !Number.isInteger(mate.counts?.queued)
+      || mate.counts.active_children !== (mate.active_children || []).length
+      || mate.counts.holds !== (mate.holds || []).length
+      || mate.counts.queued !== (mate.queued || []).length;
+    if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
     for (const decision of mate.decisions_open || []) {
-      decisions.push({ owner: mate.id, task: decision.id || mate.id, key: decision.key || decision.id || mate.id, summary: decision.summary || decision.reason || "Captain decision required" });
+      decisions.push({ owner: ownerRef(mate.id), task: itemRef(mate.id, decision.id || mate.id), key: itemRef("decision", decision.key || decision.id || mate.id) });
+    }
+    const heldIds = new Set();
+    for (const hold of mate.holds || []) {
+      heldIds.add(hold.id);
+      const ageDays = dateAgeDays(hold.since, now);
+      blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
+      pipeline.blocked.push(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"));
+      if (ageDays !== null && ageDays >= 7) {
+        aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
+      }
     }
     for (const child of mate.active_children || []) {
       const detail = child.doing || child.state || "working";
       const stage = /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
+      if (child.repo) activeProjects.add(child.repo);
+      const ageDays = dateAgeDays(child.since, now);
       pipeline[stage].push({
-        id: `${mate.id}/${child.id}`,
-        title: child.id,
-        owner: `secondmate ${mate.id}`,
-        repo: null,
-        kind: child.kind || "ship",
+        id: itemRef(mate.id, child.id),
+        title: `${STAGE_LABELS[stage]} work item`,
+        owner: ownerRef(mate.id),
+        repo: projectRef(child.repo),
+        kind: ["ship", "scout"].includes(child.kind) ? child.kind : "ship",
         stage,
-        reason: detail,
+        reason: `Authoritative current state: ${safeState(child.state || "working")}`,
         artifact: null,
-        provenance: `structured home ${mate.home}`,
+        provenance: "validated structured-home summary",
+        age_days: ageDays,
       });
+      if (ageDays !== null && ageDays >= 7) {
+        aging.push({ id: itemRef(mate.id, child.id), owner: ownerRef(mate.id), age_days: ageDays, state: safeState(child.state), evidence: "structured backlog age; structured-home current state" });
+      }
     }
     for (const record of mate.queued || []) {
+      if (isSuperseded(record) || heldIds.has(record.id)) continue;
       if (record.kind === "captain" && record.hold_kind === "captain") continue;
       secondmateQueuedConsidered += 1;
       if (record.blocked_by || record.hold_reason) {
-        const reason = record.blocked_reason || record.hold_reason || `depends on ${record.blocked_by}`;
-        blockedRows.push({ id: `${mate.id}/${record.id}`, owner: mate.id, reason });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
+        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "dependency or structured hold" });
+        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Dependency or structured hold"));
         continue;
       }
       const timeGate = futureTimeGate(record, now);
       if (timeGate) {
         const reason = `time gate until ${timeGate}`;
-        blockedRows.push({ id: `${mate.id}/${record.id}`, owner: mate.id, reason });
+        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
         pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
         continue;
       }
       const gaps = definitionGaps(record, true);
       if (gaps.length > 0) {
-        readinessRows.push({ id: record.id, owner: mate.id, status: "definition_gap", gaps });
+        readinessRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), status: "definition_gap", gaps });
         pipeline.queued.push(cardFromBacklog(record, mate.id, "queued", gaps.join("; ")));
       } else {
         candidates.push({ record, owner: mate.id });
         readyOwn.push(record.id);
-        readinessRows.push({ id: record.id, owner: mate.id, status: "grounded_candidate", gaps: [] });
+        readinessRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), status: "grounded_candidate", gaps: [] });
       }
     }
     const activeCount = mate.active_children?.length || 0;
     mates.push({
-      id: mate.id,
-      scope: route.scope || "scope unavailable in registry projection",
-      projects: route.projects || [],
-      current: mate.current?.state || "unknown",
-      provenance: mate.provenance?.selected || "unknown",
+      id: opaqueRef("home", mate.id),
+      scope: route.scope ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
+      projects: route.projects?.length ? [`${route.projects.length} registered project route(s); names withheld`] : [],
+      current: safeState(mate.current?.state),
+      provenance: mate.provenance?.selected === "structured-home" ? "validated structured-home summary" : "unavailable",
       active_children: activeCount,
       ready_in_scope: readyOwn.length,
-      utilization: mateUnknown
+      utilization: mateIncomplete
         ? "unavailable"
         : activeCount > 0
           ? "active on useful in-scope work"
@@ -460,18 +578,32 @@ function classify(snapshot, environment, dashboardPath) {
   const ready = [];
   candidates.sort((a, b) => `${a.owner}/${a.record.id}`.localeCompare(`${b.owner}/${b.record.id}`));
   for (const candidate of candidates) {
-    const projectKey = `${candidate.owner}:${candidate.record.repo || "unresolved"}`;
-    const mainConflict = candidate.owner === "main" && activeProjects.has(candidate.record.repo);
-    if (mainConflict || chosenProjects.has(projectKey)) {
-      const reason = mainConflict
-        ? `potential coarse overlap with active work in project ${candidate.record.repo}`
-        : `serialized conservatively with another ready item in ${candidate.record.repo}`;
-      overlapRows.push({ id: candidate.record.id, owner: candidate.owner, reason });
-      pipeline.queued.push(cardFromBacklog(candidate.record, candidate.owner, "queued", reason));
+    const projectKey = candidate.record.repo || null;
+    const activeConflict = projectKey && activeProjects.has(projectKey);
+    if (activeConflict || (projectKey && chosenProjects.has(projectKey))) {
+      overlapRows.push({
+        id: itemRef(candidate.owner, candidate.record.id),
+        owner: ownerRef(candidate.owner),
+        reason: activeConflict ? "coarse project overlap with active work" : "coarse project overlap with another ready item",
+      });
+      pipeline.queued.push(cardFromBacklog(
+        candidate.record,
+        candidate.owner,
+        "queued",
+        activeConflict ? "Potential coarse overlap with active project work" : "Serialized conservatively with another ready project item",
+      ));
+    } else if (!readinessComplete) {
+      pipeline.queued.push(cardFromBacklog(candidate.record, candidate.owner, "queued", "Readiness unavailable because the fleet snapshot is incomplete"));
     } else {
-      chosenProjects.add(projectKey);
+      if (projectKey) chosenProjects.add(projectKey);
       ready.push(candidate);
       pipeline.ready.push(cardFromBacklog(candidate.record, candidate.owner, "ready", "Grounded, unblocked, and conservatively independent"));
+    }
+  }
+  if (!readinessComplete) {
+    for (const mate of mates) {
+      mate.ready_in_scope = 0;
+      mate.utilization = "unavailable";
     }
   }
 
@@ -479,11 +611,9 @@ function classify(snapshot, environment, dashboardPath) {
     ...mainRecords.filter((record) => record.state === "done" && record.structured && record.kind !== "captain").map((record) => ({ ...record, owner: "main" })),
     ...(snapshot.secondmate_landed?.records || []).map((record) => ({ ...record, owner: record.home_id || "secondmate" })),
   ].sort((a, b) => `${b.completion?.date || ""}/${b.id}`.localeCompare(`${a.completion?.date || ""}/${a.id}`)).slice(0, 12);
-  for (const record of landed) pipeline.recently_landed.push(cardFromBacklog(record, record.owner, "recently_landed", record.completion?.date || "recent completion"));
-
-  const registry = snapshot.secondmate_current?.registry;
-  if (registry?.available === false || registry?.complete === false) {
-    unavailable.push({ id: "secondmate-registry", owner: "main", evidence: registry.reason || "registry projection incomplete" });
+  for (const record of landed) {
+    const completionDate = /^\d{4}-\d{2}-\d{2}$/.test(record.completion?.date || "") ? record.completion.date : "recent completion";
+    pipeline.recently_landed.push(cardFromBacklog(record, record.owner, "recently_landed", completionDate));
   }
 
   const validationCards = [...pipeline.validating_fixing, ...pipeline.pr_ci_approval];
@@ -539,7 +669,7 @@ function classify(snapshot, environment, dashboardPath) {
   );
   if (ready.length > 0) recommend(
     "CAP-06", "grounded ready supply", 70,
-    `${ready.length} useful item${ready.length === 1 ? " is" : "s are"} grounded, unblocked, and conservatively independent: ${ready.slice(0, 5).map((item) => `${item.owner}/${item.record.id}`).join(", ")}.`,
+    `${ready.length} useful item${ready.length === 1 ? " is" : "s are"} grounded, unblocked, and conservatively independent: ${ready.slice(0, 5).map((item) => `${ownerRef(item.owner)}/${itemRef(item.owner, item.record.id)}`).join(", ")}.`,
     "Starting selected work increases meaningful flow without inventing work or targeting a utilization percentage.",
     "Chat approval re-enters project resolution, dispatch-profile selection, overlap checks, approval, and supervision; this run dispatches nothing.",
     "Choose one or more ready items to dispatch through the normal lifecycle.",
@@ -554,7 +684,7 @@ function classify(snapshot, environment, dashboardPath) {
     "Approve CAP-07: inspect the validation and PR/CI gates and advance only actions already authorized by the normal delivery lifecycle."
   );
   const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
-  if (ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && blockedRows.length === 0 && decisions.length === 0) recommend(
+  if (readinessComplete && ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && blockedRows.length === 0 && decisions.length === 0) recommend(
     "CAP-08", "demand shortage", 80,
     "No grounded ready work, active delivery, definition gaps, explicit gates, or captain decisions are visible in the bounded snapshot.",
     "Throughput is demand-limited; adding agents or keeping lanes busy would create artificial utilization, not value.",
@@ -573,7 +703,7 @@ function classify(snapshot, environment, dashboardPath) {
   );
   if (aging.length > 0) recommend(
     "CAP-10", "aging flow", 35,
-    `${aging.length} active item${aging.length === 1 ? " has" : "s have"} been in flight at least seven days: ${aging.slice(0, 5).map((item) => `${item.owner}/${item.id} (${item.age_days}d)`).join(", ")}.`,
+    `${aging.length} active or held item${aging.length === 1 ? " has" : "s have"} been open at least seven days: ${aging.slice(0, 5).map((item) => `${item.owner}/${item.id} (${item.age_days}d)`).join(", ")}.`,
     "A targeted current-state check can distinguish healthy long work from a stalled flow before more overlapping starts.",
     "Age is a review signal, not proof of a stall; recovery or interruption requires normal evidence and lifecycle rules.",
     "Inspect current authoritative state and validation evidence for the oldest item first.",
@@ -589,14 +719,14 @@ function classify(snapshot, environment, dashboardPath) {
   for (const stage of STAGES) pipeline[stage].sort((a, b) => `${a.owner}/${a.id}`.localeCompare(`${b.owner}/${b.id}`));
   const activeIndependentKeys = new Set(
     [...pipeline.building, ...pipeline.validating_fixing, ...pipeline.pr_ci_approval].map((card) =>
-      card.owner.startsWith("secondmate ") ? card.owner : `main:${card.repo || card.id}`
+      card.repo ? `project:${card.repo}` : `item:${card.id}`
     )
   );
 
   const model = {
     schema: "fm-capacity.v1",
     generated: snapshot.generated,
-    dashboard_path: dashboardPath,
+    dashboard_path: "private data/capacity-dashboard.html",
     provenance: {
       fleet: "bin/fm-fleet-snapshot.sh fm-fleet-snapshot.v1",
       freshness: "Fresh command observation on each normal invocation; status-log tails are historical only and never current-state authority.",
@@ -626,8 +756,9 @@ function classify(snapshot, environment, dashboardPath) {
     },
     readiness: {
       queued_considered: queue.filter((record) => !isSuperseded(record)).length + secondmateQueuedConsidered,
-      grounded_candidates: candidates.length,
+      grounded_candidates: readinessComplete ? candidates.length : 0,
       independent_start_count: ready.length,
+      available: readinessComplete,
       definition_gaps: definitionRows,
       explicit_gates: blockedRows,
       conservative_overlap_gates: overlapRows,
@@ -636,7 +767,7 @@ function classify(snapshot, environment, dashboardPath) {
     recommendations,
     omissions: [
       "No quota inference or utilization target is computed.",
-      "Natural-language secondmate scopes are displayed but not machine-guessed against main-home work.",
+      "Natural-language secondmate scopes and project names are withheld and not machine-guessed against main-home work.",
       "Backlog bodies are used only for bounded definition checks and are never rendered.",
       "Status tails, terminal chat, scout report contents, and visual artifacts are not consulted.",
     ],
@@ -659,6 +790,33 @@ function sanitizeDeep(value) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDeep(item)]));
   }
   return value;
+}
+
+function writePrivateAtomic(destination, content) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  try {
+    if (fs.lstatSync(destination).isSymbolicLink()) throw new Error("dashboard destination must not be a symlink");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
+    fs.writeFileSync(descriptor, content, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, destination);
+    fs.chmodSync(destination, 0o600);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
 }
 
 function h(value) {
@@ -786,9 +944,8 @@ function main() {
   const output = path.resolve(opts.output || defaultOutput);
   const allowedData = path.resolve(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"));
   if (!opts.output && !output.startsWith(`${allowedData}${path.sep}`)) throw new Error("default dashboard path escaped the effective data directory");
-  fs.mkdirSync(path.dirname(output), { recursive: true });
-  const model = classify(snapshot, environment, output);
-  fs.writeFileSync(output, renderHtml(model), { encoding: "utf8", mode: 0o600 });
+  const model = classify(snapshot, environment);
+  writePrivateAtomic(output, renderHtml(model));
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {

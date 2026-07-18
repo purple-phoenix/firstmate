@@ -30,11 +30,11 @@ EOF
     "records": [
       {"order":1,"state":"in_flight","structured":true,"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: alpha behavior is tested."},
       {"order":2,"state":"in_flight","structured":true,"id":"validate-now","title":"Validate the beta delivery","repo":"beta","kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: CI is green."},
-      {"order":3,"state":"queued","structured":true,"id":"ready-safe","title":"Ship <script>alert(1)</script> token=topsecret","repo":"gamma","kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
+      {"order":3,"state":"queued","structured":true,"id":"ready-safe","title":"Ship <script>alert(1)</script> token=topsecret AKIAIOSFODNN7EXAMPLE xoxb-123456789012-123456789012-abcdefghijklmnop https://user:pass@example.com 212-555-0199","repo":"gamma","kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
       {"order":4,"state":"queued","structured":true,"id":"overlap-alpha","title":"Improve the active alpha subsystem","repo":"alpha","kind":"ship","body_excerpt":"Acceptance criteria: alpha remains compatible."},
       {"order":5,"state":"queued","structured":true,"id":"vague","title":"TBD","repo":null,"kind":null,"body_excerpt":"Contact patient@example.com about password=hunter2"},
       {"order":6,"state":"queued","structured":true,"id":"dependency","title":"Publish the dependent release","repo":"epsilon","kind":"ship","blocked_by":"build-old","blocked_reason":"wait for alpha landing","body_excerpt":"Acceptance criteria: release is published."},
-      {"order":7,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout"},
+      {"order":7,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout for Jane Doe oncology record"},
       {"order":8,"state":"queued","structured":true,"id":"future-gate","title":"Run the migration after 2026-08-01","repo":"zeta","kind":"ship","body_excerpt":"Acceptance criteria: migration checks pass."},
       {"order":9,"state":"done","structured":true,"id":"landed-one","title":"Landed useful work","repo":"alpha","kind":"ship","pr_url":"https://github.com/purple-phoenix/firstmate/pull/10","completion":{"verb":"merged","date":"2026-07-16"}}
     ]
@@ -51,9 +51,9 @@ EOF
       {"id":"unknown-mate","scope":"operations","projects":["ops"]}
     ]},
     "records": [
-      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[]},
-      {"id":"quiet","home":"$home/quiet","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"queued":[],"landed":[]},
-      {"id":"unknown-mate","home":"$home/unknown","current":{"state":"unknown","reason":"structured home snapshot timed out"},"provenance":{"selected":"unknown"},"active_children":[],"decisions_open":[],"queued":[],"landed":[]}
+      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[],"counts":{"active_children":0,"holds":0,"queued":1},"omitted":[]},
+      {"id":"quiet","home":"$home/quiet","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"holds":0,"queued":0},"omitted":[]},
+      {"id":"unknown-mate","home":"$home/unknown","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"holds":0,"queued":0},"omitted":[]}
     ],
     "total": 3,
     "shown": 3,
@@ -95,16 +95,15 @@ test_classification_priority_overlap_and_idle_semantics() {
     .schema == "fm-capacity.v1"
     and .measures.useful_ready_work == 2
     and .readiness.independent_start_count == 2
-    and (.pipeline.ready | any(.id == "ready-safe"))
-    and (.pipeline.ready | any(.id == "design-ready" and .owner == "design"))
-    and (.readiness.conservative_overlap_gates | any(.id == "overlap-alpha"))
-    and (.readiness.explicit_gates | any(.id == "dependency"))
-    and (.readiness.explicit_gates | any(.id == "future-gate" and .reason == "time gate until 2026-08-01"))
-    and (.readiness.definition_gaps | any(.id == "vague" and (.gaps | index("project unresolved"))))
-    and (.lanes.persistent_secondmates | any(.id == "design" and .utilization == "idle with grounded ready in-scope work"))
-    and (.lanes.persistent_secondmates | any(.id == "quiet" and (.utilization | startswith("healthy idle"))))
-    and (.lanes.persistent_secondmates | any(.id == "unknown-mate" and .utilization == "unavailable"))
-    and .primary_bottleneck.id == "CAP-03"
+    and .readiness.available == true
+    and (.pipeline.ready | length) == 2
+    and (.readiness.conservative_overlap_gates | length) == 1
+    and (.readiness.explicit_gates | any(.reason == "dependency or structured hold"))
+    and (.readiness.explicit_gates | any(.reason == "time gate until 2026-08-01"))
+    and (.readiness.definition_gaps | any(.gaps | index("project unresolved")))
+    and (.lanes.persistent_secondmates | any(.utilization == "idle with grounded ready in-scope work"))
+    and ([.lanes.persistent_secondmates[] | select(.utilization | startswith("healthy idle"))] | length) == 2
+    and .primary_bottleneck.id == "CAP-09"
     and (.recommendations | any(.id == "CAP-01" and .classification == "captain-held decisions"))
     and (.recommendations | any(.id == "CAP-04" and .classification == "definition shortage"))
     and (.recommendations | any(.id == "CAP-05" and .classification == "overlap serialization"))
@@ -116,6 +115,68 @@ test_classification_priority_overlap_and_idle_semantics() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "capacity repeat run failed"
   [ "$ids" = "$(printf '%s' "$json" | jq -c '[.recommendations[].id]')" ] || fail "capacity action IDs are not deterministic"
   pass "capacity classifies supply, overlap, blockers, secondmate idle state, aging, and stable action priority"
+}
+
+test_cross_home_overlap_holds_supersession_and_active_count() {
+  local home="$TMP_ROOT/cross-home" snapshot="$TMP_ROOT/cross-snapshot.json" environment="$TMP_ROOT/cross-environment.json" output="$TMP_ROOT/cross.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmate_current.records[0].active_children = [
+      {"id":"child-gamma","repo":"gamma","kind":"ship","state":"working","doing":"working"},
+      {"id":"child-theta","repo":"theta","kind":"ship","state":"working","doing":"working"}
+    ]
+    | .secondmate_current.records[0].holds = [
+      {"id":"held-old","title":"Sensitive held work","repo":"iota","kind":"ship","since":"2026-07-01","reason":"external dependency","source":"child-state"}
+    ]
+    | .secondmate_current.records[0].queued += [
+      {"id":"held-old","title":"Sensitive held work","repo":"iota","kind":"ship","since":"2026-07-01","blocked_by":"external"},
+      {"id":"superseded","title":"Do not start this deferred item","repo":"kappa","kind":"ship","body_excerpt":"DEFERRED. Acceptance criteria: none."}
+    ]
+    | .secondmate_current.records[0].counts = {"active_children":2,"holds":1,"queued":3}
+    | .secondmate_current.records[0].omitted = []
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "cross-home capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .readiness.available == true
+    and .measures.useful_ready_work == 1
+    and .measures.active_independent_work == 4
+    and (.readiness.conservative_overlap_gates | length) == 2
+    and (.pipeline.blocked | length) == 4
+    and (.aging | any(.state == "held" and .age_days == 16))
+    and .readiness.queued_considered == 7
+  ' >/dev/null || fail "cross-home overlap, held work, supersession, or active flow count is wrong: $json"
+  pass "capacity serializes projects fleet-wide and retains held secondmate flow without superseded work"
+}
+
+test_incomplete_sources_fail_closed() {
+  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.truncated = 1' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "truncated capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .readiness.available == false
+    and .measures.useful_ready_work == 0
+    and (.recommendations | any(.id == "CAP-03"))
+    and (.recommendations | any(.id == "CAP-06") | not)
+    and (.recommendations | any(.id == "CAP-08") | not)
+  ' >/dev/null || fail "truncated secondmate inventory did not suppress readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.records[0].omitted = [{"surface":"queued","count":1}]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "omitted-home capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false and .measures.useful_ready_work == 0' >/dev/null ||
+    fail "per-home omitted queue did not suppress readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.backlog.present = false | .backlog.records = []' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing-backlog capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false and (.recommendations | any(.id == "CAP-08") | not)' >/dev/null ||
+    fail "missing main backlog produced a demand-shortage conclusion: $json"
+  pass "capacity suppresses readiness and demand claims for incomplete bounded sources"
 }
 
 test_unavailable_lanes_and_demand_shortage_are_distinct() {
@@ -153,15 +214,43 @@ test_html_is_private_escaped_accessible_and_responsive() {
   for stage in queued ready building validating_fixing pr_ci_approval blocked recently_landed; do
     assert_grep "id=\"stage-$stage\"" "$output" "dashboard is missing stage $stage"
   done
-  assert_grep '&lt;script&gt;alert(1)&lt;/script&gt;' "$output" "dashboard did not escape hostile title markup"
+  assert_no_grep 'alert(1)' "$output" "dashboard rendered uncontrolled backlog title text"
   assert_no_grep 'topsecret' "$output" "dashboard leaked a token-like value"
   assert_no_grep 'hunter2' "$output" "dashboard leaked a password-like value"
   assert_no_grep 'patient@example.com' "$output" "dashboard leaked an email address"
+  assert_no_grep 'pick conservative or fast rollout' "$output" "dashboard leaked a hold reason"
+  assert_no_grep 'AKIAIOSFODNN7EXAMPLE' "$output" "dashboard leaked an AWS-style credential"
+  assert_no_grep 'xoxb-' "$output" "dashboard leaked a Slack-style credential"
+  assert_no_grep 'user:pass' "$output" "dashboard leaked a credential-bearing URL"
+  assert_no_grep '212-555-0199' "$output" "dashboard leaked a phone number"
+  assert_no_grep 'Jane Doe' "$output" "dashboard leaked a person name"
+  assert_no_grep 'oncology' "$output" "dashboard leaked medical detail"
+  assert_no_grep "$home" "$output" "dashboard leaked a private filesystem path"
   assert_no_grep 'src="http' "$output" "dashboard loads a remote script or image"
   assert_no_grep '@import' "$output" "dashboard imports a remote stylesheet"
   assert_no_grep 'lavish' "$output" "dashboard contains a Lavish dependency"
   assert_grep 'data-copy=' "$output" "dashboard lacks copyable action prompts"
   pass "dashboard is offline, escaped, privacy-bounded, accessible, responsive, and read-mostly"
+}
+
+test_output_replacement_rejects_symlinks_and_enforces_mode() {
+  local home="$TMP_ROOT/output-home" snapshot="$TMP_ROOT/output-snapshot.json" environment="$TMP_ROOT/output-environment.json"
+  local output="$home/data/capacity-dashboard.html" target="$TMP_ROOT/symlink-target" mode
+  make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' sentinel > "$target"
+  ln -s "$target" "$output"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null 2>&1; then
+    fail "capacity followed a symlink dashboard destination"
+  fi
+  [ "$(cat "$target")" = sentinel ] || fail "capacity changed a symlink target"
+  rm "$output"
+  printf '%s\n' old > "$output"
+  chmod 0644 "$output"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null ||
+    fail "capacity could not replace an existing regular dashboard"
+  mode=$(stat -f '%Lp' "$output" 2>/dev/null || stat -c '%a' "$output")
+  [ "$mode" = 600 ] || fail "capacity dashboard mode is $mode, expected 600"
+  pass "capacity atomically replaces regular output with mode 0600 and rejects symlinks"
 }
 
 test_fleet_snapshot_preserves_registered_scope_provenance() {
@@ -178,6 +267,9 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
 
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
+test_cross_home_overlap_holds_supersession_and_active_count
+test_incomplete_sources_fail_closed
 test_unavailable_lanes_and_demand_shortage_are_distinct
 test_html_is_private_escaped_accessible_and_responsive
+test_output_replacement_rejects_symlinks_and_enforces_mode
 test_fleet_snapshot_preserves_registered_scope_provenance

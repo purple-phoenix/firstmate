@@ -570,17 +570,28 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,source:.current_state.source,
+         | {id,kind,
+            repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+            since:(($work.since // null) | if . == null then null else trunc(20) end),
+            state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[] | select(.blocked_by != null)
-         | {id:(.id | trunc(120)),title:(.title | trunc(90)),blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+         | {id:(.id | trunc(120)),title:(.title | trunc(90)),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            kind:((.kind // null) | if . == null then null else trunc(40) end),
+            since:((.since // null) | if . == null then null else trunc(20) end),
+            blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
-           | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
+           | {id,title:((.backlog.title // .id) | trunc(90)),
+              repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+              kind:(($work.kind // null) | if . == null then null else trunc(40) end),
+              since:(($work.since // null) | if . == null then null else trunc(20) end),
+              blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
