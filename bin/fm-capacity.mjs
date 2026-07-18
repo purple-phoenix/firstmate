@@ -321,7 +321,19 @@ function dateAgeDays(value, now) {
 }
 
 function bodyHasAcceptance(record) {
-  return /\b(?:acceptance criteria|done when|definition of done|success criteria)\b|\b(?:acceptance|verify|verification|tests?)\s*:/i.test(record.body_excerpt || "");
+  const text = String(record.body_excerpt || "").replace(/\s+/g, " ").trim();
+  const namedMarkers = "acceptance criteria|done when|definition of done|success criteria";
+  if (!text || new RegExp(`\\bno\\s+(?:${namedMarkers})\\b`, "i").test(text)) return false;
+  const patterns = [
+    new RegExp(`(?:^|\\s)(?:${namedMarkers})\\s*[:\\-]\\s*(.+)$`, "i"),
+    new RegExp(`(?:^|\\s)#{1,6}\\s*(?:${namedMarkers})\\s+(.+)$`, "i"),
+    /(?:^|\s)(?:acceptance|verify|verification|tests?)\s*:\s*(.+)$/i,
+  ];
+  const match = patterns.map((pattern) => text.match(pattern)).find(Boolean);
+  if (!match) return false;
+  const criteria = match[1].trim().replace(/^[*-]\s*/, "");
+  if (criteria.length < 8) return false;
+  return !/^(?:tbd|todo|none|n\/a|na|not applicable|not defined|undefined|pending|to be determined)(?:\b|[.!,:;\-])/i.test(criteria);
 }
 
 function isSuperseded(record) {
@@ -445,9 +457,10 @@ function classify(snapshot, environment) {
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
     }
-    if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "blocked"].includes(stage)) {
+    if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "pr_ci_approval", "blocked"].includes(stage)) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
+    const approvalReady = taskApprovalReady(task);
     pipeline[stage].push({
       id: itemRef("main", task.id),
       title: `${STAGE_LABELS[stage]} work item`,
@@ -459,7 +472,9 @@ function classify(snapshot, environment) {
       artifact: null,
       provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
-      approval_ready: taskApprovalReady(task),
+      approval_ready: approvalReady,
+      approval_authority: approvalReady ? (task.yolo === "on" ? "firstmate" : "captain") : null,
+      captain_approval_required: approvalReady && task.yolo !== "on",
     });
   }
 
@@ -662,7 +677,8 @@ function classify(snapshot, environment) {
   const definitionRows = readinessRows.filter((row) => row.status === "definition_gap");
   const availableLanes = environment.dispatch.lanes?.filter((lane) => lane.available) || [];
   const laneMismatch = !environment.dispatch.valid || availableLanes.length === 0 || !environment.backend.available;
-  const captainApprovalCards = pipeline.pr_ci_approval.filter((card) => card.approval_ready === true);
+  const approvalReadyCards = pipeline.pr_ci_approval.filter((card) => card.approval_ready === true);
+  const captainApprovalCards = approvalReadyCards.filter((card) => card.captain_approval_required === true);
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
@@ -717,13 +733,13 @@ function classify(snapshot, environment) {
     "Choose one or more ready items to dispatch through the normal lifecycle.",
     "Approve CAP-06: dispatch the listed independently ready work through normal project resolution, profile selection, and supervision."
   );
-  if (validationCards.length > 0 && (pipeline.validating_fixing.length > 0 || captainApprovalCards.length > 0)) recommend(
+  if (validationCards.length > 0 && (pipeline.validating_fixing.length > 0 || approvalReadyCards.length > 0)) recommend(
     "CAP-07", "validation, CI, or approval", 40,
-    `${pipeline.validating_fixing.length} item${pipeline.validating_fixing.length === 1 ? " is" : "s are"} validating/fixing and ${pipeline.pr_ci_approval.length} item${pipeline.pr_ci_approval.length === 1 ? " is" : "s are"} in PR/CI/approval.`,
+    `${pipeline.validating_fixing.length} item${pipeline.validating_fixing.length === 1 ? " is" : "s are"} validating/fixing; ${approvalReadyCards.length} item${approvalReadyCards.length === 1 ? " is" : "s are"} approval-ready, and ${captainApprovalCards.length} require${captainApprovalCards.length === 1 ? "s" : ""} captain approval.`,
     "Clearing a terminal delivery stage returns finished value and removes overlap pressure before more starts.",
     "Never merge a red PR; merge and local-only authority remain unchanged, and no gate response is issued by the dashboard.",
-    "Prioritize genuinely parked validation gates, failing CI, or captain-approved merge actions over adding overlapping work.",
-    "Approve CAP-07: inspect the validation and PR/CI gates and advance only actions already authorized by the normal delivery lifecycle."
+    "Prioritize genuinely parked validation gates, failing CI, or authority-approved merge and local landing actions over adding overlapping work.",
+    "Handle CAP-07: inspect the validation and PR/CI gates and advance only actions already authorized by the normal delivery lifecycle."
   );
   const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
   if (readinessComplete && ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && blockedRows.length === 0 && decisions.length === 0) recommend(
@@ -745,7 +761,7 @@ function classify(snapshot, environment) {
   );
   if (aging.length > 0) recommend(
     "CAP-10", "aging flow", 35,
-    `${aging.length} active or held item${aging.length === 1 ? " has" : "s have"} been open at least seven days: ${aging.slice(0, 5).map((item) => `${item.owner}/${item.id} (${item.age_days}d)`).join(", ")}.`,
+    `${aging.length} active, held, or approval-stage item${aging.length === 1 ? " has" : "s have"} been open at least seven days: ${aging.slice(0, 5).map((item) => `${item.owner}/${item.id} (${item.age_days}d)`).join(", ")}.`,
     "A targeted current-state check can distinguish healthy long work from a stalled flow before more overlapping starts.",
     "Age is a review signal, not proof of a stall; recovery or interruption requires normal evidence and lifecycle rules.",
     "Inspect current authoritative state and validation evidence for the oldest item first.",

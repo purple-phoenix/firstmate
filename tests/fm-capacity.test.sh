@@ -257,7 +257,9 @@ test_definition_and_time_markers_require_whole_evidence() {
     .backlog.records += [
       {"order":10,"state":"queued","structured":true,"id":"latest-only","title":"Use the latest version safely","repo":"eta","kind":"ship","body_excerpt":"Use the latest version with compatibility checks."},
       {"order":11,"state":"queued","structured":true,"id":"version-date","title":"Support Version 2026-08-01 compatibility","repo":"theta","kind":"ship","body_excerpt":"Acceptance criteria: compatibility remains intact."},
-      {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."}
+      {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."},
+      {"order":13,"state":"queued","structured":true,"id":"placeholder-criteria","title":"Implement the placeholder-defined workflow","repo":"kappa","kind":"ship","body_excerpt":"Acceptance criteria: TBD"},
+      {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","kind":"ship","body_excerpt":"No acceptance criteria defined"}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -265,7 +267,7 @@ test_definition_and_time_markers_require_whole_evidence() {
     fail "definition-marker capacity run failed"
   printf '%s' "$json" | jq -e '
     .measures.useful_ready_work == 4
-    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 2
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 4
     and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
   ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
   pass "capacity requires explicit acceptance and whole-word time-gate markers"
@@ -299,10 +301,10 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
-      {"order":1,"state":"in_flight","structured":true,"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: CI passes."}
+      {"order":1,"state":"in_flight","structured":true,"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: CI passes."}
     ]
     | .tasks = [
-      {"id":"approval-ready","kind":"ship","project":"omega","current_state":{"state":"done","source":"run-step","detail":"PR checks green for Jane Doe"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/private"},"paths":{"report":{"present":false}},"backlog":{"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-16"}}
+      {"id":"approval-ready","kind":"ship","mode":"no-mistakes","yolo":"off","project":"omega","current_state":{"state":"done","source":"run-step","detail":"PR checks green for Jane Doe"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/private"},"paths":{"report":{"present":false}},"backlog":{"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-01"}}
     ]
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
@@ -317,6 +319,8 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
   printf '%s' "$json" | jq -e '
     (.pipeline.pr_ci_approval | any(.approval_ready == true))
     and (.recommendations | any(.id == "CAP-07"))
+    and (.aging | any(.state == "done" and .age_days == 16))
+    and (.recommendations | any(.id == "CAP-10"))
     and .lanes.ephemeral_workers.configured_dispatch.lanes[0].effort == "max"
   ' >/dev/null || fail "approval-ready or max-effort signal was lost: $json"
   case "$json" in
@@ -349,6 +353,16 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
     and .measures.open_captain_actions == 1
     and (.recommendations | any(.id == "CAP-07"))
   ' >/dev/null || fail "local-only terminal readiness was not an approval signal: $json"
+
+  jq '.tasks[0].yolo = "on"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "yolo approval capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.pr_ci_approval | any(.approval_ready == true and .approval_authority == "firstmate" and .captain_approval_required == false))
+    and .measures.open_captain_actions == 0
+    and (.recommendations[] | select(.id == "CAP-07") | .evidence | contains("0 require captain approval"))
+  ' >/dev/null || fail "yolo approval was misattributed to the captain: $json"
   pass "approval readiness and supported max effort survive safe normalization"
 }
 
