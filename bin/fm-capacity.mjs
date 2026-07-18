@@ -333,9 +333,8 @@ function bodyHasAcceptance(record) {
   if (!match) return false;
   const criteria = match[1].trim().replace(/^[*-]\s*/, "");
   if (criteria.length < 8) return false;
-  const outcomeVerb = /\b(?:pass(?:es)?|rejects?|prevents?|preserves?|supports?|returns?|produces?|renders?|completes?|succeeds?|fails?|match(?:es)?|includes?|excludes?|allows?|requires?|contains?|responds?|loads?|builds?|runs?|works?|reports?|opens?|lands?|merges?|publish(?:es)?|ships?|exists?|covers?)\b/i;
-  const outcomeState = /\b(?:is|are|remains?|stays?|equals?)\s+(?!tbd\b|todo\b|pending\b|forthcoming\b|undefined\b|unknown\b|undecided\b|unresolved\b|to\s+be\b)(?:not\s+)?[a-z0-9][\w-]*/i;
-  return outcomeVerb.test(criteria) || outcomeState.test(criteria);
+  const placeholder = /^(?:(?:todo|tbd|fixme|wip|placeholder|draft|pending|forthcoming|undefined|unknown|undecided|unresolved)\b|(?:to be|will be|not yet)\s+(?:defined|determined|written|added|confirmed|finalized)\b)/i;
+  return !placeholder.test(criteria) && (criteria.match(/[a-z0-9][\w-]*/gi) || []).length >= 2;
 }
 
 function isSuperseded(record) {
@@ -375,7 +374,7 @@ function priorityRank(value) {
   }[normalized] ?? Number.MAX_SAFE_INTEGER;
 }
 
-function candidateOrder(a, b) {
+function localCandidateOrder(a, b) {
   const priorityDifference = priorityRank(a.record.priority) - priorityRank(b.record.priority);
   if (priorityDifference !== 0) return priorityDifference;
   const aOrder = Number.isInteger(a.record.order) ? a.record.order : Number.MAX_SAFE_INTEGER;
@@ -542,6 +541,7 @@ function classify(snapshot, environment) {
 
   for (const mate of snapshot.secondmate_current?.records || []) {
     const route = (snapshot.secondmate_current?.registry?.records || []).find((record) => record.id === mate.id) || {};
+    const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
     const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
     const mateIncomplete = mateUnknown
@@ -561,6 +561,7 @@ function classify(snapshot, environment) {
       || mate.counts.holds !== (mate.holds || []).length
       || mate.counts.queued !== (mate.queued || []).length;
     if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
+    if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     for (const decision of mate.decisions_open || []) {
       decisions.push({ owner: ownerRef(mate.id), task: itemRef(mate.id, decision.id || mate.id), key: itemRef("decision", decision.key || decision.id || mate.id) });
     }
@@ -637,7 +638,6 @@ function classify(snapshot, environment) {
     }
     const activeCount = mate.active_children?.length || 0;
     const mateId = opaqueRef("home", mate.id);
-    const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
     mateAvailability.set(mateId, !mateIncomplete && scopeAvailable);
     mates.push({
       id: mateId,
@@ -653,21 +653,47 @@ function classify(snapshot, environment) {
 
   const chosenProjects = new Set(activeProjects);
   const ready = [];
-  candidates.sort(candidateOrder);
+  const ownerOrder = new Map();
+  for (const candidate of candidates) {
+    if (!ownerOrder.has(candidate.owner)) ownerOrder.set(candidate.owner, ownerOrder.size);
+  }
+  candidates.sort((a, b) => a.owner === b.owner
+    ? localCandidateOrder(a, b)
+    : ownerOrder.get(a.owner) - ownerOrder.get(b.owner));
+  const candidateOwnersByProject = new Map();
+  for (const candidate of candidates) {
+    if (!candidate.record.repo) continue;
+    if (!candidateOwnersByProject.has(candidate.record.repo)) candidateOwnersByProject.set(candidate.record.repo, new Set());
+    candidateOwnersByProject.get(candidate.record.repo).add(candidate.owner);
+  }
+  const crossHomeProjects = new Set(
+    [...candidateOwnersByProject.entries()]
+      .filter(([, owners]) => owners.size > 1)
+      .map(([project]) => project)
+  );
   for (const candidate of candidates) {
     const projectKey = candidate.record.repo || null;
     const activeConflict = projectKey && activeProjects.has(projectKey);
-    if (activeConflict || (projectKey && chosenProjects.has(projectKey))) {
+    const crossHomeConflict = projectKey && crossHomeProjects.has(projectKey);
+    if (activeConflict || crossHomeConflict || (projectKey && chosenProjects.has(projectKey))) {
       overlapRows.push({
         id: itemRef(candidate.owner, candidate.record.id),
         owner: ownerRef(candidate.owner),
-        reason: activeConflict ? "coarse project overlap with active work" : "coarse project overlap with another ready item",
+        reason: activeConflict
+          ? "coarse project overlap with active work"
+          : crossHomeConflict
+            ? "cross-home project overlap requires routing decision"
+            : "coarse project overlap with another ready item",
       });
       pipeline.queued.push(cardFromBacklog(
         candidate.record,
         candidate.owner,
         "queued",
-        activeConflict ? "Potential coarse overlap with active project work" : "Serialized conservatively with another ready project item",
+        activeConflict
+          ? "Potential coarse overlap with active project work"
+          : crossHomeConflict
+            ? "Cross-home project overlap requires an authoritative routing decision"
+            : "Serialized conservatively with another ready project item",
       ));
     } else if (!readinessComplete) {
       pipeline.queued.push(cardFromBacklog(candidate.record, candidate.owner, "queued", "Readiness unavailable because the fleet snapshot is incomplete"));
@@ -692,7 +718,9 @@ function classify(snapshot, environment) {
 
   const secondmateLanded = snapshot.secondmate_landed;
   const recentLandingsComplete = Boolean(
-    secondmateLanded
+    snapshot.backlog?.present === true
+    && Array.isArray(snapshot.backlog?.records)
+    && secondmateLanded
     && Array.isArray(secondmateLanded.records)
     && Array.isArray(secondmateLanded.truncated)
     && secondmateLanded.truncated.length === 0

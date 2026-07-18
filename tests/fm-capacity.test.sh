@@ -262,15 +262,18 @@ test_definition_and_time_markers_require_whole_evidence() {
       {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","kind":"ship","body_excerpt":"No acceptance criteria defined"},
       {"order":15,"state":"queued","structured":true,"id":"defined-later","title":"Implement the later-defined workflow","repo":"nu","kind":"ship","body_excerpt":"Acceptance criteria: to be defined"},
       {"order":16,"state":"queued","structured":true,"id":"forthcoming-criteria","title":"Implement the forthcoming workflow","repo":"omicron","kind":"ship","body_excerpt":"Acceptance criteria: forthcoming"},
-      {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."}
+      {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."},
+      {"order":18,"state":"queued","structured":true,"id":"noun-criteria","title":"Protect failover data integrity","repo":"rho","kind":"ship","body_excerpt":"Acceptance criteria: zero data loss under failover."},
+      {"order":19,"state":"queued","structured":true,"id":"modal-criteria","title":"Export reports as portable documents","repo":"sigma","kind":"ship","body_excerpt":"Acceptance criteria: users can export PDF."},
+      {"order":20,"state":"queued","structured":true,"id":"todo-with-verb","title":"Implement the unfinished test workflow","repo":"tau","kind":"ship","body_excerpt":"Acceptance criteria: TODO: tests pass eventually."}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "definition-marker capacity run failed"
   printf '%s' "$json" | jq -e '
-    .measures.useful_ready_work == 5
-    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 6
+    .measures.useful_ready_work == 7
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 7
     and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
   ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
   pass "capacity requires explicit acceptance and whole-word time-gate markers"
@@ -284,11 +287,15 @@ test_secondmate_scope_is_required_for_lane_readiness() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "missing-scope capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.lanes.persistent_secondmates | any(
+    .readiness.available == false
+    and .measures.useful_ready_work == 0
+    and (.lanes.persistent_secondmates | any(
       .scope == "Registered routing scope unavailable"
       and .ready_in_scope == 0
       and .utilization == "unavailable"
     ))
+    and (.recommendations | any(.id == "CAP-03"))
+    and (.recommendations | any(.id == "CAP-06") | not)
     and (.recommendations | any(.id == "CAP-09") | not)
   ' >/dev/null || fail "secondmate work was called in-scope without registered scope evidence: $json"
   pass "secondmate lane readiness requires registered scope provenance"
@@ -325,6 +332,31 @@ test_ready_selection_preserves_priority_and_order() {
     fail "backlog-order selection capacity run failed"
   printf '%s' "$json" | jq -e '.pipeline.ready[0].id == "item-02" and .pipeline.queued[0].id == "item-01"' >/dev/null ||
     fail "earlier authoritative backlog order did not win conservative serialization: $json"
+
+  jq '
+    .backlog.records = [
+      {"order":1,"priority":"low","state":"queued","structured":true,"id":"main-shared","title":"Ship the main shared-project option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: main shared option passes."}
+    ]
+    | .secondmate_current.registry.records = [
+      {"id":"design","scope":"design systems","projects":["shared"]}
+    ]
+    | .secondmate_current.records = [
+      {"id":"design","current":{"state":"no_active_work"},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[
+        {"order":1,"priority":"high","id":"mate-shared","title":"Ship the secondmate shared-project option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: secondmate shared option passes."}
+      ],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1},"omitted":[]}
+    ]
+    | .secondmate_current.total = 1
+    | .secondmate_current.shown = 1
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "cross-home priority capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.useful_ready_work == 0
+    and (.readiness.conservative_overlap_gates | length) == 2
+    and ([.readiness.conservative_overlap_gates[] | select(.reason == "cross-home project overlap requires routing decision")] | length) == 2
+    and (.recommendations | any(.id == "CAP-06") | not)
+  ' >/dev/null || fail "cross-home priorities invented an authoritative fleet-wide winner: $json"
   pass "ready serialization preserves authoritative priority and backlog order"
 }
 
@@ -341,6 +373,16 @@ test_recent_landings_report_incomplete_projection() {
     and (.omissions | any(contains("observed lower bound")))
   ' >/dev/null || fail "incomplete recent landings were presented as complete: $json"
   assert_grep 'Recently landed (observed; incomplete)' "$output" "dashboard did not qualify incomplete recent landings"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.backlog.present = false | .backlog.records = []' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "missing-main-landings capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.recently_landed_complete == false
+    and (.provenance.recent_landings | contains("observed lower bound"))
+  ' >/dev/null || fail "missing main landing source was presented as complete: $json"
   pass "recent landing counts expose bounded projection incompleteness"
 }
 
