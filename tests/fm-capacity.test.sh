@@ -51,9 +51,9 @@ EOF
       {"id":"unknown-mate","scope":"operations","projects":["ops"]}
     ]},
     "records": [
-      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[],"counts":{"active_children":0,"holds":0,"queued":1},"omitted":[]},
-      {"id":"quiet","home":"$home/quiet","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"holds":0,"queued":0},"omitted":[]},
-      {"id":"unknown-mate","home":"$home/unknown","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"holds":0,"queued":0},"omitted":[]}
+      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1},"omitted":[]},
+      {"id":"quiet","home":"$home/quiet","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0},"omitted":[]},
+      {"id":"unknown-mate","home":"$home/unknown","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0},"omitted":[]}
     ],
     "total": 3,
     "shown": 3,
@@ -121,7 +121,15 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
   local home="$TMP_ROOT/cross-home" snapshot="$TMP_ROOT/cross-snapshot.json" environment="$TMP_ROOT/cross-environment.json" output="$TMP_ROOT/cross.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
-    .secondmate_current.records[0].active_children = [
+    .backlog.records += [
+      {"order":10,"state":"in_flight","structured":true,"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","kind":"ship","since":"2026-07-10","body_excerpt":"Acceptance criteria: lambda is complete."},
+      {"order":11,"state":"queued","structured":true,"id":"main-held-overlap","title":"Extend the held lambda delivery","repo":"lambda","kind":"ship","body_excerpt":"Acceptance criteria: lambda remains compatible."},
+      {"order":12,"state":"queued","structured":true,"id":"mate-held-overlap","title":"Extend the held iota delivery","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: iota remains compatible."}
+    ]
+    | .tasks += [
+      {"id":"main-held","kind":"ship","project":"lambda","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","kind":"ship","since":"2026-07-10"}}
+    ]
+    | .secondmate_current.records[0].active_children = [
       {"id":"child-gamma","repo":"gamma","kind":"ship","state":"working","doing":"working"},
       {"id":"child-theta","repo":"theta","kind":"ship","state":"working","doing":"working"}
     ]
@@ -132,7 +140,7 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
       {"id":"held-old","title":"Sensitive held work","repo":"iota","kind":"ship","since":"2026-07-01","blocked_by":"external"},
       {"id":"superseded","title":"Do not start this deferred item","repo":"kappa","kind":"ship","body_excerpt":"DEFERRED. Acceptance criteria: none."}
     ]
-    | .secondmate_current.records[0].counts = {"active_children":2,"holds":1,"queued":3}
+    | .secondmate_current.records[0].counts = {"active_children":2,"decisions_open":0,"holds":1,"queued":3}
     | .secondmate_current.records[0].omitted = []
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -141,12 +149,27 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
     .readiness.available == true
     and .measures.useful_ready_work == 1
     and .measures.active_independent_work == 4
-    and (.readiness.conservative_overlap_gates | length) == 2
-    and (.pipeline.blocked | length) == 4
+    and (.readiness.conservative_overlap_gates | length) == 4
+    and (.pipeline.blocked | length) == 5
     and (.aging | any(.state == "held" and .age_days == 16))
-    and .readiness.queued_considered == 7
+    and .readiness.queued_considered == 9
   ' >/dev/null || fail "cross-home overlap, held work, supersession, or active flow count is wrong: $json"
   pass "capacity serializes projects fleet-wide and retains held secondmate flow without superseded work"
+}
+
+test_secondmate_readiness_uses_final_serialized_supply() {
+  local home="$TMP_ROOT/final-ready-home" snapshot="$TMP_ROOT/final-ready-snapshot.json" environment="$TMP_ROOT/final-ready-environment.json" output="$TMP_ROOT/final-ready.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.records[0].queued[0].repo = "alpha"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "serialized secondmate capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.useful_ready_work == 1
+    and (.lanes.persistent_secondmates | any(.ready_in_scope == 0 and (.utilization | startswith("healthy idle"))))
+    and (.recommendations | any(.id == "CAP-09") | not)
+  ' >/dev/null || fail "secondmate lane readiness was not derived from final serialized supply: $json"
+  pass "secondmate readiness reflects final fleet-wide serialization"
 }
 
 test_incomplete_sources_fail_closed() {
@@ -171,12 +194,80 @@ test_incomplete_sources_fail_closed() {
     fail "per-home omitted queue did not suppress readiness: $json"
 
   make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.records[0].omitted = [{"surface":"decisions_open","count":1}]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "omitted-decision capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false and .measures.useful_ready_work == 0' >/dev/null ||
+    fail "per-home omitted decisions did not suppress readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmate_current.records[0].counts.decisions_open = 1' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "mismatched-decision capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false and .measures.useful_ready_work == 0' >/dev/null ||
+    fail "per-home decision count mismatch did not suppress readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
   jq '.backlog.present = false | .backlog.records = []' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing-backlog capacity run failed"
   printf '%s' "$json" | jq -e '.readiness.available == false and (.recommendations | any(.id == "CAP-08") | not)' >/dev/null ||
     fail "missing main backlog produced a demand-shortage conclusion: $json"
   pass "capacity suppresses readiness and demand claims for incomplete bounded sources"
+}
+
+test_secondmate_captain_holds_are_pipeline_waiting_work() {
+  local home="$TMP_ROOT/captain-hold-home" snapshot="$TMP_ROOT/captain-hold-snapshot.json" environment="$TMP_ROOT/captain-hold-environment.json" output="$TMP_ROOT/captain-hold.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmate_current.records[0].decisions_open = [
+      {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
+    ]
+    | .secondmate_current.records[0].queued += [
+      {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"}
+    ]
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":1,"holds":0,"queued":2}
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "secondmate captain-hold capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | length) == 4
+    and .measures.open_captain_actions == 2
+    and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("2 structured captain"))
+  ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
+  pass "secondmate captain holds appear once in decisions and pipeline waiting work"
+}
+
+test_approval_signal_and_max_effort_survive_safe_normalization() {
+  local home="$TMP_ROOT/approval-home" snapshot="$TMP_ROOT/approval-snapshot.json" environment="$TMP_ROOT/approval-environment.json" output="$TMP_ROOT/approval.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: CI passes."}
+    ]
+    | .tasks = [
+      {"id":"approval-ready","kind":"ship","project":"omega","current_state":{"state":"done","source":"run-step","detail":"PR checks green for Jane Doe"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/private"},"paths":{"report":{"present":false}},"backlog":{"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-16"}}
+    ]
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '.dispatch.lanes = [{"harness":"pi","effort":"max","when":"default","available":true}]' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "approval-ready capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.pr_ci_approval | any(.approval_ready == true))
+    and (.recommendations | any(.id == "CAP-07"))
+    and .lanes.ephemeral_workers.configured_dispatch.lanes[0].effort == "max"
+  ' >/dev/null || fail "approval-ready or max-effort signal was lost: $json"
+  case "$json" in
+    *"Jane Doe"*) fail "privacy-safe approval signal leaked raw status detail" ;;
+  esac
+  pass "approval readiness and supported max effort survive safe normalization"
 }
 
 test_unavailable_lanes_and_demand_shortage_are_distinct() {
@@ -268,7 +359,10 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_cross_home_overlap_holds_supersession_and_active_count
+test_secondmate_readiness_uses_final_serialized_supply
 test_incomplete_sources_fail_closed
+test_secondmate_captain_holds_are_pipeline_waiting_work
+test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct
 test_html_is_private_escaped_accessible_and_responsive
 test_output_replacement_rejects_symlinks_and_enforces_mode

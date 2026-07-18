@@ -267,7 +267,7 @@ function normalizeEnvironment(environment) {
       lanes: (environment.dispatch?.lanes || []).map((lane) => ({
         harness: VERIFIED_HARNESSES.has(lane.harness) ? lane.harness : "unknown",
         model: null,
-        effort: ["low", "medium", "high", "xhigh"].includes(lane.effort) ? lane.effort : null,
+        effort: ["low", "medium", "high", "xhigh", "max"].includes(lane.effort) ? lane.effort : null,
         when: lane.when === "default" ? "configured default" : "configured dispatch rule",
         available: lane.available === true,
         availability_evidence: lane.available === true ? "configured executable present" : "configured executable unavailable",
@@ -358,6 +358,12 @@ function taskStage(task) {
   return "building";
 }
 
+function taskApprovalReady(task) {
+  if (!task.pr?.url) return false;
+  const detail = task.current_state?.detail || "";
+  return /\b(?:checks?|ci)(?:\s+(?:are|is))?\s+green\b|\bready\s+for\s+(?:approval|merge)\b|\bawaiting\s+(?:captain\s+)?approval\b/i.test(detail);
+}
+
 function cardFromBacklog(record, owner, stage, reason = null) {
   return {
     id: itemRef(owner, record.id || "unstructured"),
@@ -386,6 +392,7 @@ function classify(snapshot, environment) {
   const blockedRows = [];
   const overlapRows = [];
   const mates = [];
+  const mateAvailability = new Map();
   let secondmateQueuedConsidered = 0;
   let readinessComplete = true;
 
@@ -417,7 +424,7 @@ function classify(snapshot, environment) {
     const stage = taskStage(task);
     const ageDays = dateAgeDays(backlog.since, now);
     const taskRepo = backlog.repo || task.project || null;
-    if (taskRepo && ["building", "validating_fixing", "pr_ci_approval"].includes(stage)) activeProjects.add(taskRepo);
+    if (taskRepo) activeProjects.add(taskRepo);
     const open = task.hints?.open_decisions || [];
     for (const decision of open) decisions.push({ owner: "main", task: itemRef("main", task.id), key: itemRef("decision", decision.key || task.id) });
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
@@ -437,6 +444,7 @@ function classify(snapshot, environment) {
       artifact: null,
       provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
+      approval_ready: taskApprovalReady(task),
     });
   }
 
@@ -479,19 +487,22 @@ function classify(snapshot, environment) {
 
   for (const mate of snapshot.secondmate_current?.records || []) {
     const route = (snapshot.secondmate_current?.registry?.records || []).find((record) => record.id === mate.id) || {};
-    const readyOwn = [];
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
     const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
     const mateIncomplete = mateUnknown
       || !Array.isArray(mate.active_children)
+      || !Array.isArray(mate.decisions_open)
       || !Array.isArray(mate.holds)
       || !Array.isArray(mate.queued)
       || omittedSurfaces.has("active_children")
+      || omittedSurfaces.has("decisions_open")
       || omittedSurfaces.has("queued")
       || !Number.isInteger(mate.counts?.active_children)
+      || !Number.isInteger(mate.counts?.decisions_open)
       || !Number.isInteger(mate.counts?.holds)
       || !Number.isInteger(mate.counts?.queued)
       || mate.counts.active_children !== (mate.active_children || []).length
+      || mate.counts.decisions_open !== (mate.decisions_open || []).length
       || mate.counts.holds !== (mate.holds || []).length
       || mate.counts.queued !== (mate.queued || []).length;
     if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
@@ -501,6 +512,7 @@ function classify(snapshot, environment) {
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       heldIds.add(hold.id);
+      if (hold.source === "child-state" && hold.repo) activeProjects.add(hold.repo);
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
       pipeline.blocked.push(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"));
@@ -531,8 +543,12 @@ function classify(snapshot, environment) {
     }
     for (const record of mate.queued || []) {
       if (isSuperseded(record) || heldIds.has(record.id)) continue;
-      if (record.kind === "captain" && record.hold_kind === "captain") continue;
       secondmateQueuedConsidered += 1;
+      if (record.kind === "captain" && record.hold_kind === "captain") {
+        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
+        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Captain hold"));
+        continue;
+      }
       if (record.blocked_by || record.hold_reason) {
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "dependency or structured hold" });
         pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Dependency or structured hold"));
@@ -551,26 +567,21 @@ function classify(snapshot, environment) {
         pipeline.queued.push(cardFromBacklog(record, mate.id, "queued", gaps.join("; ")));
       } else {
         candidates.push({ record, owner: mate.id });
-        readyOwn.push(record.id);
         readinessRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), status: "grounded_candidate", gaps: [] });
       }
     }
     const activeCount = mate.active_children?.length || 0;
+    const mateId = opaqueRef("home", mate.id);
+    mateAvailability.set(mateId, !mateIncomplete);
     mates.push({
-      id: opaqueRef("home", mate.id),
+      id: mateId,
       scope: route.scope ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
       projects: route.projects?.length ? [`${route.projects.length} registered project route(s); names withheld`] : [],
       current: safeState(mate.current?.state),
       provenance: mate.provenance?.selected === "structured-home" ? "validated structured-home summary" : "unavailable",
       active_children: activeCount,
-      ready_in_scope: readyOwn.length,
-      utilization: mateIncomplete
-        ? "unavailable"
-        : activeCount > 0
-          ? "active on useful in-scope work"
-          : readyOwn.length > 0
-            ? "idle with grounded ready in-scope work"
-            : "healthy idle - no grounded ready in-scope work",
+      ready_in_scope: 0,
+      utilization: "unavailable",
     });
   }
 
@@ -600,11 +611,17 @@ function classify(snapshot, environment) {
       pipeline.ready.push(cardFromBacklog(candidate.record, candidate.owner, "ready", "Grounded, unblocked, and conservatively independent"));
     }
   }
-  if (!readinessComplete) {
-    for (const mate of mates) {
-      mate.ready_in_scope = 0;
-      mate.utilization = "unavailable";
-    }
+  for (const mate of mates) {
+    const mateReady = ready.filter((candidate) => candidate.owner !== "main" && opaqueRef("home", candidate.owner) === mate.id).length;
+    const available = readinessComplete && mateAvailability.get(mate.id);
+    mate.ready_in_scope = available ? mateReady : 0;
+    mate.utilization = !available
+      ? "unavailable"
+      : mate.active_children > 0
+        ? "active on useful in-scope work"
+        : mateReady > 0
+          ? "idle with grounded ready in-scope work"
+          : "healthy idle - no grounded ready in-scope work";
   }
 
   const landed = [
@@ -620,7 +637,7 @@ function classify(snapshot, environment) {
   const definitionRows = readinessRows.filter((row) => row.status === "definition_gap");
   const availableLanes = environment.dispatch.lanes?.filter((lane) => lane.available) || [];
   const laneMismatch = !environment.dispatch.valid || availableLanes.length === 0 || !environment.backend.available;
-  const captainApprovalCards = pipeline.pr_ci_approval.filter((card) => /ready|green|parked|approval/i.test(card.reason || ""));
+  const captainApprovalCards = pipeline.pr_ci_approval.filter((card) => card.approval_ready === true);
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
