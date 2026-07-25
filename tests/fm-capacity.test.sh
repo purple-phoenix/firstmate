@@ -68,7 +68,12 @@ EOF
   "github_auth": {"status":"available","evidence":"authenticated","owner":"fixture"},
   "dispatch": {"config_present":true,"valid":true,"reason":null,"lanes":[
     {"harness":"codex","model":"gpt-test","effort":"high","when":"default","available":true,"availability_evidence":"executable present","quota":"not observed - capacity never guesses quota"}
-  ]}
+  ]},
+  "secondmates": {
+    "design":{"backend":{"name":"tmux","available":true},"github_auth":{"status":"available"},"dispatch":{"config_present":true,"valid":true,"lanes":[{"harness":"codex","effort":"high","when":"default","available":true}]}},
+    "quiet":{"backend":{"name":"tmux","available":true},"github_auth":{"status":"available"},"dispatch":{"config_present":true,"valid":true,"lanes":[{"harness":"codex","effort":"high","when":"default","available":true}]}},
+    "unknown-mate":{"backend":{"name":"tmux","available":true},"github_auth":{"status":"available"},"dispatch":{"config_present":true,"valid":true,"lanes":[{"harness":"codex","effort":"high","when":"default","available":true}]}}
+  }
 }
 EOF
 }
@@ -88,7 +93,7 @@ test_skill_discovery_and_read_mostly_contract() {
 }
 
 test_classification_priority_overlap_and_idle_semantics() {
-  local home="$TMP_ROOT/model-home" snapshot="$TMP_ROOT/model-snapshot.json" environment="$TMP_ROOT/model-environment.json" output="$TMP_ROOT/model.html" json ids
+  local home="$TMP_ROOT/model-home" snapshot="$TMP_ROOT/model-snapshot.json" environment="$TMP_ROOT/model-environment.json" output="$TMP_ROOT/model-home/data/model.html" json ids
   make_fixture "$home" "$snapshot" "$environment"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "capacity fixture run failed"
   printf '%s' "$json" | jq -e '
@@ -107,7 +112,7 @@ test_classification_priority_overlap_and_idle_semantics() {
     and (.recommendations | any(.id == "CAP-01" and .classification == "captain-held decisions"))
     and (.recommendations | any(.id == "CAP-04" and .classification == "definition shortage"))
     and (.recommendations | any(.id == "CAP-05" and .classification == "overlap serialization"))
-    and (.recommendations | any(.id == "CAP-06" and .classification == "grounded ready supply"))
+    and (.recommendations | any(.id == "CAP-06" and .classification == "execution shortage"))
     and (.recommendations | any(.id == "CAP-07" and .classification == "validation, CI, or approval"))
     and (.recommendations | any(.id == "CAP-10" and .classification == "aging flow"))
   ' >/dev/null || fail "capacity classifications or priority are wrong: $json"
@@ -118,7 +123,7 @@ test_classification_priority_overlap_and_idle_semantics() {
 }
 
 test_cross_home_overlap_holds_supersession_and_active_count() {
-  local home="$TMP_ROOT/cross-home" snapshot="$TMP_ROOT/cross-snapshot.json" environment="$TMP_ROOT/cross-environment.json" output="$TMP_ROOT/cross.html" json
+  local home="$TMP_ROOT/cross-home" snapshot="$TMP_ROOT/cross-snapshot.json" environment="$TMP_ROOT/cross-environment.json" output="$TMP_ROOT/cross-home/data/cross.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records += [
@@ -159,7 +164,7 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
 }
 
 test_secondmate_readiness_uses_final_serialized_supply() {
-  local home="$TMP_ROOT/final-ready-home" snapshot="$TMP_ROOT/final-ready-snapshot.json" environment="$TMP_ROOT/final-ready-environment.json" output="$TMP_ROOT/final-ready.html" json
+  local home="$TMP_ROOT/final-ready-home" snapshot="$TMP_ROOT/final-ready-snapshot.json" environment="$TMP_ROOT/final-ready-environment.json" output="$TMP_ROOT/final-ready-home/data/final-ready.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_current.records[0].queued[0].repo = "alpha"' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -173,8 +178,31 @@ test_secondmate_readiness_uses_final_serialized_supply() {
   pass "secondmate readiness reflects final fleet-wide serialization"
 }
 
+test_secondmate_readiness_uses_home_owned_runtime_lanes() {
+  local home="$TMP_ROOT/mate-lane-home" snapshot="$TMP_ROOT/mate-lane-snapshot.json" environment="$TMP_ROOT/mate-lane-environment.json" output="$TMP_ROOT/mate-lane-home/data/mate-lane.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmates.design.backend.available = false
+    | .secondmates.design.dispatch.lanes[0].available = false
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "secondmate unavailable-lane capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.lanes.persistent_secondmates | any(
+      .grounded_ready_in_scope == 1
+      and .ready_in_scope == 0
+      and .runtime.backend.available == false
+      and .utilization == "unavailable lane with grounded in-scope work"
+    ))
+    and (.recommendations | any(.id == "CAP-09"))
+    and (.recommendations[] | select(.id == "CAP-09") | .evidence | contains("1 has grounded work on an unavailable home-owned lane"))
+  ' >/dev/null || fail "secondmate home-owned runtime lane was not reflected in readiness: $json"
+  pass "secondmate readiness includes home-owned backend, auth, and dispatch evidence"
+}
+
 test_incomplete_sources_fail_closed() {
-  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete.html" json
+  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete-home/data/incomplete.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_current.truncated = 1' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -218,7 +246,7 @@ test_incomplete_sources_fail_closed() {
 }
 
 test_unresolved_active_projects_fail_closed() {
-  local home="$TMP_ROOT/project-gap-home" snapshot="$TMP_ROOT/project-gap-snapshot.json" environment="$TMP_ROOT/project-gap-environment.json" output="$TMP_ROOT/project-gap.html" json
+  local home="$TMP_ROOT/project-gap-home" snapshot="$TMP_ROOT/project-gap-snapshot.json" environment="$TMP_ROOT/project-gap-environment.json" output="$TMP_ROOT/project-gap-home/data/project-gap.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records[0].repo = null
@@ -251,7 +279,7 @@ test_unresolved_active_projects_fail_closed() {
 }
 
 test_definition_and_time_markers_require_whole_evidence() {
-  local home="$TMP_ROOT/markers-home" snapshot="$TMP_ROOT/markers-snapshot.json" environment="$TMP_ROOT/markers-environment.json" output="$TMP_ROOT/markers.html" json
+  local home="$TMP_ROOT/markers-home" snapshot="$TMP_ROOT/markers-snapshot.json" environment="$TMP_ROOT/markers-environment.json" output="$TMP_ROOT/markers-home/data/markers.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records += [
@@ -287,7 +315,7 @@ test_definition_and_time_markers_require_whole_evidence() {
 }
 
 test_secondmate_scope_is_required_for_lane_readiness() {
-  local home="$TMP_ROOT/scope-home" snapshot="$TMP_ROOT/scope-snapshot.json" environment="$TMP_ROOT/scope-environment.json" output="$TMP_ROOT/scope.html" json
+  local home="$TMP_ROOT/scope-home" snapshot="$TMP_ROOT/scope-snapshot.json" environment="$TMP_ROOT/scope-environment.json" output="$TMP_ROOT/scope-home/data/scope.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_current.registry.records[0].scope = null' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -309,7 +337,7 @@ test_secondmate_scope_is_required_for_lane_readiness() {
 }
 
 test_ready_selection_preserves_priority_and_order() {
-  local home="$TMP_ROOT/order-home" snapshot="$TMP_ROOT/order-snapshot.json" environment="$TMP_ROOT/order-environment.json" output="$TMP_ROOT/order.html" json
+  local home="$TMP_ROOT/order-home" snapshot="$TMP_ROOT/order-snapshot.json" environment="$TMP_ROOT/order-environment.json" output="$TMP_ROOT/order-home/data/order.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
@@ -368,7 +396,7 @@ test_ready_selection_preserves_priority_and_order() {
 }
 
 test_recent_landings_report_incomplete_projection() {
-  local home="$TMP_ROOT/landings-home" snapshot="$TMP_ROOT/landings-snapshot.json" environment="$TMP_ROOT/landings-environment.json" output="$TMP_ROOT/landings.html" json
+  local home="$TMP_ROOT/landings-home" snapshot="$TMP_ROOT/landings-snapshot.json" environment="$TMP_ROOT/landings-environment.json" output="$TMP_ROOT/landings-home/data/landings.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_landed.truncated = ["design"] | .secondmate_landed.unreadable = ["quiet"]' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -405,7 +433,7 @@ test_recent_landings_report_incomplete_projection() {
 }
 
 test_secondmate_captain_holds_are_pipeline_waiting_work() {
-  local home="$TMP_ROOT/captain-hold-home" snapshot="$TMP_ROOT/captain-hold-snapshot.json" environment="$TMP_ROOT/captain-hold-environment.json" output="$TMP_ROOT/captain-hold.html" json
+  local home="$TMP_ROOT/captain-hold-home" snapshot="$TMP_ROOT/captain-hold-snapshot.json" environment="$TMP_ROOT/captain-hold-environment.json" output="$TMP_ROOT/captain-hold-home/data/captain-hold.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .secondmate_current.records[0].decisions_open = [
@@ -428,7 +456,7 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
 }
 
 test_approval_signal_and_max_effort_survive_safe_normalization() {
-  local home="$TMP_ROOT/approval-home" snapshot="$TMP_ROOT/approval-snapshot.json" environment="$TMP_ROOT/approval-environment.json" output="$TMP_ROOT/approval.html" json
+  local home="$TMP_ROOT/approval-home" snapshot="$TMP_ROOT/approval-snapshot.json" environment="$TMP_ROOT/approval-environment.json" output="$TMP_ROOT/approval-home/data/approval.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
@@ -498,7 +526,7 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
 }
 
 test_unavailable_lanes_and_demand_shortage_are_distinct() {
-  local home="$TMP_ROOT/empty-home" snapshot="$TMP_ROOT/empty-snapshot.json" environment="$TMP_ROOT/empty-environment.json" output="$TMP_ROOT/empty.html" json
+  local home="$TMP_ROOT/empty-home" snapshot="$TMP_ROOT/empty-snapshot.json" environment="$TMP_ROOT/empty-environment.json" output="$TMP_ROOT/empty-home/data/empty.html" json
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   cat > "$snapshot" <<EOF
 {"schema":"fm-fleet-snapshot.v1","generated":"2026-07-17T16:00:00Z","fm_home":"$home","roots":{"fm_root":"$ROOT","state":"$home/state","data":"$home/data","config":"$home/config","projects":"$home/projects"},"backlog":{"present":true,"records":[]},"tasks":[],"scout_reports":[],"secondmate_current":{"registry":{"available":true,"complete":true,"records":[]},"records":[],"total":0,"shown":0,"truncated":0},"secondmate_landed":{"records":[],"truncated":[],"unreadable":[]}}
@@ -545,7 +573,8 @@ EOF
     fail "queued PR-bound capacity run failed"
   printf '%s' "$json" | jq -e '
     (.recommendations | any(.id == "CAP-02"))
-    and (.recommendations | any(.id == "CAP-06"))
+    and (.pipeline.ready | length) == 1
+    and (.recommendations | any(.id == "CAP-06") | not)
   ' >/dev/null || fail "queued PR-bound work did not make authentication relevant: $json"
 
   jq '
@@ -562,6 +591,57 @@ EOF
   printf '%s' "$json" | jq -e '(.recommendations | any(.id == "CAP-02") | not)' >/dev/null ||
     fail "landed terminal work triggered credential repair: $json"
   pass "capacity recommends lane repairs only for grounded delivery demand"
+}
+
+test_blocked_tasks_suppress_demand_shortage() {
+  local home="$TMP_ROOT/blocked-home" snapshot="$TMP_ROOT/blocked-snapshot.json" environment="$TMP_ROOT/blocked-environment.json" output="$TMP_ROOT/blocked-home/data/blocked.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"blocked-task","title":"Complete the externally blocked delivery","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
+    ]
+    | .tasks = [
+      {"id":"blocked-task","kind":"ship","project":"omega","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"blocked-task","repo":"omega","kind":"ship"}}
+    ]
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "blocked-task capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | length) == 1
+    and (.recommendations | any(.id == "CAP-05" and .classification == "task dependencies and gates"))
+    and (.recommendations | any(.id == "CAP-08") | not)
+  ' >/dev/null || fail "blocked task was misclassified as demand shortage: $json"
+  pass "blocked task stages suppress demand shortage and surface gate work"
+}
+
+test_available_ready_work_is_execution_shortage() {
+  local home="$TMP_ROOT/execution-home" snapshot="$TMP_ROOT/execution-snapshot.json" environment="$TMP_ROOT/execution-environment.json" output="$TMP_ROOT/execution-home/data/execution.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"queued","structured":true,"id":"ready-task","title":"Ship the independently ready delivery","repo":"omega","kind":"ship","delivery_mode":"local-only","body_excerpt":"Acceptance criteria: delivery checks pass."}
+    ]
+    | .tasks = []
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "execution-shortage capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .primary_bottleneck.id == "CAP-06"
+    and .primary_bottleneck.classification == "execution shortage"
+    and (.recommendations | any(.id == "CAP-06" and .classification == "execution shortage"))
+    and (.recommendations | any(.id == "CAP-09") | not)
+  ' >/dev/null || fail "available ready work was not classified as execution shortage: $json"
+  pass "available ready work is classified as execution shortage"
 }
 
 test_html_is_private_escaped_accessible_and_responsive() {
@@ -625,6 +705,16 @@ test_output_replacement_rejects_symlinks_and_enforces_mode() {
     fail "capacity followed a symlinked dashboard parent"
   fi
   [ ! -e "$redirected/capacity-dashboard.html" ] || fail "capacity wrote through a symlinked dashboard parent"
+
+  rm "$home/data"
+  mkdir -p "$redirected/nested-data"
+  ln -s "$redirected" "$home/redirected-parent"
+  jq --arg data "$home/redirected-parent/nested-data" '.roots.data = $data' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" >/dev/null 2>&1; then
+    fail "capacity followed a symlinked dashboard ancestor"
+  fi
+  [ ! -e "$redirected/nested-data/capacity-dashboard.html" ] || fail "capacity wrote through a symlinked dashboard ancestor"
   pass "capacity atomically replaces regular output with mode 0600 and rejects symlinks"
 }
 
@@ -651,6 +741,7 @@ test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_cross_home_overlap_holds_supersession_and_active_count
 test_secondmate_readiness_uses_final_serialized_supply
+test_secondmate_readiness_uses_home_owned_runtime_lanes
 test_incomplete_sources_fail_closed
 test_unresolved_active_projects_fail_closed
 test_definition_and_time_markers_require_whole_evidence
@@ -660,6 +751,8 @@ test_recent_landings_report_incomplete_projection
 test_secondmate_captain_holds_are_pipeline_waiting_work
 test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct
+test_blocked_tasks_suppress_demand_shortage
+test_available_ready_work_is_execution_shortage
 test_html_is_private_escaped_accessible_and_responsive
 test_output_replacement_rejects_symlinks_and_enforces_mode
 test_fleet_snapshot_preserves_registered_scope_provenance

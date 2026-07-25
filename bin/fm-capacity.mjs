@@ -183,10 +183,7 @@ function configuredDispatch(configDir, fmHome) {
   return { config_present: configPresent, valid, reason, lanes: [...unique.values()] };
 }
 
-function liveEnvironment(snapshot) {
-  const roots = snapshot.roots || {};
-  const configDir = roots.config || path.join(snapshot.fm_home || ROOT, "config");
-  const fmHome = snapshot.fm_home || ROOT;
+function probeHomeEnvironment(fmHome, configDir) {
   const backendProbe = run("bash", ["-c", `
     . "$1" || exit 4
     backend=$(fm_backend_name) || exit 5
@@ -240,7 +237,19 @@ function liveEnvironment(snapshot) {
   };
 }
 
-function normalizeEnvironment(environment) {
+function liveEnvironment(snapshot) {
+  const roots = snapshot.roots || {};
+  const fmHome = snapshot.fm_home || ROOT;
+  const main = probeHomeEnvironment(fmHome, roots.config || path.join(fmHome, "config"));
+  const secondmates = {};
+  for (const mate of snapshot.secondmate_current?.records || []) {
+    if (typeof mate.id !== "string" || typeof mate.home !== "string" || !mate.home) continue;
+    secondmates[mate.id] = probeHomeEnvironment(mate.home, path.join(mate.home, "config"));
+  }
+  return { ...main, secondmates };
+}
+
+function normalizeHomeEnvironment(environment = {}) {
   const backendName = typeof environment.backend?.name === "string" && /^[a-z0-9-]+$/.test(environment.backend.name)
     ? environment.backend.name
     : "unknown";
@@ -275,6 +284,14 @@ function normalizeEnvironment(environment) {
       })),
     },
   };
+}
+
+function normalizeEnvironment(environment) {
+  const main = normalizeHomeEnvironment(environment);
+  const secondmates = Object.fromEntries(
+    Object.entries(environment.secondmates || {}).map(([id, homeEnvironment]) => [id, normalizeHomeEnvironment(homeEnvironment)])
+  );
+  return { ...main, secondmates };
 }
 
 const opaqueRefs = new Map();
@@ -443,6 +460,7 @@ function classify(snapshot, environment) {
   const overlapRows = [];
   const mates = [];
   const mateAvailability = new Map();
+  const mateRuntimeAvailability = new Map();
   let secondmateQueuedConsidered = 0;
   let readinessComplete = true;
 
@@ -552,6 +570,14 @@ function classify(snapshot, environment) {
 
   for (const mate of snapshot.secondmate_current?.records || []) {
     const route = (snapshot.secondmate_current?.registry?.records || []).find((record) => record.id === mate.id) || {};
+    const runtime = environment.secondmates?.[mate.id] || null;
+    const runtimeAvailable = Boolean(
+      runtime
+      && runtime.backend.available
+      && runtime.github_auth.status === "available"
+      && runtime.dispatch.valid
+      && runtime.dispatch.lanes.some((lane) => lane.available)
+    );
     const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
     const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
@@ -573,6 +599,7 @@ function classify(snapshot, environment) {
       || mate.counts.queued !== (mate.queued || []).length;
     if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
+    if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
       decisions.push({ owner: ownerRef(mate.id), task: itemRef(mate.id, decision.id || mate.id), key: itemRef("decision", decision.key || decision.id || mate.id) });
     }
@@ -650,6 +677,7 @@ function classify(snapshot, environment) {
     const activeCount = mate.active_children?.length || 0;
     const mateId = opaqueRef("home", mate.id);
     mateAvailability.set(mateId, !mateIncomplete && scopeAvailable);
+    mateRuntimeAvailability.set(mate.id, runtimeAvailable);
     mates.push({
       id: mateId,
       scope: scopeAvailable ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
@@ -657,8 +685,14 @@ function classify(snapshot, environment) {
       current: safeState(mate.current?.state),
       provenance: mate.provenance?.selected === "structured-home" ? "validated structured-home summary" : "unavailable",
       active_children: activeCount,
+      grounded_ready_in_scope: 0,
       ready_in_scope: 0,
       utilization: "unavailable",
+      runtime: runtime || {
+        backend: { name: "unknown", available: false, evidence: "required runtime surface unavailable" },
+        github_auth: { status: "unknown", evidence: "credential check unavailable" },
+        dispatch: { valid: false, lanes: [] },
+      },
     });
   }
 
@@ -717,9 +751,14 @@ function classify(snapshot, environment) {
   for (const mate of mates) {
     const mateReady = ready.filter((candidate) => candidate.owner !== "main" && opaqueRef("home", candidate.owner) === mate.id).length;
     const available = readinessComplete && mateAvailability.get(mate.id);
-    mate.ready_in_scope = available ? mateReady : 0;
+    const runtimeAvailable = [...mateRuntimeAvailability.entries()]
+      .some(([owner, runtimeReady]) => opaqueRef("home", owner) === mate.id && runtimeReady);
+    mate.grounded_ready_in_scope = available ? mateReady : 0;
+    mate.ready_in_scope = available && runtimeAvailable ? mateReady : 0;
     mate.utilization = !available
       ? "unavailable"
+      : mateReady > 0 && !runtimeAvailable
+        ? "unavailable lane with grounded in-scope work"
       : mate.active_children > 0
         ? "active on useful in-scope work"
         : mateReady > 0
@@ -776,6 +815,11 @@ function classify(snapshot, environment) {
       && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
       && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state);
   });
+  const executableReady = ready.filter((candidate) => {
+    if (candidate.owner !== "main") return mateRuntimeAvailability.get(candidate.owner) === true;
+    const authRequired = ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode);
+    return !laneMismatch && (!authRequired || environment.github_auth.status === "available");
+  });
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
@@ -814,17 +858,17 @@ function classify(snapshot, environment) {
     "Refine the highest-value underspecified items before adding more work or workers.",
     "Approve CAP-04: refine the highest-value definition gaps into dispatch-ready backlog items without starting implementation."
   );
-  if (blockedRows.length > 0 || overlapRows.length > 0) recommend(
+  if (pipeline.blocked.length > 0 || overlapRows.length > 0) recommend(
     "CAP-05", overlapRows.length > 0 ? "overlap serialization" : "task dependencies and gates", 50,
-    `${blockedRows.length} item${blockedRows.length === 1 ? " is" : "s are"} explicitly gated and ${overlapRows.length} item${overlapRows.length === 1 ? " is" : "s are"} conservatively serialized for coarse project overlap.`,
+    `${pipeline.blocked.length} item${pipeline.blocked.length === 1 ? " is" : "s are"} explicitly gated and ${overlapRows.length} item${overlapRows.length === 1 ? " is" : "s are"} conservatively serialized for coarse project overlap.`,
     "Landing dependencies or confirming non-overlapping subsystem boundaries can release independent starts safely.",
     "No overlap rule, dependency, time gate, approval, or safety boundary is weakened automatically.",
     "Review the highest-impact gate and only mark work independent when evidence supports it.",
     "Approve CAP-05: review the dependency and coarse-overlap gates, preserving safety, and identify any work that is truly independent."
   );
-  if (ready.length > 0) recommend(
-    "CAP-06", "grounded ready supply", 70,
-    `${ready.length} useful item${ready.length === 1 ? " is" : "s are"} grounded, unblocked, and conservatively independent: ${ready.slice(0, 5).map((item) => `${ownerRef(item.owner)}/${itemRef(item.owner, item.record.id)}`).join(", ")}.`,
+  if (executableReady.length > 0) recommend(
+    "CAP-06", "execution shortage", 70,
+    `${executableReady.length} useful item${executableReady.length === 1 ? " is" : "s are"} grounded, independently startable, and supported by an available execution lane: ${executableReady.slice(0, 5).map((item) => `${ownerRef(item.owner)}/${itemRef(item.owner, item.record.id)}`).join(", ")}.`,
     "Starting selected work increases meaningful flow without inventing work or targeting a utilization percentage.",
     "Chat approval re-enters project resolution, dispatch-profile selection, overlap checks, approval, and supervision; this run dispatches nothing.",
     "Choose one or more ready items to dispatch through the normal lifecycle.",
@@ -838,7 +882,7 @@ function classify(snapshot, environment) {
     "Prioritize genuinely parked validation gates, failing CI, or authority-approved merge and local landing actions over adding overlapping work.",
     "Handle CAP-07: inspect the validation and PR/CI gates and advance only actions already authorized by the normal delivery lifecycle."
   );
-  if (readinessComplete && ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && blockedRows.length === 0 && decisions.length === 0) recommend(
+  if (readinessComplete && ready.length === 0 && activeCount === 0 && definitionRows.length === 0 && pipeline.blocked.length === 0 && decisions.length === 0) recommend(
     "CAP-08", "demand shortage", 80,
     "No grounded ready work, active delivery, definition gaps, explicit gates, or captain decisions are visible in the bounded snapshot.",
     "Throughput is demand-limited; adding agents or keeping lanes busy would create artificial utilization, not value.",
@@ -847,10 +891,11 @@ function classify(snapshot, environment) {
     "Approve CAP-08: help me turn the next captain-grounded outcome into normal scoped backlog work; do not invent busywork."
   );
   const idleUsefulMates = mates.filter((mate) => mate.ready_in_scope > 0 && mate.active_children === 0 && mate.current !== "unknown");
+  const blockedUsefulMates = mates.filter((mate) => mate.grounded_ready_in_scope > 0 && mate.ready_in_scope === 0);
   const laneRepairRelevant = laneMismatch && (ready.some((candidate) => candidate.owner === "main") || ephemeralActiveCount > 0);
-  if (laneRepairRelevant || idleUsefulMates.length > 0) recommend(
+  if (laneRepairRelevant || idleUsefulMates.length > 0 || blockedUsefulMates.length > 0) recommend(
     "CAP-09", "lane mismatch", 25,
-    `${availableLanes.length} configured ephemeral dispatch lane${availableLanes.length === 1 ? " is" : "s are"} executable; backend ${environment.backend.name} is ${environment.backend.available ? "available" : "unavailable"}; ${idleUsefulMates.length} idle secondmate${idleUsefulMates.length === 1 ? " has" : "s have"} grounded ready in-scope work.`,
+    `${availableLanes.length} configured ephemeral dispatch lane${availableLanes.length === 1 ? " is" : "s are"} executable; backend ${environment.backend.name} is ${environment.backend.available ? "available" : "unavailable"}; ${idleUsefulMates.length} idle secondmate${idleUsefulMates.length === 1 ? " has" : "s have"} executable in-scope work and ${blockedUsefulMates.length} ${blockedUsefulMates.length === 1 ? "has" : "have"} grounded work on an unavailable home-owned lane.`,
     "Correcting a real lane mismatch can release existing supply; idle secondmates with no matching work remain healthy.",
     "Quota is explicitly unobserved, scope routing still requires judgment, and no harness fallback or dispatch happens here.",
     "Repair unavailable configured lanes or route already-grounded in-scope work through the normal dispatcher.",
@@ -892,7 +937,7 @@ function classify(snapshot, environment) {
     },
     measures: {
       useful_ready_work: ready.length,
-      independent_tasks_safe_to_start_now: ready.length,
+      independent_tasks_safe_to_start_now: executableReady.length,
       active_independent_work: activeIndependentKeys.size,
       waiting_work: pipeline.queued.length + pipeline.blocked.length + pipeline.pr_ci_approval.length,
       open_captain_actions: decisions.length + captainApprovalCards.length,
@@ -914,7 +959,7 @@ function classify(snapshot, environment) {
     readiness: {
       queued_considered: queue.filter((record) => !isSuperseded(record)).length + secondmateQueuedConsidered,
       grounded_candidates: readinessComplete ? candidates.length : 0,
-      independent_start_count: ready.length,
+      independent_start_count: executableReady.length,
       available: readinessComplete,
       definition_gaps: definitionRows,
       explicit_gates: blockedRows,
@@ -951,10 +996,11 @@ function sanitizeDeep(value) {
 }
 
 function assertSafeParentPath(parent, protectedRoot = null) {
+  const root = protectedRoot ? path.resolve(protectedRoot) : parent;
   const targets = protectedRoot
-    ? [path.resolve(protectedRoot), ...path.relative(path.resolve(protectedRoot), parent).split(path.sep)
+    ? [root, ...path.relative(root, parent).split(path.sep)
       .filter(Boolean)
-      .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [path.resolve(protectedRoot)])
+      .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [root])
       .slice(1)]
     : [parent];
   for (const target of targets) {
@@ -1036,7 +1082,8 @@ function renderHtml(model) {
     <h3>${h(mate.utilization)}</h3>
     <p><strong>Scope:</strong> ${h(mate.scope)}</p>
     <p><strong>Projects:</strong> ${h((mate.projects || []).join(", ") || "None recorded")}</p>
-    <p>${h(mate.active_children)} active child item(s), ${h(mate.ready_in_scope)} grounded ready in-scope item(s).</p>
+    <p>${h(mate.active_children)} active child item(s), ${h(mate.grounded_ready_in_scope)} grounded in-scope item(s), ${h(mate.ready_in_scope)} executable now.</p>
+    <p><strong>Home lane:</strong> backend ${h(mate.runtime.backend.name)} ${mate.runtime.backend.available ? "available" : "unavailable"}; auth ${h(mate.runtime.github_auth.status)}; ${h((mate.runtime.dispatch.lanes || []).filter((lane) => lane.available).length)} executable dispatch lane(s).</p>
     <small>${h(mate.provenance)}</small>
   </article>`).join("") || `<p class="empty">No persistent secondmates are registered.</p>`;
 
@@ -1120,9 +1167,12 @@ function main() {
   const defaultOutput = path.join(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"), "capacity-dashboard.html");
   const output = path.resolve(opts.output || defaultOutput);
   const allowedData = path.resolve(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"));
-  if (!opts.output && !output.startsWith(`${allowedData}${path.sep}`)) throw new Error("default dashboard path escaped the effective data directory");
+  const outputRelative = path.relative(allowedData, output);
+  if (!outputRelative || outputRelative.startsWith(`..${path.sep}`) || path.isAbsolute(outputRelative)) {
+    throw new Error("dashboard path must stay inside the effective data directory");
+  }
   const model = classify(snapshot, environment);
-  writePrivateAtomic(output, renderHtml(model), opts.output ? null : allowedData);
+  writePrivateAtomic(output, renderHtml(model), snapshot.fm_home || path.dirname(allowedData));
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {
