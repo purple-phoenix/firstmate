@@ -499,6 +499,7 @@ function classify(snapshot, environment) {
   const mates = [];
   const mateAvailability = new Map();
   const mateRuntimeCapabilities = new Map();
+  const activeRuntimeBlockedMates = new Set();
   const secondmateGithubBoundActive = new Set();
   const secondmateGithubBoundDelivery = new Set();
   let secondmateQueuedConsidered = 0;
@@ -813,17 +814,21 @@ function classify(snapshot, environment) {
     const mateReady = mateCandidates.length;
     const mateExecutable = mateCandidates.filter(candidateExecutionAvailable).length;
     const available = readinessComplete && mateAvailability.get(mate.id);
-    const activeCredentialBlocked = [...mateRuntimeCapabilities.entries()].some(([owner, runtime]) =>
-      opaqueRef("home", owner) === mate.id
-      && secondmateGithubBoundActive.has(owner)
-      && runtime.github_auth_available !== true
-    );
+    const runtimeEntry = [...mateRuntimeCapabilities.entries()].find(([owner]) => opaqueRef("home", owner) === mate.id);
+    const [runtimeOwner, runtime] = runtimeEntry || [];
+    const activeCredentialBlocked = secondmateGithubBoundActive.has(runtimeOwner)
+      && runtime?.github_auth_available !== true;
+    const activeRuntimeBlocked = mate.active_children > 0
+      && runtime?.execution_lane_available !== true;
+    if (activeRuntimeBlocked) activeRuntimeBlockedMates.add(mate.id);
     mate.grounded_ready_in_scope = available ? mateReady : 0;
     mate.ready_in_scope = available ? mateExecutable : 0;
     mate.utilization = !available
       ? "unavailable"
       : activeCredentialBlocked
         ? "active with unavailable delivery credentials"
+      : activeRuntimeBlocked
+        ? "active with unavailable execution lane"
       : mateReady > 0 && mateExecutable === 0
         ? "unavailable lane with grounded in-scope work"
       : mate.active_children > 0
@@ -973,10 +978,11 @@ function classify(snapshot, environment) {
   );
   const idleUsefulMates = mates.filter((mate) => mate.ready_in_scope > 0 && mate.active_children === 0 && mate.current !== "unknown");
   const blockedUsefulMates = mates.filter((mate) => mate.grounded_ready_in_scope > mate.ready_in_scope);
+  const activeBlockedMates = mates.filter((mate) => activeRuntimeBlockedMates.has(mate.id));
   const laneRepairRelevant = laneMismatch && (ready.some((candidate) => candidate.owner === "main") || ephemeralActiveCount > 0);
-  if (laneRepairRelevant || idleUsefulMates.length > 0 || blockedUsefulMates.length > 0) recommend(
+  if (laneRepairRelevant || idleUsefulMates.length > 0 || blockedUsefulMates.length > 0 || activeBlockedMates.length > 0) recommend(
     "CAP-09", "lane mismatch", 25,
-    `${availableLanes.length} configured ephemeral dispatch lane${availableLanes.length === 1 ? " is" : "s are"} executable; backend ${environment.backend.name} is ${environment.backend.available ? "available" : "unavailable"}; ${idleUsefulMates.length} idle secondmate${idleUsefulMates.length === 1 ? " has" : "s have"} executable in-scope work and ${blockedUsefulMates.length} ${blockedUsefulMates.length === 1 ? "has" : "have"} grounded work on an unavailable home-owned lane.`,
+    `${availableLanes.length} configured ephemeral dispatch lane${availableLanes.length === 1 ? " is" : "s are"} executable; backend ${environment.backend.name} is ${environment.backend.available ? "available" : "unavailable"}; ${idleUsefulMates.length} idle secondmate${idleUsefulMates.length === 1 ? " has" : "s have"} executable in-scope work, ${blockedUsefulMates.length} ${blockedUsefulMates.length === 1 ? "has" : "have"} grounded work on an unavailable home-owned lane, and ${activeBlockedMates.length} active secondmate${activeBlockedMates.length === 1 ? " has" : "s have"} an unavailable home-owned runtime lane.`,
     "Correcting a real lane mismatch can release existing supply; idle secondmates with no matching work remain healthy.",
     "Quota is explicitly unobserved, scope routing still requires judgment, and no harness fallback or dispatch happens here.",
     "Repair unavailable configured lanes or route already-grounded in-scope work through the normal dispatcher.",

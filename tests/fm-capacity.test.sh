@@ -277,6 +277,22 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
     ))
     and (.recommendations[] | select(.id == "CAP-02") | .evidence | contains("persistent home-01 (unavailable)"))
   ' >/dev/null || fail "active secondmate PR delivery did not retain home-owned credential evidence: $json"
+
+  jq '
+    .secondmates.design.github_auth.status = "available"
+    | .secondmates.design.backend.available = false
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "active secondmate runtime capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.recommendations | any(.id == "CAP-02") | not)
+    and (.lanes.persistent_secondmates | any(
+      .active_children == 1
+      and .utilization == "active with unavailable execution lane"
+    ))
+    and (.recommendations[] | select(.id == "CAP-09") | .evidence | contains("1 active secondmate has an unavailable home-owned runtime lane"))
+  ' >/dev/null || fail "active secondmate runtime lane failure was not surfaced: $json"
   pass "secondmate readiness includes home-owned backend, auth, and dispatch evidence"
 }
 
