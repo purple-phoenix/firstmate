@@ -832,7 +832,20 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
-        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+        # Locale-invariant bare-agent-prompt match. Never feed multi-byte UTF-8
+        # character classes (e.g. default ^[❯›]) to grep under ambient LC_ALL=C:
+        # the class becomes a raw-byte set that matches every 0xE2-leading
+        # box-drawing row and promotes footer/frame lines into a bare composer.
+        if case "$trimmed" in '❯'*|'›'*) true ;; *) false ;; esac; then
+          shape=bare
+          raw_match=$line
+          generic_line=$row
+          found=1
+        elif [ "$FM_BACKEND_HERDR_BARE_PROMPT_RE" != '^[❯›]' ] \
+          && {
+            printf '%s' "$trimmed" | LC_ALL=C.UTF-8 grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" 2>/dev/null \
+              || printf '%s' "$trimmed" | LC_ALL=en_US.UTF-8 grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" 2>/dev/null
+          }; then
           shape=bare
           raw_match=$line
           generic_line=$row
