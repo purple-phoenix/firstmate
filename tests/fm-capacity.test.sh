@@ -269,15 +269,17 @@ test_definition_and_time_markers_require_whole_evidence() {
       {"order":21,"state":"queued","structured":true,"id":"not-defined","title":"Implement the explicitly undefined workflow","repo":"upsilon","kind":"ship","body_excerpt":"Acceptance criteria: not defined."},
       {"order":22,"state":"queued","structured":true,"id":"none-defined","title":"Implement the absent criteria workflow","repo":"phi","kind":"ship","body_excerpt":"Acceptance criteria: none provided."},
       {"order":23,"state":"queued","structured":true,"id":"not-applicable","title":"Implement the inapplicable criteria workflow","repo":"chi","kind":"ship","body_excerpt":"Acceptance criteria: n/a pending review."},
-      {"order":24,"state":"queued","structured":true,"id":"after-login","title":"Load the dashboard after login","repo":"psi","kind":"ship","body_excerpt":"Acceptance criteria: the dashboard loads after login."}
+      {"order":24,"state":"queued","structured":true,"id":"after-login","title":"Load the dashboard after login","repo":"psi","kind":"ship","body_excerpt":"Acceptance criteria: the dashboard loads after login."},
+      {"order":25,"state":"queued","structured":true,"id":"empty-criteria-section","title":"Implement the undecided notes workflow","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria:\nNotes: pending captain input"},
+      {"order":26,"state":"queued","structured":true,"id":"listed-criteria","title":"Implement the listed acceptance workflow","repo":"alpha-two","kind":"ship","body_excerpt":"Acceptance criteria:\n- regression checks pass"}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "definition-marker capacity run failed"
   printf '%s' "$json" | jq -e '
-    .measures.useful_ready_work == 8
-    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 10
+    .measures.useful_ready_work == 9
+    and ([.readiness.definition_gaps[] | select(.gaps | index("acceptance criteria missing"))] | length) == 11
     and ([.readiness.definition_gaps[] | select(.gaps | index("dependency definition missing"))] | length) == 0
     and ([.readiness.explicit_gates[] | select(.reason == "time gate until 2026-08-01")] | length) == 1
   ' >/dev/null || fail "acceptance or time-gate substring produced false evidence: $json"
@@ -389,6 +391,16 @@ test_recent_landings_report_incomplete_projection() {
     and (.provenance.recent_landings | startswith("Main backlog completion evidence is incomplete"))
     and (.provenance.recent_landings | contains("secondmate") | not)
   ' >/dev/null || fail "missing main landing source was presented as complete: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.backlog.records += [{"order":10,"state":"done","structured":false,"id":null,"raw":"legacy completion"}]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unstructured-main-landings capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.recently_landed_complete == false
+    and (.provenance.recent_landings | startswith("Main backlog completion evidence is incomplete"))
+  ' >/dev/null || fail "omitted unstructured main landing was presented as complete: $json"
   pass "recent landing counts expose bounded projection incompleteness"
 }
 
@@ -521,6 +533,34 @@ EOF
     and (.recommendations | any(.id == "CAP-09"))
     and (.recommendations[] | select(.id == "CAP-09") | .safety_authority_boundary | contains("Quota is explicitly unobserved"))
   ' >/dev/null || fail "lane repairs were not recommended for grounded blocked delivery: $json"
+
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"queued","structured":true,"id":"queued-pr","title":"Ship the queued PR-bound delivery","repo":"omega","kind":"ship","delivery_mode":"direct-PR","body_excerpt":"Acceptance criteria: delivery checks pass."}
+    ]
+    | .tasks = []
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "queued PR-bound capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.recommendations | any(.id == "CAP-02"))
+    and (.recommendations | any(.id == "CAP-06"))
+  ' >/dev/null || fail "queued PR-bound work did not make authentication relevant: $json"
+
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"done","structured":true,"id":"landed-pr","title":"Landed the completed PR delivery","repo":"omega","kind":"ship","delivery_mode":"no-mistakes","completion":{"verb":"merged","date":"2026-07-17"}}
+    ]
+    | .tasks = [
+      {"id":"landed-pr","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"done","source":"run-step","detail":"merged"},"endpoint":{"exists":false},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/merged"},"backlog":{"id":"landed-pr","state":"done","repo":"omega","kind":"ship"}}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "landed PR capacity run failed"
+  printf '%s' "$json" | jq -e '(.recommendations | any(.id == "CAP-02") | not)' >/dev/null ||
+    fail "landed terminal work triggered credential repair: $json"
   pass "capacity recommends lane repairs only for grounded delivery demand"
 }
 
@@ -561,7 +601,7 @@ test_html_is_private_escaped_accessible_and_responsive() {
 
 test_output_replacement_rejects_symlinks_and_enforces_mode() {
   local home="$TMP_ROOT/output-home" snapshot="$TMP_ROOT/output-snapshot.json" environment="$TMP_ROOT/output-environment.json"
-  local output="$home/data/capacity-dashboard.html" target="$TMP_ROOT/symlink-target" mode
+  local output="$home/data/capacity-dashboard.html" target="$TMP_ROOT/symlink-target" redirected="$TMP_ROOT/redirected-data" mode
   make_fixture "$home" "$snapshot" "$environment"
   printf '%s\n' sentinel > "$target"
   ln -s "$target" "$output"
@@ -576,6 +616,15 @@ test_output_replacement_rejects_symlinks_and_enforces_mode() {
     fail "capacity could not replace an existing regular dashboard"
   mode=$(stat -f '%Lp' "$output" 2>/dev/null || stat -c '%a' "$output")
   [ "$mode" = 600 ] || fail "capacity dashboard mode is $mode, expected 600"
+
+  rm -rf "$redirected"
+  mv "$home/data" "$redirected"
+  rm "$redirected/capacity-dashboard.html"
+  ln -s "$redirected" "$home/data"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" >/dev/null 2>&1; then
+    fail "capacity followed a symlinked dashboard parent"
+  fi
+  [ ! -e "$redirected/capacity-dashboard.html" ] || fail "capacity wrote through a symlinked dashboard parent"
   pass "capacity atomically replaces regular output with mode 0600 and rejects symlinks"
 }
 
@@ -583,10 +632,17 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
   local home="$TMP_ROOT/registry-home" missing="$TMP_ROOT/missing-secondmate" json
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' '- design - design systems domain (home: '"$missing"'; scope: design systems and UI review; projects: alpha, beta; added 2026-07-17)' > "$home/data/secondmates.md"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-07-17)' > "$home/data/projects.md"
+  printf '%s\n' '## Queued' '- [ ] scoped-item - Ship the scoped alpha change (repo: alpha, kind: ship)' '  Acceptance criteria:' '  - focused checks pass' > "$home/data/backlog.md"
   json=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "canonical fleet snapshot failed on registry fixture"
   printf '%s' "$json" | jq -e '
-    .secondmate_current.registry.records
-    | any(.id == "design" and .summary == "design systems domain" and .scope == "design systems and UI review" and .projects == ["alpha","beta"])
+    (.secondmate_current.registry.records
+      | any(.id == "design" and .summary == "design systems domain" and .scope == "design systems and UI review" and .projects == ["alpha","beta"]))
+    and (.backlog.records | any(
+      .id == "scoped-item"
+      and .delivery_mode == "direct-PR"
+      and .body_excerpt == "Acceptance criteria:\n- focused checks pass"
+    ))
   ' >/dev/null || fail "canonical snapshot did not preserve route scope provenance: $json"
   pass "canonical fleet snapshot preserves bounded secondmate summary, scope, and projects"
 }

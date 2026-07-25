@@ -321,17 +321,28 @@ function dateAgeDays(value, now) {
 }
 
 function bodyHasAcceptance(record) {
-  const text = String(record.body_excerpt || "").replace(/\s+/g, " ").trim();
+  const text = String(record.body_excerpt || "").trim();
   const namedMarkers = "acceptance criteria|done when|definition of done|success criteria";
   if (!text || new RegExp(`\\bno\\s+(?:${namedMarkers})\\b`, "i").test(text)) return false;
-  const patterns = [
-    new RegExp(`(?:^|\\s)(?:${namedMarkers})\\s*[:\\-]\\s*(.+)$`, "i"),
-    new RegExp(`(?:^|\\s)#{1,6}\\s*(?:${namedMarkers})\\s+(.+)$`, "i"),
-    /(?:^|\s)(?:acceptance|verify|verification|tests?)\s*:\s*(.+)$/i,
-  ];
-  const match = patterns.map((pattern) => text.match(pattern)).find(Boolean);
-  if (!match) return false;
-  const criteria = match[1].trim().replace(/^[*-]\s*/, "");
+  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  const inlineMarker = new RegExp(`^(?:#{1,6}\\s*)?(?:${namedMarkers})\\s*[:\\-]\\s*(.+)$`, "i");
+  const headingMarker = new RegExp(`^(?:#{1,6}\\s*)?(?:${namedMarkers})\\s*:?\\s*$`, "i");
+  let criteria = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const inline = lines[index].match(inlineMarker)
+      || lines[index].match(/^(?:acceptance|verify|verification|tests?)\s*:\s*(.+)$/i);
+    if (inline) {
+      criteria = inline[1].trim();
+      break;
+    }
+    if (headingMarker.test(lines[index])) {
+      const listed = lines[index + 1]?.match(/^[-*]\s+(.+)$/);
+      if (listed) criteria = listed[1].trim();
+      break;
+    }
+  }
+  if (!criteria) return false;
+  criteria = criteria.replace(/^[*-]\s*/, "");
   if (criteria.length < 8) return false;
   const placeholder = /^(?:(?:todo|tbd|fixme|wip|placeholder|draft|pending|forthcoming|undefined|unknown|undecided|unresolved|none|n\/?a|not applicable|not defined)\b|(?:to be|will be|not yet)\s+(?:defined|determined|written|added|confirmed|finalized)\b)/i;
   return !placeholder.test(criteria) && (criteria.match(/[a-z0-9][\w-]*/gi) || []).length >= 2;
@@ -717,7 +728,9 @@ function classify(snapshot, environment) {
   }
 
   const secondmateLanded = snapshot.secondmate_landed;
-  const mainLandingsComplete = snapshot.backlog?.present === true && Array.isArray(snapshot.backlog?.records);
+  const mainLandingsComplete = snapshot.backlog?.present === true
+    && Array.isArray(snapshot.backlog?.records)
+    && !snapshot.backlog.records.some((record) => record.state === "done" && record.structured !== true);
   const secondmateLandingsComplete = Boolean(
     secondmateLanded
     && Array.isArray(secondmateLanded.records)
@@ -753,11 +766,16 @@ function classify(snapshot, environment) {
   const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
     task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
   ).length;
-  const githubBoundWork = (snapshot.tasks || []).some((task) =>
-    task.kind !== "secondmate"
-    && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
-    && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state)
+  const readyGithubBoundWork = ready.some((candidate) =>
+    ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)
   );
+  const githubBoundWork = readyGithubBoundWork || (snapshot.tasks || []).some((task) => {
+    if (task.kind === "secondmate") return false;
+    const backlog = mainRecords.find((record) => record.structured && record.id === task.id) || task.backlog || {};
+    return backlog.state !== "done"
+      && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
+      && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state);
+  });
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
@@ -932,14 +950,33 @@ function sanitizeDeep(value) {
   return value;
 }
 
-function writePrivateAtomic(destination, content) {
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
+function assertSafeParentPath(parent, protectedRoot = null) {
+  const targets = protectedRoot
+    ? [path.resolve(protectedRoot), ...path.relative(path.resolve(protectedRoot), parent).split(path.sep)
+      .filter(Boolean)
+      .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [path.resolve(protectedRoot)])
+      .slice(1)]
+    : [parent];
+  for (const target of targets) {
+    try {
+      if (fs.lstatSync(target).isSymbolicLink()) throw new Error("dashboard parent path must not contain a symlink");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function writePrivateAtomic(destination, content, protectedRoot = null) {
+  const parent = path.dirname(destination);
+  assertSafeParentPath(parent, protectedRoot);
+  fs.mkdirSync(parent, { recursive: true });
+  assertSafeParentPath(parent, protectedRoot);
   try {
     if (fs.lstatSync(destination).isSymbolicLink()) throw new Error("dashboard destination must not be a symlink");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  const temporary = path.join(parent, `.${path.basename(destination)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
   let descriptor;
   try {
     descriptor = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
@@ -1085,7 +1122,7 @@ function main() {
   const allowedData = path.resolve(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"));
   if (!opts.output && !output.startsWith(`${allowedData}${path.sep}`)) throw new Error("default dashboard path escaped the effective data directory");
   const model = classify(snapshot, environment);
-  writePrivateAtomic(output, renderHtml(model));
+  writePrivateAtomic(output, renderHtml(model), opts.output ? null : allowedData);
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {

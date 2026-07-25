@@ -355,10 +355,28 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
        end)
     | .records |= map(
         if (.body_lines | length) > 0 then
-          .body_excerpt = ((.body_lines | join(" "))[:240])
+          .body_excerpt = ((.body_lines | join("\n"))[:240])
         else . end)
     | del(.section,.order)
   ' < "$backlog"
+}
+
+attach_delivery_modes_json() {  # <backlog-json>
+  local backlog_json=$1 repo resolved mode
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    resolved=$(
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_HOME="$FM_HOME" \
+      FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-project-mode.sh" "$repo" 2>/dev/null
+    ) || resolved="no-mistakes off"
+    mode=${resolved%% *}
+    backlog_json=$(printf '%s' "$backlog_json" | jq --arg repo "$repo" --arg mode "$mode" '
+      .records |= map(if .repo == $repo then .delivery_mode = $mode else . end)
+    ')
+  done < <(printf '%s' "$backlog_json" | jq -r '[.records[]? | .repo // empty] | unique[]')
+  printf '%s\n' "$backlog_json"
 }
 
 task_json_lines() {
@@ -632,6 +650,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
+          delivery_mode:((.delivery_mode // null) | if . == null then null else trunc(40) end),
           priority:((.priority // null) | if . == null then null else trunc(40) end),
           order:((.order // null) | if type == "number" then . else null end),
           body_excerpt:((.body_excerpt // null) | if . == null then null else trunc(240) end)}][:$queued_n]),
@@ -1193,6 +1212,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+BACKLOG_JSON=$(attach_delivery_modes_json "$BACKLOG_JSON") || { echo "fm-fleet-snapshot: delivery mode projection failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
