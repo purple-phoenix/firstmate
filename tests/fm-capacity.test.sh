@@ -8,6 +8,7 @@ set -u
 CAPACITY="$ROOT/bin/fm-capacity.mjs"
 SKILL="$ROOT/.agents/skills/capacity/SKILL.md"
 TMP_ROOT=$(fm_test_tmproot fm-capacity)
+TMP_ROOT="$(cd "$(dirname "$TMP_ROOT")" && pwd -P)/$(basename "$TMP_ROOT")"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
@@ -198,6 +199,37 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
     and (.recommendations | any(.id == "CAP-09"))
     and (.recommendations[] | select(.id == "CAP-09") | .evidence | contains("1 has grounded work on an unavailable home-owned lane"))
   ' >/dev/null || fail "secondmate home-owned runtime lane was not reflected in readiness: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '.secondmates.design.github_auth.status = "unavailable"' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  jq '.secondmate_current.records[0].queued[0].delivery_mode = "local-only"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "secondmate local-only capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.lanes.persistent_secondmates | any(
+      .grounded_ready_in_scope == 1
+      and .ready_in_scope == 1
+      and .runtime.github_auth.status == "unavailable"
+      and .utilization == "idle with grounded ready in-scope work"
+    ))
+    and (.pipeline.ready | any(.owner == "persistent home-01"))
+  ' >/dev/null || fail "local-only secondmate work was incorrectly gated on GitHub auth: $json"
+
+  jq '.secondmate_current.records[0].queued[0].delivery_mode = "direct-PR"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "secondmate PR-bound capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.lanes.persistent_secondmates | any(
+      .grounded_ready_in_scope == 1
+      and .ready_in_scope == 0
+      and .runtime.github_auth.status == "unavailable"
+      and .utilization == "unavailable lane with grounded in-scope work"
+    ))
+    and (.recommendations[] | select(.id == "CAP-09") | .evidence | contains("1 has grounded work on an unavailable home-owned lane"))
+  ' >/dev/null || fail "PR-bound secondmate work ignored unavailable GitHub auth: $json"
   pass "secondmate readiness includes home-owned backend, auth, and dispatch evidence"
 }
 
@@ -715,6 +747,24 @@ test_output_replacement_rejects_symlinks_and_enforces_mode() {
     fail "capacity followed a symlinked dashboard ancestor"
   fi
   [ ! -e "$redirected/nested-data/capacity-dashboard.html" ] || fail "capacity wrote through a symlinked dashboard ancestor"
+
+  local outer_target="$TMP_ROOT/output-outer-target" outer_link="$TMP_ROOT/output-outer-link"
+  local linked_home="$outer_link/linked-home"
+  mkdir -p "$outer_target/linked-home/data" "$outer_target/linked-home/state" "$outer_target/linked-home/config" "$outer_target/linked-home/projects"
+  ln -s "$outer_target" "$outer_link"
+  jq --arg home "$linked_home" '
+    .fm_home = $home
+    | .roots.state = ($home + "/state")
+    | .roots.data = ($home + "/data")
+    | .roots.config = ($home + "/config")
+    | .roots.projects = ($home + "/projects")
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" >/dev/null 2>&1; then
+    fail "capacity followed a symlink before the protected home root"
+  fi
+  [ ! -e "$outer_target/linked-home/data/capacity-dashboard.html" ] ||
+    fail "capacity wrote through a symlink before the protected home root"
   pass "capacity atomically replaces regular output with mode 0600 and rejects symlinks"
 }
 

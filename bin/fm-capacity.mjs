@@ -22,6 +22,8 @@
  * The producer is read-mostly. It writes only the selected dashboard path and
  * never dispatches, merges, tears down, changes backlog/task state, or opens a
  * service. Inline dashboard JavaScript copies prompts only and cannot run actions.
+ * Live environment probes share one 30-second fleet-wide deadline and preserve
+ * unavailable evidence for homes that cannot be inspected within that bound.
  */
 
 import fs from "node:fs";
@@ -33,6 +35,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
+const HOME_PROBE_BUDGET_MS = 30000;
 const VERIFIED_HARNESSES = new Set(["claude", "codex", "opencode", "pi", "grok"]);
 const STAGES = [
   "queued",
@@ -121,7 +124,7 @@ function executableOnPath(name) {
   return false;
 }
 
-function configuredDispatch(configDir, fmHome) {
+function configuredDispatch(configDir, fmHome, timeout = 3000) {
   const dispatchPath = path.join(configDir, "crew-dispatch.json");
   const lanes = [];
   let configPresent = false;
@@ -160,7 +163,7 @@ function configuredDispatch(configDir, fmHome) {
   } else {
     const result = run(path.join(SCRIPT_DIR, "fm-harness.sh"), ["crew"], {
       env: { ...process.env, FM_HOME: fmHome, FM_CONFIG_OVERRIDE: configDir },
-      timeout: 3000,
+      timeout,
     });
     const harness = (result.stdout || "").trim() || "unknown";
     lanes.push({
@@ -183,7 +186,20 @@ function configuredDispatch(configDir, fmHome) {
   return { config_present: configPresent, valid, reason, lanes: [...unique.values()] };
 }
 
-function probeHomeEnvironment(fmHome, configDir) {
+function unavailableHomeEnvironment(evidence) {
+  return {
+    backend: { name: "unknown", available: false, evidence, owner: "bin/fm-backend.sh" },
+    github_auth: { status: "unknown", evidence, owner: "bin/fm-bootstrap.sh startup credential check" },
+    dispatch: { config_present: false, valid: false, reason: evidence, lanes: [] },
+  };
+}
+
+function remainingProbeTimeout(deadline, maximum) {
+  return Math.max(1, Math.min(maximum, deadline - Date.now()));
+}
+
+function probeHomeEnvironment(fmHome, configDir, deadline = Number.POSITIVE_INFINITY) {
+  if (Date.now() >= deadline) return unavailableHomeEnvironment("aggregate home probe deadline exhausted");
   const backendProbe = run("bash", ["-c", `
     . "$1" || exit 4
     backend=$(fm_backend_name) || exit 5
@@ -203,15 +219,27 @@ function probeHomeEnvironment(fmHome, configDir) {
     fi
   `, "fm-capacity-backend", path.join(SCRIPT_DIR, "fm-backend.sh")], {
     env: { ...process.env, FM_HOME: fmHome, FM_CONFIG_OVERRIDE: configDir },
-    timeout: 5000,
+    timeout: remainingProbeTimeout(deadline, 5000),
   });
   const backendFields = (backendProbe.stdout || "unknown|false|backend probe failed").trim().split("|");
+  if (Date.now() >= deadline) {
+    const unavailable = unavailableHomeEnvironment("aggregate home probe deadline exhausted");
+    unavailable.backend = {
+      name: backendFields[0] || "unknown",
+      available: backendFields[1] === "true",
+      evidence: backendFields.slice(2).join("|") || "backend probe failed",
+      owner: "bin/fm-backend.sh",
+    };
+    return unavailable;
+  }
   const bootstrap = run(path.join(SCRIPT_DIR, "fm-bootstrap.sh"), [], {
     env: { ...process.env, FM_HOME: fmHome, FM_CONFIG_OVERRIDE: configDir, FM_BOOTSTRAP_DETECT_ONLY: "1" },
-    timeout: 15000,
+    timeout: remainingProbeTimeout(deadline, 15000),
   });
   const diagnostics = `${bootstrap.stdout || ""}\n${bootstrap.stderr || ""}`;
-  const dispatch = configuredDispatch(configDir, fmHome);
+  const dispatch = Date.now() < deadline
+    ? configuredDispatch(configDir, fmHome, remainingProbeTimeout(deadline, 3000))
+    : unavailableHomeEnvironment("aggregate home probe deadline exhausted").dispatch;
   const dispatchDiagnostic = diagnostics.match(/CREW_DISPATCH: invalid config\/crew-dispatch\.json - ([^\n]+)/);
   if (dispatchDiagnostic) {
     dispatch.valid = false;
@@ -240,11 +268,12 @@ function probeHomeEnvironment(fmHome, configDir) {
 function liveEnvironment(snapshot) {
   const roots = snapshot.roots || {};
   const fmHome = snapshot.fm_home || ROOT;
-  const main = probeHomeEnvironment(fmHome, roots.config || path.join(fmHome, "config"));
+  const deadline = Date.now() + HOME_PROBE_BUDGET_MS;
+  const main = probeHomeEnvironment(fmHome, roots.config || path.join(fmHome, "config"), deadline);
   const secondmates = {};
   for (const mate of snapshot.secondmate_current?.records || []) {
     if (typeof mate.id !== "string" || typeof mate.home !== "string" || !mate.home) continue;
-    secondmates[mate.id] = probeHomeEnvironment(mate.home, path.join(mate.home, "config"));
+    secondmates[mate.id] = probeHomeEnvironment(mate.home, path.join(mate.home, "config"), deadline);
   }
   return { ...main, secondmates };
 }
@@ -460,7 +489,7 @@ function classify(snapshot, environment) {
   const overlapRows = [];
   const mates = [];
   const mateAvailability = new Map();
-  const mateRuntimeAvailability = new Map();
+  const mateRuntimeCapabilities = new Map();
   let secondmateQueuedConsidered = 0;
   let readinessComplete = true;
 
@@ -571,10 +600,9 @@ function classify(snapshot, environment) {
   for (const mate of snapshot.secondmate_current?.records || []) {
     const route = (snapshot.secondmate_current?.registry?.records || []).find((record) => record.id === mate.id) || {};
     const runtime = environment.secondmates?.[mate.id] || null;
-    const runtimeAvailable = Boolean(
+    const executionLaneAvailable = Boolean(
       runtime
       && runtime.backend.available
-      && runtime.github_auth.status === "available"
       && runtime.dispatch.valid
       && runtime.dispatch.lanes.some((lane) => lane.available)
     );
@@ -677,7 +705,10 @@ function classify(snapshot, environment) {
     const activeCount = mate.active_children?.length || 0;
     const mateId = opaqueRef("home", mate.id);
     mateAvailability.set(mateId, !mateIncomplete && scopeAvailable);
-    mateRuntimeAvailability.set(mate.id, runtimeAvailable);
+    mateRuntimeCapabilities.set(mate.id, {
+      execution_lane_available: executionLaneAvailable,
+      github_auth_available: runtime?.github_auth.status === "available",
+    });
     mates.push({
       id: mateId,
       scope: scopeAvailable ? "Registered routing scope recorded; text withheld" : "Registered routing scope unavailable",
@@ -748,20 +779,32 @@ function classify(snapshot, environment) {
       pipeline.ready.push(cardFromBacklog(candidate.record, candidate.owner, "ready", "Grounded, unblocked, and conservatively independent"));
     }
   }
+  const candidateExecutionAvailable = (candidate) => {
+    const authRequired = ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode);
+    if (candidate.owner === "main") {
+      const mainLaneAvailable = environment.dispatch.valid
+        && environment.backend.available
+        && environment.dispatch.lanes.some((lane) => lane.available);
+      return mainLaneAvailable && (!authRequired || environment.github_auth.status === "available");
+    }
+    const runtime = mateRuntimeCapabilities.get(candidate.owner);
+    return runtime?.execution_lane_available === true
+      && (!authRequired || runtime.github_auth_available === true);
+  };
   for (const mate of mates) {
-    const mateReady = ready.filter((candidate) => candidate.owner !== "main" && opaqueRef("home", candidate.owner) === mate.id).length;
+    const mateCandidates = ready.filter((candidate) => candidate.owner !== "main" && opaqueRef("home", candidate.owner) === mate.id);
+    const mateReady = mateCandidates.length;
+    const mateExecutable = mateCandidates.filter(candidateExecutionAvailable).length;
     const available = readinessComplete && mateAvailability.get(mate.id);
-    const runtimeAvailable = [...mateRuntimeAvailability.entries()]
-      .some(([owner, runtimeReady]) => opaqueRef("home", owner) === mate.id && runtimeReady);
     mate.grounded_ready_in_scope = available ? mateReady : 0;
-    mate.ready_in_scope = available && runtimeAvailable ? mateReady : 0;
+    mate.ready_in_scope = available ? mateExecutable : 0;
     mate.utilization = !available
       ? "unavailable"
-      : mateReady > 0 && !runtimeAvailable
+      : mateReady > 0 && mateExecutable === 0
         ? "unavailable lane with grounded in-scope work"
       : mate.active_children > 0
         ? "active on useful in-scope work"
-        : mateReady > 0
+        : mateExecutable > 0
           ? "idle with grounded ready in-scope work"
           : "healthy idle - no grounded ready in-scope work";
   }
@@ -815,11 +858,7 @@ function classify(snapshot, environment) {
       && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
       && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state);
   });
-  const executableReady = ready.filter((candidate) => {
-    if (candidate.owner !== "main") return mateRuntimeAvailability.get(candidate.owner) === true;
-    const authRequired = ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode);
-    return !laneMismatch && (!authRequired || environment.github_auth.status === "available");
-  });
+  const executableReady = ready.filter(candidateExecutionAvailable);
   const recommendations = [];
 
   function recommend(id, classification, priority, evidence, consequence, boundary, nextAction, prompt) {
@@ -891,7 +930,7 @@ function classify(snapshot, environment) {
     "Approve CAP-08: help me turn the next captain-grounded outcome into normal scoped backlog work; do not invent busywork."
   );
   const idleUsefulMates = mates.filter((mate) => mate.ready_in_scope > 0 && mate.active_children === 0 && mate.current !== "unknown");
-  const blockedUsefulMates = mates.filter((mate) => mate.grounded_ready_in_scope > 0 && mate.ready_in_scope === 0);
+  const blockedUsefulMates = mates.filter((mate) => mate.grounded_ready_in_scope > mate.ready_in_scope);
   const laneRepairRelevant = laneMismatch && (ready.some((candidate) => candidate.owner === "main") || ephemeralActiveCount > 0);
   if (laneRepairRelevant || idleUsefulMates.length > 0 || blockedUsefulMates.length > 0) recommend(
     "CAP-09", "lane mismatch", 25,
@@ -996,13 +1035,17 @@ function sanitizeDeep(value) {
 }
 
 function assertSafeParentPath(parent, protectedRoot = null) {
-  const root = protectedRoot ? path.resolve(protectedRoot) : parent;
-  const targets = protectedRoot
-    ? [root, ...path.relative(root, parent).split(path.sep)
-      .filter(Boolean)
-      .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [root])
-      .slice(1)]
-    : [parent];
+  const resolvedParent = path.resolve(parent);
+  if (protectedRoot) {
+    const relative = path.relative(path.resolve(protectedRoot), resolvedParent);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("dashboard parent must remain under the protected root");
+    }
+  }
+  const parsed = path.parse(resolvedParent);
+  const targets = path.relative(parsed.root, resolvedParent).split(path.sep)
+    .filter(Boolean)
+    .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [parsed.root]);
   for (const target of targets) {
     try {
       if (fs.lstatSync(target).isSymbolicLink()) throw new Error("dashboard parent path must not contain a symlink");
