@@ -1036,22 +1036,31 @@ function sanitizeDeep(value) {
 
 function assertSafeParentPath(parent, protectedRoot = null) {
   const resolvedParent = path.resolve(parent);
-  if (protectedRoot) {
-    const relative = path.relative(path.resolve(protectedRoot), resolvedParent);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new Error("dashboard parent must remain under the protected root");
-    }
+  const resolvedRoot = path.resolve(protectedRoot || resolvedParent);
+  const relative = path.relative(resolvedRoot, resolvedParent);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("dashboard parent must remain under the protected root");
   }
-  const parsed = path.parse(resolvedParent);
-  const targets = path.relative(parsed.root, resolvedParent).split(path.sep)
+  const canonicalRoot = fs.realpathSync(resolvedRoot);
+  const targets = relative.split(path.sep)
     .filter(Boolean)
-    .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [parsed.root]);
+    .reduce((paths, segment) => [...paths, path.join(paths.at(-1), segment)], [resolvedRoot])
+    .slice(1);
   for (const target of targets) {
     try {
       if (fs.lstatSync(target).isSymbolicLink()) throw new Error("dashboard parent path must not contain a symlink");
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
+  }
+  try {
+    const canonicalParent = fs.realpathSync(resolvedParent);
+    const canonicalRelative = path.relative(canonicalRoot, canonicalParent);
+    if (canonicalRelative === ".." || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
+      throw new Error("dashboard parent must remain under the canonical protected root");
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
   }
 }
 

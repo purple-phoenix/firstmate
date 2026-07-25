@@ -8,7 +8,6 @@ set -u
 CAPACITY="$ROOT/bin/fm-capacity.mjs"
 SKILL="$ROOT/.agents/skills/capacity/SKILL.md"
 TMP_ROOT=$(fm_test_tmproot fm-capacity)
-TMP_ROOT="$(cd "$(dirname "$TMP_ROOT")" && pwd -P)/$(basename "$TMP_ROOT")"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
@@ -760,12 +759,11 @@ test_output_replacement_rejects_symlinks_and_enforces_mode() {
     | .roots.projects = ($home + "/projects")
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
-  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" >/dev/null 2>&1; then
-    fail "capacity followed a symlink before the protected home root"
-  fi
-  [ ! -e "$outer_target/linked-home/data/capacity-dashboard.html" ] ||
-    fail "capacity wrote through a symlink before the protected home root"
-  pass "capacity atomically replaces regular output with mode 0600 and rejects symlinks"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" >/dev/null ||
+    fail "capacity rejected a canonical home beneath a symlink ancestor"
+  [ -f "$outer_target/linked-home/data/capacity-dashboard.html" ] ||
+    fail "capacity did not write beneath the canonical protected home"
+  pass "capacity atomically replaces regular output, permits canonical ancestors, and rejects internal symlinks"
 }
 
 test_fleet_snapshot_preserves_registered_scope_provenance() {
