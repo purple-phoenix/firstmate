@@ -848,16 +848,28 @@ function classify(snapshot, environment) {
   const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
     task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
   ).length;
-  const readyGithubBoundWork = ready.some((candidate) =>
-    ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)
-  );
-  const githubBoundWork = readyGithubBoundWork || (snapshot.tasks || []).some((task) => {
+  const mainGithubBoundWork = ready.some((candidate) =>
+    candidate.owner === "main"
+    && ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)
+  ) || (snapshot.tasks || []).some((task) => {
     if (task.kind === "secondmate") return false;
     const backlog = mainRecords.find((record) => record.structured && record.id === task.id) || task.backlog || {};
     return backlog.state !== "done"
       && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
       && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state);
   });
+  const credentialBlockers = [];
+  if (mainGithubBoundWork && environment.github_auth.status !== "available") {
+    credentialBlockers.push({ owner: "main", status: environment.github_auth.status });
+  }
+  const blockedSecondmateCredentials = new Set();
+  for (const candidate of ready) {
+    if (candidate.owner === "main" || !["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)) continue;
+    const status = environment.secondmates?.[candidate.owner]?.github_auth.status || "unknown";
+    if (status === "available" || blockedSecondmateCredentials.has(candidate.owner)) continue;
+    blockedSecondmateCredentials.add(candidate.owner);
+    credentialBlockers.push({ owner: ownerRef(candidate.owner), status });
+  }
   const executableReady = ready.filter(candidateExecutionAvailable);
   const recommendations = [];
 
@@ -873,13 +885,13 @@ function classify(snapshot, environment) {
     "Discuss or decide the listed holds, starting with the one that releases the most downstream work.",
     "Approve CAP-01: walk me through the open captain decisions in dependency order and route each answer through the normal decision lifecycle."
   );
-  if (environment.github_auth.status !== "available" && githubBoundWork) recommend(
+  if (credentialBlockers.length > 0) recommend(
     "CAP-02", "credentials", 10,
-    `GitHub authentication is ${environment.github_auth.status}: ${environment.github_auth.evidence}.`,
+    `${credentialBlockers.length} home-owned GitHub credential lane${credentialBlockers.length === 1 ? " is" : "s are"} blocking PR-bound work: ${credentialBlockers.map((blocker) => `${blocker.owner} (${blocker.status})`).join(", ")}.`,
     "PR discovery, push, and CI handoff may stop even when implementation capacity exists.",
     "Credential material must stay outside the dashboard; authentication is restored through the normal bootstrap flow.",
-    "Restore GitHub authentication, then refresh /capacity before dispatching PR-bound work.",
-    "Approve CAP-02: guide me through restoring the required GitHub authentication, then refresh the capacity snapshot."
+    "Restore GitHub authentication in the affected owning homes, then refresh /capacity before dispatching their PR-bound work.",
+    "Approve CAP-02: guide me through restoring GitHub authentication in the listed owning homes, then refresh the capacity snapshot."
   );
   if (unavailable.length > 0) recommend(
     "CAP-03", "unavailable state", 20,

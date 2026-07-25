@@ -227,8 +227,30 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
       and .runtime.github_auth.status == "unavailable"
       and .utilization == "unavailable lane with grounded in-scope work"
     ))
+    and (.recommendations[] | select(.id == "CAP-02") | .evidence | contains("persistent home-01 (unavailable)"))
     and (.recommendations[] | select(.id == "CAP-09") | .evidence | contains("1 has grounded work on an unavailable home-owned lane"))
   ' >/dev/null || fail "PR-bound secondmate work ignored unavailable GitHub auth: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [.backlog.records[] | select(.state == "done")]
+    | .tasks = []
+    | .secondmate_current.records[0].queued[0].delivery_mode = "direct-PR"
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '.github_auth.status = "unavailable"' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "cross-home credential attribution capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.recommendations | any(.id == "CAP-02") | not)
+    and (.lanes.persistent_secondmates | any(
+      .grounded_ready_in_scope == 1
+      and .ready_in_scope == 1
+      and .runtime.github_auth.status == "available"
+    ))
+    and (.recommendations | any(.id == "CAP-06"))
+  ' >/dev/null || fail "main-home auth was attributed to secondmate-owned PR work: $json"
   pass "secondmate readiness includes home-owned backend, auth, and dispatch evidence"
 }
 
