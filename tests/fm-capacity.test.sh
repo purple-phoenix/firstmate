@@ -251,6 +251,32 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
     ))
     and (.recommendations | any(.id == "CAP-06"))
   ' >/dev/null || fail "main-home auth was attributed to secondmate-owned PR work: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [.backlog.records[] | select(.state == "done")]
+    | .tasks = []
+    | .secondmate_current.records[0].current.state = "active_child_work"
+    | .secondmate_current.records[0].active_children = [
+      {"id":"active-pr","repo":"delta","kind":"ship","delivery_mode":"direct-PR","state":"working","doing":"implementing"}
+    ]
+    | .secondmate_current.records[0].queued = []
+    | .secondmate_current.records[0].counts.active_children = 1
+    | .secondmate_current.records[0].counts.queued = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '.secondmates.design.github_auth.status = "unavailable"' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "active secondmate credential capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.building | any(.delivery_mode == "direct-PR"))
+    and (.lanes.persistent_secondmates | any(
+      .active_children == 1
+      and .utilization == "active with unavailable delivery credentials"
+    ))
+    and (.recommendations[] | select(.id == "CAP-02") | .evidence | contains("persistent home-01 (unavailable)"))
+  ' >/dev/null || fail "active secondmate PR delivery did not retain home-owned credential evidence: $json"
   pass "secondmate readiness includes home-owned backend, auth, and dispatch evidence"
 }
 

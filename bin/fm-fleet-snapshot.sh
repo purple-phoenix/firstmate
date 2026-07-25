@@ -590,6 +590,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,
             repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+            delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
             since:(($work.since // null) | if . == null then null else trunc(20) end),
             state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
@@ -608,6 +609,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | {id,title:((.backlog.title // .id) | trunc(90)),
               repo:(($work.repo // null) | if . == null then null else trunc(120) end),
               kind:(($work.kind // null) | if . == null then null else trunc(40) end),
+              delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
               since:(($work.since // null) | if . == null then null else trunc(20) end),
               blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all

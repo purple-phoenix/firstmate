@@ -359,6 +359,14 @@ function safeSource(source) {
     : "authoritative current-state owner";
 }
 
+function safeDeliveryMode(mode) {
+  return ["no-mistakes", "direct-PR", "local-only"].includes(mode) ? mode : null;
+}
+
+function requiresGithubAuth(mode) {
+  return ["no-mistakes", "direct-PR"].includes(safeDeliveryMode(mode));
+}
+
 function dateAgeDays(value, now) {
   if (!value) return null;
   const parsed = Date.parse(`${value}T00:00:00Z`);
@@ -467,6 +475,7 @@ function cardFromBacklog(record, owner, stage, reason = null) {
     owner: ownerRef(owner),
     repo: projectRef(record.repo),
     kind: ["ship", "scout", "captain"].includes(record.kind) ? record.kind : null,
+    delivery_mode: safeDeliveryMode(record.delivery_mode),
     stage,
     reason: reason || "Structured operational detail withheld",
     artifact: null,
@@ -490,6 +499,8 @@ function classify(snapshot, environment) {
   const mates = [];
   const mateAvailability = new Map();
   const mateRuntimeCapabilities = new Map();
+  const secondmateGithubBoundActive = new Set();
+  const secondmateGithubBoundDelivery = new Set();
   let secondmateQueuedConsidered = 0;
   let readinessComplete = true;
 
@@ -635,6 +646,7 @@ function classify(snapshot, environment) {
     for (const hold of mate.holds || []) {
       heldIds.add(hold.id);
       if (hold.source === "child-state") {
+        if (requiresGithubAuth(hold.delivery_mode)) secondmateGithubBoundDelivery.add(mate.id);
         if (hold.repo) {
           activeProjects.add(hold.repo);
         } else {
@@ -649,6 +661,10 @@ function classify(snapshot, environment) {
       }
     }
     for (const child of mate.active_children || []) {
+      if (requiresGithubAuth(child.delivery_mode)) {
+        secondmateGithubBoundActive.add(mate.id);
+        secondmateGithubBoundDelivery.add(mate.id);
+      }
       const detail = child.doing || child.state || "working";
       const stage = /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
       if (child.repo) {
@@ -663,6 +679,7 @@ function classify(snapshot, environment) {
         owner: ownerRef(mate.id),
         repo: projectRef(child.repo),
         kind: ["ship", "scout"].includes(child.kind) ? child.kind : "ship",
+        delivery_mode: safeDeliveryMode(child.delivery_mode),
         stage,
         reason: `Authoritative current state: ${safeState(child.state || "working")}`,
         artifact: null,
@@ -780,7 +797,7 @@ function classify(snapshot, environment) {
     }
   }
   const candidateExecutionAvailable = (candidate) => {
-    const authRequired = ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode);
+    const authRequired = requiresGithubAuth(candidate.record.delivery_mode);
     if (candidate.owner === "main") {
       const mainLaneAvailable = environment.dispatch.valid
         && environment.backend.available
@@ -796,10 +813,17 @@ function classify(snapshot, environment) {
     const mateReady = mateCandidates.length;
     const mateExecutable = mateCandidates.filter(candidateExecutionAvailable).length;
     const available = readinessComplete && mateAvailability.get(mate.id);
+    const activeCredentialBlocked = [...mateRuntimeCapabilities.entries()].some(([owner, runtime]) =>
+      opaqueRef("home", owner) === mate.id
+      && secondmateGithubBoundActive.has(owner)
+      && runtime.github_auth_available !== true
+    );
     mate.grounded_ready_in_scope = available ? mateReady : 0;
     mate.ready_in_scope = available ? mateExecutable : 0;
     mate.utilization = !available
       ? "unavailable"
+      : activeCredentialBlocked
+        ? "active with unavailable delivery credentials"
       : mateReady > 0 && mateExecutable === 0
         ? "unavailable lane with grounded in-scope work"
       : mate.active_children > 0
@@ -850,12 +874,12 @@ function classify(snapshot, environment) {
   ).length;
   const mainGithubBoundWork = ready.some((candidate) =>
     candidate.owner === "main"
-    && ["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)
+    && requiresGithubAuth(candidate.record.delivery_mode)
   ) || (snapshot.tasks || []).some((task) => {
     if (task.kind === "secondmate") return false;
     const backlog = mainRecords.find((record) => record.structured && record.id === task.id) || task.backlog || {};
     return backlog.state !== "done"
-      && (Boolean(task.pr?.url) || ["no-mistakes", "direct-PR"].includes(task.mode))
+      && (Boolean(task.pr?.url) || requiresGithubAuth(task.mode))
       && ["working", "parked", "blocked", "paused", "done"].includes(task.current_state?.state);
   });
   const credentialBlockers = [];
@@ -863,8 +887,14 @@ function classify(snapshot, environment) {
     credentialBlockers.push({ owner: "main", status: environment.github_auth.status });
   }
   const blockedSecondmateCredentials = new Set();
+  for (const owner of secondmateGithubBoundDelivery) {
+    const status = environment.secondmates?.[owner]?.github_auth.status || "unknown";
+    if (status === "available") continue;
+    blockedSecondmateCredentials.add(owner);
+    credentialBlockers.push({ owner: ownerRef(owner), status });
+  }
   for (const candidate of ready) {
-    if (candidate.owner === "main" || !["no-mistakes", "direct-PR"].includes(candidate.record.delivery_mode)) continue;
+    if (candidate.owner === "main" || !requiresGithubAuth(candidate.record.delivery_mode)) continue;
     const status = environment.secondmates?.[candidate.owner]?.github_auth.status || "unknown";
     if (status === "available" || blockedSecondmateCredentials.has(candidate.owner)) continue;
     blockedSecondmateCredentials.add(candidate.owner);

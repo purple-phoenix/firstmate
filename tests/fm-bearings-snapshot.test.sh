@@ -507,6 +507,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and .secondmate_current.truncated == 1
       and (.secondmate_current.records[] | select(.id == "a")
         | .counts.active_children == 3 and (.active_children | length) == 2
+          and all(.active_children[]; .delivery_mode == "no-mistakes")
           and (.omitted | any(.surface == "active_children" and .count == 1)))
       and (.secondmate_current.records | any(.id == "b" and .current.state == "no_active_work"))
   ' >/dev/null || fail "canonical secondmate or child bounds were not enforced: $canonical"
