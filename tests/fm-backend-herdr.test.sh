@@ -997,6 +997,55 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
 
+test_composer_state_custom_prompt_uses_discovered_utf8_locale() {
+  local dir log resp fb grep_log out
+  dir="$TMP_ROOT/composer-custom-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  grep_log="$dir/grep.log"; : > "$grep_log"
+  printf 'CUSTOM prompt\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  cat > "$fb/locale" <<'SH'
+#!/usr/bin/env bash
+printf 'zz_ZZ.UTF-8\n'
+SH
+  cat > "$fb/grep" <<'SH'
+#!/usr/bin/env bash
+printf 'LC_ALL=%s\n' "${LC_ALL:-}" >> "$FM_CUSTOM_GREP_LOG"
+exit 0
+SH
+  chmod +x "$fb/locale" "$fb/grep"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_CUSTOM_GREP_LOG="$grep_log" FM_BACKEND_HERDR_BARE_PROMPT_RE='^CUSTOM' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a custom prompt matched under a discovered UTF-8 locale should be classified, got '$out'"
+  assert_contains "$(cat "$grep_log")" "LC_ALL=zz_ZZ.UTF-8" \
+    "custom prompt matching did not use the discovered UTF-8 locale"
+  pass "fm_backend_herdr_composer_state: custom prompts use a discovered UTF-8 locale"
+}
+
+test_composer_state_custom_prompt_without_utf8_locale_fails_closed() {
+  local dir log resp fb grep_log out
+  dir="$TMP_ROOT/composer-custom-no-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  grep_log="$dir/grep.log"; : > "$grep_log"
+  printf 'CUSTOM prompt\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  cat > "$fb/locale" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fb/grep" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$FM_CUSTOM_GREP_LOG"
+exit 0
+SH
+  chmod +x "$fb/locale" "$fb/grep"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_CUSTOM_GREP_LOG="$grep_log" FM_BACKEND_HERDR_BARE_PROMPT_RE='^CUSTOM' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a custom prompt without an available UTF-8 locale should fail closed, got '$out'"
+  [ ! -s "$grep_log" ] || fail "custom prompt matching invoked grep without an available UTF-8 locale"
+  pass "fm_backend_herdr_composer_state: custom prompts fail closed without a UTF-8 locale"
+}
+
 # The exact incident shape: a bordered decorative box (claude's own startup
 # welcome banner) is STILL in the capture window, sitting ABOVE the live,
 # unbordered "❯" prompt. Before the fix, the bordered branch was the ONLY one
@@ -2095,6 +2144,8 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
+test_composer_state_custom_prompt_uses_discovered_utf8_locale
+test_composer_state_custom_prompt_without_utf8_locale_fails_closed
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
