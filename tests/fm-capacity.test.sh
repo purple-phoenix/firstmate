@@ -28,20 +28,20 @@ EOF
     "path": "$home/data/backlog.md",
     "present": true,
     "records": [
-      {"order":1,"state":"in_flight","structured":true,"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: alpha behavior is tested."},
-      {"order":2,"state":"in_flight","structured":true,"id":"validate-now","title":"Validate the beta delivery","repo":"beta","kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: CI is green."},
-      {"order":3,"state":"queued","structured":true,"id":"ready-safe","title":"Ship <script>alert(1)</script> token=topsecret AKIAIOSFODNN7EXAMPLE xoxb-123456789012-123456789012-abcdefghijklmnop https://user:pass@example.com 212-555-0199","repo":"gamma","kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
-      {"order":4,"state":"queued","structured":true,"id":"overlap-alpha","title":"Improve the active alpha subsystem","repo":"alpha","kind":"ship","body_excerpt":"Acceptance criteria: alpha remains compatible."},
+      {"order":1,"state":"in_flight","structured":true,"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: alpha behavior is tested."},
+      {"order":2,"state":"in_flight","structured":true,"id":"validate-now","title":"Validate the beta delivery","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: CI is green."},
+      {"order":3,"state":"queued","structured":true,"id":"ready-safe","title":"Ship <script>alert(1)</script> token=topsecret AKIAIOSFODNN7EXAMPLE xoxb-123456789012-123456789012-abcdefghijklmnop https://user:pass@example.com 212-555-0199","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
+      {"order":4,"state":"queued","structured":true,"id":"overlap-alpha","title":"Improve the active alpha subsystem","repo":"alpha","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: alpha remains compatible."},
       {"order":5,"state":"queued","structured":true,"id":"vague","title":"TBD","repo":null,"kind":null,"body_excerpt":"Contact patient@example.com about password=hunter2"},
-      {"order":6,"state":"queued","structured":true,"id":"dependency","title":"Publish the dependent release","repo":"epsilon","kind":"ship","blocked_by":"build-old","blocked_reason":"wait for alpha landing","body_excerpt":"Acceptance criteria: release is published."},
-      {"order":7,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout for Jane Doe oncology record"},
-      {"order":8,"state":"queued","structured":true,"id":"future-gate","title":"Run the migration after 2026-08-01","repo":"zeta","kind":"ship","body_excerpt":"Acceptance criteria: migration checks pass."},
-      {"order":9,"state":"done","structured":true,"id":"landed-one","title":"Landed useful work","repo":"alpha","kind":"ship","pr_url":"https://github.com/purple-phoenix/firstmate/pull/10","completion":{"verb":"merged","date":"2026-07-16"}}
+      {"order":6,"state":"queued","structured":true,"id":"dependency","title":"Publish the dependent release","repo":"epsilon","project_resolved":true,"kind":"ship","blocked_by":"build-old","blocked_reason":"wait for alpha landing","body_excerpt":"Acceptance criteria: release is published."},
+      {"order":7,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout for Jane Doe oncology record"},
+      {"order":8,"state":"queued","structured":true,"id":"future-gate","title":"Run the migration after 2026-08-01","repo":"zeta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: migration checks pass."},
+      {"order":9,"state":"done","structured":true,"id":"landed-one","title":"Landed useful work","repo":"alpha","project_resolved":true,"kind":"ship","pr_url":"https://github.com/purple-phoenix/firstmate/pull/10","completion":{"verb":"merged","date":"2026-07-16"}}
     ]
   },
   "tasks": [
-    {"id":"build-old","kind":"ship","project":"alpha","current_state":{"state":"working","source":"pane","detail":"harness busy"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","kind":"ship","since":"2026-07-01"}},
-    {"id":"validate-now","kind":"ship","project":"beta","current_state":{"state":"working","source":"run-step","detail":"validating (fixing)"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/11"},"paths":{"report":{"present":false}},"backlog":{"id":"validate-now","title":"Validate the beta delivery","repo":"beta","kind":"ship","since":"2026-07-16"}}
+    {"id":"build-old","kind":"ship","project":"alpha","current_state":{"state":"working","source":"pane","detail":"harness busy"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-01"}},
+    {"id":"validate-now","kind":"ship","project":"beta","current_state":{"state":"working","source":"run-step","detail":"validating (fixing)"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/11"},"paths":{"report":{"present":false}},"backlog":{"id":"validate-now","title":"Validate the beta delivery","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
   ],
   "scout_reports": [],
   "secondmate_current": {
@@ -51,7 +51,7 @@ EOF
       {"id":"unknown-mate","scope":"operations","projects":["ops"]}
     ]},
     "records": [
-      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1},"omitted":[]},
+      {"id":"design","home":"$home/design","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[{"id":"design-ready","title":"Refresh the delta design tokens","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: token snapshots pass."}],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1},"omitted":[]},
       {"id":"quiet","home":"$home/quiet","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0},"omitted":[]},
       {"id":"unknown-mate","home":"$home/unknown","current":{"state":"no_active_work","reason":null},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0},"omitted":[]}
     ],
@@ -127,23 +127,23 @@ test_cross_home_overlap_holds_supersession_and_active_count() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records += [
-      {"order":10,"state":"in_flight","structured":true,"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","kind":"ship","since":"2026-07-10","body_excerpt":"Acceptance criteria: lambda is complete."},
-      {"order":11,"state":"queued","structured":true,"id":"main-held-overlap","title":"Extend the held lambda delivery","repo":"lambda","kind":"ship","body_excerpt":"Acceptance criteria: lambda remains compatible."},
-      {"order":12,"state":"queued","structured":true,"id":"mate-held-overlap","title":"Extend the held iota delivery","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: iota remains compatible."}
+      {"order":10,"state":"in_flight","structured":true,"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","project_resolved":true,"kind":"ship","since":"2026-07-10","body_excerpt":"Acceptance criteria: lambda is complete."},
+      {"order":11,"state":"queued","structured":true,"id":"main-held-overlap","title":"Extend the held lambda delivery","repo":"lambda","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: lambda remains compatible."},
+      {"order":12,"state":"queued","structured":true,"id":"mate-held-overlap","title":"Extend the held iota delivery","repo":"iota","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: iota remains compatible."}
     ]
     | .tasks += [
-      {"id":"main-held","kind":"ship","project":"lambda","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","kind":"ship","since":"2026-07-10"}}
+      {"id":"main-held","kind":"ship","project":"lambda","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"main-held","title":"Hold the lambda delivery","repo":"lambda","project_resolved":true,"kind":"ship","since":"2026-07-10"}}
     ]
     | .secondmate_current.records[0].active_children = [
-      {"id":"child-gamma","repo":"gamma","kind":"ship","state":"working","doing":"working"},
-      {"id":"child-theta","repo":"theta","kind":"ship","state":"working","doing":"working"}
+      {"id":"child-gamma","repo":"gamma","project_resolved":true,"kind":"ship","state":"working","doing":"working"},
+      {"id":"child-theta","repo":"theta","project_resolved":true,"kind":"ship","state":"working","doing":"working"}
     ]
     | .secondmate_current.records[0].holds = [
-      {"id":"held-old","title":"Sensitive held work","repo":"iota","kind":"ship","since":"2026-07-01","reason":"external dependency","source":"child-state"}
+      {"id":"held-old","title":"Sensitive held work","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-01","reason":"external dependency","source":"child-state"}
     ]
     | .secondmate_current.records[0].queued += [
-      {"id":"held-old","title":"Sensitive held work","repo":"iota","kind":"ship","since":"2026-07-01","blocked_by":"external"},
-      {"id":"superseded","title":"Do not start this deferred item","repo":"kappa","kind":"ship","body_excerpt":"DEFERRED. Acceptance criteria: none."}
+      {"id":"held-old","title":"Sensitive held work","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-01","blocked_by":"external"},
+      {"id":"superseded","title":"Do not start this deferred item","repo":"kappa","project_resolved":true,"kind":"ship","body_excerpt":"DEFERRED. Acceptance criteria: none."}
     ]
     | .secondmate_current.records[0].counts = {"active_children":2,"decisions_open":0,"holds":1,"queued":3}
     | .secondmate_current.records[0].omitted = []
@@ -258,7 +258,7 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
     | .tasks = []
     | .secondmate_current.records[0].current.state = "active_child_work"
     | .secondmate_current.records[0].active_children = [
-      {"id":"active-pr","repo":"delta","kind":"ship","delivery_mode":"direct-PR","state":"working","doing":"implementing"}
+      {"id":"active-pr","repo":"delta","project_resolved":true,"kind":"ship","delivery_mode":"direct-PR","state":"working","doing":"implementing"}
     ]
     | .secondmate_current.records[0].queued = []
     | .secondmate_current.records[0].counts.active_children = 1
@@ -378,23 +378,23 @@ test_definition_and_time_markers_require_whole_evidence() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records += [
-      {"order":10,"state":"queued","structured":true,"id":"latest-only","title":"Use the latest version safely","repo":"eta","kind":"ship","body_excerpt":"Use the latest version with compatibility checks."},
-      {"order":11,"state":"queued","structured":true,"id":"version-date","title":"Support Version 2026-08-01 compatibility","repo":"theta","kind":"ship","body_excerpt":"Acceptance criteria: compatibility remains intact."},
-      {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."},
-      {"order":13,"state":"queued","structured":true,"id":"placeholder-criteria","title":"Implement the placeholder-defined workflow","repo":"kappa","kind":"ship","body_excerpt":"Acceptance criteria: TBD"},
-      {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","kind":"ship","body_excerpt":"No acceptance criteria defined"},
-      {"order":15,"state":"queued","structured":true,"id":"defined-later","title":"Implement the later-defined workflow","repo":"nu","kind":"ship","body_excerpt":"Acceptance criteria: to be defined"},
-      {"order":16,"state":"queued","structured":true,"id":"forthcoming-criteria","title":"Implement the forthcoming workflow","repo":"omicron","kind":"ship","body_excerpt":"Acceptance criteria: forthcoming"},
-      {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."},
-      {"order":18,"state":"queued","structured":true,"id":"noun-criteria","title":"Protect failover data integrity","repo":"rho","kind":"ship","body_excerpt":"Acceptance criteria: zero data loss under failover."},
-      {"order":19,"state":"queued","structured":true,"id":"modal-criteria","title":"Export reports as portable documents","repo":"sigma","kind":"ship","body_excerpt":"Acceptance criteria: users can export PDF."},
-      {"order":20,"state":"queued","structured":true,"id":"todo-with-verb","title":"Implement the unfinished test workflow","repo":"tau","kind":"ship","body_excerpt":"Acceptance criteria: TODO: tests pass eventually."},
-      {"order":21,"state":"queued","structured":true,"id":"not-defined","title":"Implement the explicitly undefined workflow","repo":"upsilon","kind":"ship","body_excerpt":"Acceptance criteria: not defined."},
-      {"order":22,"state":"queued","structured":true,"id":"none-defined","title":"Implement the absent criteria workflow","repo":"phi","kind":"ship","body_excerpt":"Acceptance criteria: none provided."},
-      {"order":23,"state":"queued","structured":true,"id":"not-applicable","title":"Implement the inapplicable criteria workflow","repo":"chi","kind":"ship","body_excerpt":"Acceptance criteria: n/a pending review."},
-      {"order":24,"state":"queued","structured":true,"id":"after-login","title":"Load the dashboard after login","repo":"psi","kind":"ship","body_excerpt":"Acceptance criteria: the dashboard loads after login."},
-      {"order":25,"state":"queued","structured":true,"id":"empty-criteria-section","title":"Implement the undecided notes workflow","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria:\nNotes: pending captain input"},
-      {"order":26,"state":"queued","structured":true,"id":"listed-criteria","title":"Implement the listed acceptance workflow","repo":"alpha-two","kind":"ship","body_excerpt":"Acceptance criteria:\n- regression checks pass"}
+      {"order":10,"state":"queued","structured":true,"id":"latest-only","title":"Use the latest version safely","repo":"eta","project_resolved":true,"kind":"ship","body_excerpt":"Use the latest version with compatibility checks."},
+      {"order":11,"state":"queued","structured":true,"id":"version-date","title":"Support Version 2026-08-01 compatibility","repo":"theta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: compatibility remains intact."},
+      {"order":12,"state":"queued","structured":true,"id":"word-substrings","title":"Support the nondeferred aftercare workflow","repo":"iota","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: aftercare remains compatible with the nondeferred workflow."},
+      {"order":13,"state":"queued","structured":true,"id":"placeholder-criteria","title":"Implement the placeholder-defined workflow","repo":"kappa","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: TBD"},
+      {"order":14,"state":"queued","structured":true,"id":"negated-criteria","title":"Implement the undefined acceptance workflow","repo":"mu","project_resolved":true,"kind":"ship","body_excerpt":"No acceptance criteria defined"},
+      {"order":15,"state":"queued","structured":true,"id":"defined-later","title":"Implement the later-defined workflow","repo":"nu","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: to be defined"},
+      {"order":16,"state":"queued","structured":true,"id":"forthcoming-criteria","title":"Implement the forthcoming workflow","repo":"omicron","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: forthcoming"},
+      {"order":17,"state":"queued","structured":true,"id":"dated-compatibility","title":"Render correctly on 2026-08-01","repo":"pi","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: rendering works on 2026-08-01."},
+      {"order":18,"state":"queued","structured":true,"id":"noun-criteria","title":"Protect failover data integrity","repo":"rho","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: zero data loss under failover."},
+      {"order":19,"state":"queued","structured":true,"id":"modal-criteria","title":"Export reports as portable documents","repo":"sigma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: users can export PDF."},
+      {"order":20,"state":"queued","structured":true,"id":"todo-with-verb","title":"Implement the unfinished test workflow","repo":"tau","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: TODO: tests pass eventually."},
+      {"order":21,"state":"queued","structured":true,"id":"not-defined","title":"Implement the explicitly undefined workflow","repo":"upsilon","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: not defined."},
+      {"order":22,"state":"queued","structured":true,"id":"none-defined","title":"Implement the absent criteria workflow","repo":"phi","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: none provided."},
+      {"order":23,"state":"queued","structured":true,"id":"not-applicable","title":"Implement the inapplicable criteria workflow","repo":"chi","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: n/a pending review."},
+      {"order":24,"state":"queued","structured":true,"id":"after-login","title":"Load the dashboard after login","repo":"psi","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: the dashboard loads after login."},
+      {"order":25,"state":"queued","structured":true,"id":"empty-criteria-section","title":"Implement the undecided notes workflow","repo":"omega","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria:\nNotes: pending captain input"},
+      {"order":26,"state":"queued","structured":true,"id":"listed-criteria","title":"Implement the listed acceptance workflow","repo":"alpha-two","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria:\n- regression checks pass"}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -436,8 +436,8 @@ test_ready_selection_preserves_priority_and_order() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
-      {"order":1,"priority":"low","state":"queued","structured":true,"id":"lexically-first","title":"Ship the lower priority option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: lower option passes."},
-      {"order":2,"priority":"high","state":"queued","structured":true,"id":"lexically-second","title":"Ship the higher priority option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: higher option passes."}
+      {"order":1,"priority":"low","state":"queued","structured":true,"id":"lexically-first","title":"Ship the lower priority option","repo":"shared","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: lower option passes."},
+      {"order":2,"priority":"high","state":"queued","structured":true,"id":"lexically-second","title":"Ship the higher priority option","repo":"shared","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: higher option passes."}
     ]
     | .tasks = []
     | .secondmate_current.registry.records = []
@@ -465,14 +465,14 @@ test_ready_selection_preserves_priority_and_order() {
 
   jq '
     .backlog.records = [
-      {"order":1,"priority":"low","state":"queued","structured":true,"id":"main-shared","title":"Ship the main shared-project option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: main shared option passes."}
+      {"order":1,"priority":"low","state":"queued","structured":true,"id":"main-shared","title":"Ship the main shared-project option","repo":"shared","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: main shared option passes."}
     ]
     | .secondmate_current.registry.records = [
       {"id":"design","scope":"design systems","projects":["shared"]}
     ]
     | .secondmate_current.records = [
       {"id":"design","current":{"state":"no_active_work"},"provenance":{"selected":"structured-home"},"active_children":[],"decisions_open":[],"holds":[],"queued":[
-        {"order":1,"priority":"high","id":"mate-shared","title":"Ship the secondmate shared-project option","repo":"shared","kind":"ship","body_excerpt":"Acceptance criteria: secondmate shared option passes."}
+        {"order":1,"priority":"high","id":"mate-shared","title":"Ship the secondmate shared-project option","repo":"shared","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: secondmate shared option passes."}
       ],"counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1},"omitted":[]}
     ]
     | .secondmate_current.total = 1
@@ -535,7 +535,7 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
     | .secondmate_current.records[0].queued += [
-      {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"}
+      {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"}
     ]
     | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":1,"holds":0,"queued":2}
   ' "$snapshot" > "$snapshot.tmp"
@@ -555,10 +555,10 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
-      {"order":1,"state":"in_flight","structured":true,"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: CI passes."}
+      {"order":1,"state":"in_flight","structured":true,"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","project_resolved":true,"kind":"ship","since":"2026-07-01","body_excerpt":"Acceptance criteria: CI passes."}
     ]
     | .tasks = [
-      {"id":"approval-ready","kind":"ship","mode":"no-mistakes","yolo":"off","project":"omega","current_state":{"state":"done","source":"run-step","detail":"PR checks green for Jane Doe"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/private"},"paths":{"report":{"present":false}},"backlog":{"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","kind":"ship","since":"2026-07-01"}}
+      {"id":"approval-ready","kind":"ship","mode":"no-mistakes","yolo":"off","project":"omega","current_state":{"state":"done","source":"run-step","detail":"PR checks green for Jane Doe"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/private"},"paths":{"report":{"present":false}},"backlog":{"id":"approval-ready","title":"Finish the approval-ready delivery","repo":"omega","project_resolved":true,"kind":"ship","since":"2026-07-01"}}
     ]
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
@@ -641,10 +641,10 @@ EOF
 
   jq '
     .backlog.records = [
-      {"order":1,"state":"in_flight","structured":true,"id":"pr-bound","title":"Complete the PR-bound delivery","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
+      {"order":1,"state":"in_flight","structured":true,"id":"pr-bound","title":"Complete the PR-bound delivery","repo":"omega","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
     ]
     | .tasks = [
-      {"id":"pr-bound","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"working","source":"pane","detail":"implementing"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"pr-bound","repo":"omega","kind":"ship"}}
+      {"id":"pr-bound","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"working","source":"pane","detail":"implementing"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"pr-bound","repo":"omega","project_resolved":true,"kind":"ship"}}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -659,7 +659,7 @@ EOF
 
   jq '
     .backlog.records = [
-      {"order":1,"state":"queued","structured":true,"id":"queued-pr","title":"Ship the queued PR-bound delivery","repo":"omega","kind":"ship","delivery_mode":"direct-PR","body_excerpt":"Acceptance criteria: delivery checks pass."}
+      {"order":1,"state":"queued","structured":true,"id":"queued-pr","title":"Ship the queued PR-bound delivery","repo":"omega","project_resolved":true,"kind":"ship","delivery_mode":"direct-PR","body_excerpt":"Acceptance criteria: delivery checks pass."}
     ]
     | .tasks = []
   ' "$snapshot" > "$snapshot.tmp"
@@ -674,10 +674,10 @@ EOF
 
   jq '
     .backlog.records = [
-      {"order":1,"state":"done","structured":true,"id":"landed-pr","title":"Landed the completed PR delivery","repo":"omega","kind":"ship","delivery_mode":"no-mistakes","completion":{"verb":"merged","date":"2026-07-17"}}
+      {"order":1,"state":"done","structured":true,"id":"landed-pr","title":"Landed the completed PR delivery","repo":"omega","project_resolved":true,"kind":"ship","delivery_mode":"no-mistakes","completion":{"verb":"merged","date":"2026-07-17"}}
     ]
     | .tasks = [
-      {"id":"landed-pr","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"done","source":"run-step","detail":"merged"},"endpoint":{"exists":false},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/merged"},"backlog":{"id":"landed-pr","state":"done","repo":"omega","kind":"ship"}}
+      {"id":"landed-pr","kind":"ship","mode":"no-mistakes","project":"omega","current_state":{"state":"done","source":"run-step","detail":"merged"},"endpoint":{"exists":false},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/merged"},"backlog":{"id":"landed-pr","state":"done","repo":"omega","project_resolved":true,"kind":"ship"}}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -693,10 +693,10 @@ test_blocked_tasks_suppress_demand_shortage() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
-      {"order":1,"state":"in_flight","structured":true,"id":"blocked-task","title":"Complete the externally blocked delivery","repo":"omega","kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
+      {"order":1,"state":"in_flight","structured":true,"id":"blocked-task","title":"Complete the externally blocked delivery","repo":"omega","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: delivery checks pass."}
     ]
     | .tasks = [
-      {"id":"blocked-task","kind":"ship","project":"omega","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"blocked-task","repo":"omega","kind":"ship"}}
+      {"id":"blocked-task","kind":"ship","project":"omega","current_state":{"state":"blocked","source":"run-step","detail":"external wait"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"blocked-task","repo":"omega","project_resolved":true,"kind":"ship"}}
     ]
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
@@ -719,7 +719,7 @@ test_available_ready_work_is_execution_shortage() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .backlog.records = [
-      {"order":1,"state":"queued","structured":true,"id":"ready-task","title":"Ship the independently ready delivery","repo":"omega","kind":"ship","delivery_mode":"local-only","body_excerpt":"Acceptance criteria: delivery checks pass."}
+      {"order":1,"state":"queued","structured":true,"id":"ready-task","title":"Ship the independently ready delivery","repo":"omega","project_resolved":true,"kind":"ship","delivery_mode":"local-only","body_excerpt":"Acceptance criteria: delivery checks pass."}
     ]
     | .tasks = []
     | .secondmate_current.registry.records = []
@@ -835,7 +835,7 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' '- design - design systems domain (home: '"$missing"'; scope: design systems and UI review; projects: alpha, beta; added 2026-07-17)' > "$home/data/secondmates.md"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-07-17)' > "$home/data/projects.md"
-  printf '%s\n' '## Queued' '- [ ] scoped-item - Ship the scoped alpha change (repo: alpha, kind: ship)' '  Acceptance criteria:' '  - focused checks pass' > "$home/data/backlog.md"
+  printf '%s\n' '## Queued' '- [ ] scoped-item - Ship the scoped alpha change (repo: alpha, kind: ship)' '  Acceptance criteria:' '  - focused checks pass' '- [ ] unknown-item - Ship the unknown project change (repo: typo-project, kind: ship)' '  Acceptance criteria:' '  - focused checks pass' > "$home/data/backlog.md"
   json=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "canonical fleet snapshot failed on registry fixture"
   printf '%s' "$json" | jq -e '
     (.secondmate_current.registry.records
@@ -843,10 +843,41 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
     and (.backlog.records | any(
       .id == "scoped-item"
       and .delivery_mode == "direct-PR"
+      and .project_resolved == true
       and .body_excerpt == "Acceptance criteria:\n- focused checks pass"
+    ))
+    and (.backlog.records | any(
+      .id == "unknown-item"
+      and .delivery_mode == "no-mistakes"
+      and .project_resolved == false
     ))
   ' >/dev/null || fail "canonical snapshot did not preserve route scope provenance: $json"
   pass "canonical fleet snapshot preserves bounded secondmate summary, scope, and projects"
+}
+
+test_unknown_project_is_a_definition_gap() {
+  local home="$TMP_ROOT/unresolved-project-home" snapshot="$TMP_ROOT/unresolved-project-snapshot.json" environment="$TMP_ROOT/unresolved-project-environment.json" output json
+  output="$home/data/unresolved-project.html"
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [{"order":1,"state":"queued","structured":true,"id":"typo-project","title":"Ship the typo project delivery","repo":"typo-project","project_resolved":false,"kind":"ship","delivery_mode":"no-mistakes","body_excerpt":"Acceptance criteria: delivery checks pass."}]
+    | .tasks = []
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unresolved-project capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .measures.useful_ready_work == 0
+    and (.pipeline.ready | length) == 0
+    and (.readiness.definition_gaps | any(.gaps | index("project unresolved")))
+    and (.recommendations | any(.id == "CAP-04"))
+    and (.recommendations | any(.id == "CAP-06") | not)
+  ' >/dev/null || fail "unknown project fallback entered ready supply: $json"
+  pass "unknown projects remain definition gaps despite safe delivery-mode fallback"
 }
 
 test_skill_discovery_and_read_mostly_contract
@@ -868,3 +899,4 @@ test_available_ready_work_is_execution_shortage
 test_html_is_private_escaped_accessible_and_responsive
 test_output_replacement_rejects_symlinks_and_enforces_mode
 test_fleet_snapshot_preserves_registered_scope_provenance
+test_unknown_project_is_a_definition_gap

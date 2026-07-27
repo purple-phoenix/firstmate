@@ -362,18 +362,19 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 attach_delivery_modes_json() {  # <backlog-json>
-  local backlog_json=$1 repo resolved mode
+  local backlog_json=$1 repo resolution mode project_resolved
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    resolved=$(
+    resolution=$(
       FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
       FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-project-mode.sh" "$repo" 2>/dev/null
-    ) || resolved="no-mistakes off"
-    mode=${resolved%% *}
-    backlog_json=$(printf '%s' "$backlog_json" | jq --arg repo "$repo" --arg mode "$mode" '
-      .records |= map(if .repo == $repo then .delivery_mode = $mode else . end)
+      "$SCRIPT_DIR/fm-project-mode.sh" --json "$repo" 2>/dev/null
+    ) || resolution='{"mode":"no-mistakes","yolo":"off","project_resolved":false}'
+    mode=$(printf '%s' "$resolution" | jq -r '.mode')
+    project_resolved=$(printf '%s' "$resolution" | jq -r '.project_resolved')
+    backlog_json=$(printf '%s' "$backlog_json" | jq --arg repo "$repo" --arg mode "$mode" --argjson project_resolved "$project_resolved" '
+      .records |= map(if .repo == $repo then .delivery_mode = $mode | .project_resolved = $project_resolved else . end)
     ')
   done < <(printf '%s' "$backlog_json" | jq -r '[.records[]? | .repo // empty] | unique[]')
   printf '%s\n' "$backlog_json"
@@ -591,6 +592,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | {id,kind,
             repo:(($work.repo // null) | if . == null then null else trunc(120) end),
             delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
+            project_resolved:($work.project_resolved == true),
             since:(($work.since // null) | if . == null then null else trunc(20) end),
             state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
@@ -610,6 +612,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
               repo:(($work.repo // null) | if . == null then null else trunc(120) end),
               kind:(($work.kind // null) | if . == null then null else trunc(40) end),
               delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
+              project_resolved:($work.project_resolved == true),
               since:(($work.since // null) | if . == null then null else trunc(20) end),
               blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
@@ -653,6 +656,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
           delivery_mode:((.delivery_mode // null) | if . == null then null else trunc(40) end),
+          project_resolved:(.project_resolved == true),
           priority:((.priority // null) | if . == null then null else trunc(40) end),
           order:((.order // null) | if type == "number" then . else null end),
           body_excerpt:((.body_excerpt // null) | if . == null then null else trunc(240) end)}][:$queued_n]),

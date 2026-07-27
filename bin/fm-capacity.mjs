@@ -408,7 +408,7 @@ function isSuperseded(record) {
 
 function definitionGaps(record, crossHome = false) {
   const gaps = [];
-  if (!record.repo) gaps.push("project unresolved");
+  if (!record.repo || record.project_resolved !== true) gaps.push("project unresolved");
   if (!record.kind || !["ship", "scout"].includes(record.kind)) gaps.push("deliverable kind missing");
   if (!record.title || record.title.trim().length < 12 || /^(todo|tbd|fix|investigate|work item)$/i.test(record.title.trim())) gaps.push("scope is insufficient");
   if (!bodyHasAcceptance(record)) gaps.push(crossHome && record.body_excerpt === undefined ? "acceptance evidence unavailable" : "acceptance criteria missing");

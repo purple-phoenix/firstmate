@@ -2,6 +2,8 @@
 # Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
 # no-mistakes|direct-PR|local-only and yolo is on|off.
+# With --json, prints mode, yolo, and whether the named project resolved to a
+# registry entry.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -18,7 +20,7 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh <project-name>
+# Usage: fm-project-mode.sh [--json] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,11 +28,25 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
-NAME=${1:?usage: fm-project-mode.sh <project-name>}
+OUTPUT=text
+if [ "${1:-}" = --json ]; then
+  OUTPUT=json
+  shift
+fi
+NAME=${1:?usage: fm-project-mode.sh [--json] <project-name>}
+
+emit() {
+  mode=$1 yolo=$2 resolved=$3
+  if [ "$OUTPUT" = json ]; then
+    printf '{"mode":"%s","yolo":"%s","project_resolved":%s}\n' "$mode" "$yolo" "$resolved"
+  else
+    printf '%s %s\n' "$mode" "$yolo"
+  fi
+}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  emit no-mistakes off false
   exit 0
 fi
 
@@ -52,7 +68,7 @@ parsed=$(awk -v n="$NAME" '
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  emit no-mistakes off false
   exit 0
 fi
 
@@ -63,4 +79,4 @@ case "$mode" in
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
-echo "$mode $yolo"
+emit "$mode" "$yolo" true
