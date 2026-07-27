@@ -105,6 +105,24 @@ test_idle_placeholder_is_empty() {
   pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
 }
 
+# Locale invariance: no-mistakes (and some CI shells) run with LC_ALL=C, where
+# bash ${var#?} counts bytes. Multi-byte agent glyphs must still strip cleanly.
+test_idle_placeholder_after_glyph_is_locale_invariant() {
+  local idle='^Type a message\.\.\.$' out saved_lc_all saved_lang
+  saved_lc_all=${LC_ALL-}
+  saved_lang=${LANG-}
+  export LC_ALL=C LANG=C
+  out=$(classify 0 '❯ Type a message...' "$idle")
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after ❯ should read empty, got '$out'"
+  out=$(classify 0 '› Type a message...' "$idle")
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after › should read empty, got '$out'"
+  out=$(classify 1 '❯')
+  [ "$out" = empty ] || fail "under LC_ALL=C a bare bordered ❯ should read empty, got '$out'"
+  if [ -n "$saved_lc_all" ]; then export LC_ALL=$saved_lc_all; else unset LC_ALL; fi
+  if [ -n "$saved_lang" ]; then export LANG=$saved_lang; else unset LANG; fi
+  pass "fm_composer_classify_content: idle-after-glyph and bare agent glyphs are locale-invariant under LC_ALL=C"
+}
+
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'type a message...' "$idle")
@@ -132,5 +150,6 @@ test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
+test_idle_placeholder_after_glyph_is_locale_invariant
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

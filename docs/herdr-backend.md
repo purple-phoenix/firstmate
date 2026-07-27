@@ -733,10 +733,13 @@ Each adapter still owns its own capture and structural row-finding (genuinely di
 **The safety rule.** A bare shell prompt glyph is a genuine empty agent composer ONLY inside a bordered composer container (where the harness draws its own prompt glyph, e.g. claude's older `| > ... |`).
 On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a safe injection target), never `empty`.
 The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way.
+Those default glyphs use exact shell prefix matches rather than a multibyte regular-expression character class, and the shared classifier removes each full glyph prefix explicitly, so the same rows and post-glyph idle placeholders keep their verdict under `LC_ALL=C`.
+An overridden `FM_BACKEND_HERDR_BARE_PROMPT_RE` runs only under a discovered UTF-8 locale and otherwise leaves the row `unknown`; [`docs/configuration.md`](configuration.md) owns that setting's contract.
 `inject_msg` was hardened to match: its composer-guard now reads `fm_backend_composer_state` directly and defers on anything that is not affirmatively `empty` (`pending` real text, or `unknown` for a dead shell or an unreadable pane), instead of only deferring on `pending`.
 
-**Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, idle placeholder, real text -> `pending`).
+**Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, locale-invariant post-glyph idle placeholders, real text -> `pending`).
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
+Herdr also pins custom-regex matching under a discovered UTF-8 locale and the fail-closed path when none is available.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 
 ## Incident (2026-07-10): away-mode injection wedged all night on the primary claude-on-herdr composer's ghost text

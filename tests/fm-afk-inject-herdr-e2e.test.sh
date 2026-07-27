@@ -164,11 +164,13 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  # Prefix match the full multi-byte sentinel - never ${_line:0:1}.
+  # Under LC_ALL=C, bash substring length counts bytes, so a one-character
+  # slice of U+2063 is a single 0xE2 byte and never equals the 3-byte MARK.
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
