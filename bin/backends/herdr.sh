@@ -745,6 +745,19 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 # large region between them can never be promoted into a composer.
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES:-8}
 
+fm_backend_herdr_utf8_locale() {
+  local candidate
+  while IFS= read -r candidate; do
+    case "$candidate" in
+      *.[Uu][Tt][Ff]-8|*.[Uu][Tt][Ff]8)
+        printf '%s' "$candidate"
+        return 0
+        ;;
+    esac
+  done < <(locale -a 2>/dev/null)
+  return 1
+}
+
 fm_backend_herdr_pi_separator_row() {  # <plain-row>
   local row=$1
   row="${row#"${row%%[![:space:]]*}"}"
@@ -807,11 +820,14 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped utf8_locale=""
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
+  if [ "$FM_BACKEND_HERDR_BARE_PROMPT_RE" != '^[❯›]' ]; then
+    utf8_locale=$(fm_backend_herdr_utf8_locale || true)
+  fi
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -841,11 +857,8 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
           raw_match=$line
           generic_line=$row
           found=1
-        elif [ "$FM_BACKEND_HERDR_BARE_PROMPT_RE" != '^[❯›]' ] \
-          && {
-            printf '%s' "$trimmed" | LC_ALL=C.UTF-8 grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" 2>/dev/null \
-              || printf '%s' "$trimmed" | LC_ALL=en_US.UTF-8 grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" 2>/dev/null
-          }; then
+        elif [ -n "$utf8_locale" ] \
+          && printf '%s' "$trimmed" | LC_ALL="$utf8_locale" grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" 2>/dev/null; then
           shape=bare
           raw_match=$line
           generic_line=$row
