@@ -15,6 +15,9 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     Structured records with a repo include its resolved delivery_mode and
+#     project_resolved provenance from data/projects.md; unresolved projects
+#     retain the fail-safe no-mistakes mode while project_resolved stays false.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
@@ -39,8 +42,12 @@
 #     projects fields when its canonical one-line syntax is parseable, so projections
 #     can describe routing alignment without reopening data/secondmates.md.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted; captain holds appear in
-#     decisions_open and are also preserved in queued with hold metadata.
+#     queued, landed, endpoints, counts, and omitted.
+#     Active children and holds preserve bounded project, delivery, age, and kind
+#     evidence; queued work additionally preserves priority, order, and definition
+#     evidence used by cross-home projections.
+#     Captain holds appear in decisions_open and are also preserved in queued
+#     with hold metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[]} - the compatibility
 #     landed-work roll-up derived from secondmate_current.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
