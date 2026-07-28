@@ -64,15 +64,18 @@ export function loadWaitHistory(file) {
 
 // Reconcile one producer observation against the durable history, in place.
 // observed maps "<owner>/<id>:<kind>" to its kind. An active entry no longer
-// observed has completed: its observed duration joins the rolling per-kind
-// history (recordable kinds only, and only when it was seen more than once, so
-// a single sighting never records a meaningless zero). Returns elapsed seconds
-// per observed key, measured from first observation - an honest lower bound,
-// since the wait may have started before the producer first saw it.
-export function observeWaits(history, observed, nowEpoch) {
+// observed under an authoritative owner has completed: its observed duration
+// joins the rolling per-kind history (recordable kinds only, and only when it
+// was seen more than once, so a single sighting never records a meaningless
+// zero). Returns elapsed seconds per observed key, measured from first
+// observation - an honest lower bound, since the wait may have started before
+// the producer first saw it.
+export function observeWaits(history, observed, nowEpoch, authoritativeOwners = null) {
   const elapsed = new Map();
   for (const [key, entry] of Object.entries(history.active)) {
     if (observed.has(key) && observed.get(key) === entry.kind) continue;
+    const owner = key.slice(0, key.indexOf("/"));
+    if (authoritativeOwners && !authoritativeOwners.has(owner)) continue;
     const duration = entry.last_observed - entry.first_observed;
     if (duration > 0 && WAIT_HISTORY_KINDS.has(entry.kind)) {
       const durations = history.durations[entry.kind] || [];

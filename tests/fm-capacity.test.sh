@@ -307,8 +307,10 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
 }
 
 test_incomplete_sources_fail_closed() {
-  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete-home/data/incomplete.html" json
+  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete-home/data/incomplete.html"
+  local history="$TMP_ROOT/incomplete-home/data/capacity-wait-history.json" json
   make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' '{"schema":"fm-capacity-wait-history.v1","active":{"design/missing:validation":{"kind":"validation","first_observed":1000,"last_observed":1600}},"durations":{}}' > "$history"
   jq '.secondmate_current.truncated = 1' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "truncated capacity run failed"
@@ -319,6 +321,10 @@ test_incomplete_sources_fail_closed() {
     and (.recommendations | any(.id == "CAP-06") | not)
     and (.recommendations | any(.id == "CAP-08") | not)
   ' >/dev/null || fail "truncated secondmate inventory did not suppress readiness: $json"
+  jq -e '
+    .active["design/missing:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "truncated inventory retired an unobserved active wait: $(cat "$history")"
 
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_current.records[0].omitted = [{"surface":"queued","count":1}]' "$snapshot" > "$snapshot.tmp"
@@ -817,8 +823,20 @@ test_html_is_private_escaped_accessible_and_responsive() {
 
 test_output_replacement_rejects_symlinks_and_enforces_mode() {
   local home="$TMP_ROOT/output-home" snapshot="$TMP_ROOT/output-snapshot.json" environment="$TMP_ROOT/output-environment.json"
-  local output="$home/data/capacity-dashboard.html" target="$TMP_ROOT/symlink-target" redirected="$TMP_ROOT/redirected-data" mode
+  local output="$home/data/capacity-dashboard.html" history="$home/data/capacity-wait-history.json"
+  local target="$TMP_ROOT/symlink-target" redirected="$TMP_ROOT/redirected-data" mode
   make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' sentinel > "$history"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$history" >/dev/null 2>&1; then
+    fail "capacity accepted its wait history as the dashboard destination"
+  fi
+  [ "$(cat "$history")" = sentinel ] || fail "dashboard collision changed wait history"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$history" >/dev/null 2>&1; then
+    fail "capacity accepted its wait history as the refs destination"
+  fi
+  [ "$(cat "$history")" = sentinel ] || fail "refs collision changed wait history"
+  [ ! -e "$output" ] || fail "refs collision wrote the dashboard before refusing"
+  rm "$history"
   printf '%s\n' sentinel > "$target"
   ln -s "$target" "$output"
   if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null 2>&1; then
@@ -1065,6 +1083,10 @@ assert.deepEqual(history.active, {});
 wp.observeWaits(history, new Map([["main/b:ci", "ci"]]), 3000);
 wp.observeWaits(history, new Map(), 4000);
 assert.equal(history.durations.ci, undefined);
+history.active["design/d:validation"] = { kind: "validation", first_observed: 1000, last_observed: 1600 };
+wp.observeWaits(history, new Map(), 2000, new Set(["main"]));
+assert.deepEqual(history.active["design/d:validation"], { kind: "validation", first_observed: 1000, last_observed: 1600 });
+assert.deepEqual(history.durations.validation, [600]);
 for (let index = 0; index < 30; index += 1) {
   wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5000 + index * 300);
   wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5100 + index * 300);
@@ -1092,7 +1114,9 @@ test_wait_classes_render_distinct_treatments() {
   jq '
     .backlog.records += [
       {"order":10,"state":"in_flight","structured":true,"id":"paused-task","title":"Wait for the upstream release","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: upstream landed."},
-      {"order":11,"state":"in_flight","structured":true,"id":"stuck-task","title":"Ship the kappa importer","repo":"kappa","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: importer ships."}
+      {"order":11,"state":"in_flight","structured":true,"id":"stuck-task","title":"Ship the kappa importer","repo":"kappa","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: importer ships."},
+      {"order":12,"state":"queued","structured":true,"id":"queued-root","title":"Prepare queued dependency","repo":"theta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: dependency is ready."},
+      {"order":13,"state":"queued","structured":true,"id":"queued-dependent","title":"Use queued dependency","repo":"lambda","project_resolved":true,"kind":"ship","blocked_by":"queued-root","body_excerpt":"Acceptance criteria: dependency is used."}
     ]
     | .tasks += [
       {"id":"paused-task","kind":"ship","project":"iota","current_state":{"state":"paused","source":"status-fold","detail":"upstream release window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"paused-task","title":"Wait for the upstream release","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
@@ -1126,6 +1150,14 @@ test_wait_classes_render_distinct_treatments() {
       and .wait.class == "needs_actor"
       and (.waits_on | length) == 1
       and (.what_you_can_do | contains("Answer decision"))))
+    and (.pipeline.blocked | any(
+      .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("queued and not started"))
+      and (.what_you_can_do | contains("Dispatch"))))
+    and (.pipeline.blocked | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "dependency"
+      and ((.waits_on | join(" ")) | contains("currently working"))))
     and (.pipeline.blocked | all(.wait.class == "self_clearing" or .wait.class == "needs_actor"))
   ' >/dev/null || fail "wait classifications are wrong: $json"
   html=$(cat "$output")

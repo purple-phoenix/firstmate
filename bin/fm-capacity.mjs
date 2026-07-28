@@ -587,6 +587,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const now = Date.parse(snapshot.generated) || Date.now();
   const observedWaits = new Map();
   const measurableWaits = [];
+  const authoritativeWaitOwners = new Set();
   // Self-clearing card with a history-measurable wait: record the observation
   // (real identities stay in the private history file only) and fill progress
   // once every observation this run is known.
@@ -633,19 +634,29 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     readinessComplete = false;
   }
 
+  const mainInventoryComplete = snapshot.backlog?.present === true
+    && Array.isArray(snapshot.backlog?.records)
+    && Array.isArray(snapshot.tasks);
   if (snapshot.backlog?.present !== true || !Array.isArray(snapshot.backlog?.records)) {
     markUnavailable("main-backlog", "main", "main structured backlog unavailable");
   }
   if (!Array.isArray(snapshot.tasks)) {
     markUnavailable("main-tasks", "main", "main current-task inventory unavailable");
   }
+  if (mainInventoryComplete) authoritativeWaitOwners.add("main");
+  const registry = snapshot.secondmate_current?.registry;
+  const secondmateInventoryComplete = Boolean(snapshot.secondmate_current
+    && Array.isArray(snapshot.secondmate_current.records)
+    && Number.isInteger(snapshot.secondmate_current.truncated)
+    && snapshot.secondmate_current.truncated === 0
+    && registry?.available !== false
+    && registry?.complete !== false);
   if (!snapshot.secondmate_current
     || !Array.isArray(snapshot.secondmate_current.records)
     || !Number.isInteger(snapshot.secondmate_current.truncated)
     || snapshot.secondmate_current.truncated > 0) {
     markUnavailable("secondmate-inventory", "main", "bounded secondmate inventory incomplete");
   }
-  const registry = snapshot.secondmate_current?.registry;
   if (registry?.available === false || registry?.complete === false) {
     markUnavailable("secondmate-registry", "main", "registry projection incomplete");
   }
@@ -882,7 +893,14 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         addRoot(workerContext.key, nextSegments, workerContext.wait, workerContext.action, "worker");
         continue;
       }
-      addRoot(`finish:${blockerId}`, nextSegments, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`, "finish");
+      const activelyRunning = currentState === "working" || (!blockerTask && blockerRecord?.state === "in_flight");
+      if (activelyRunning) {
+        addRoot(`finish:${blockerId}`, nextSegments, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`, "finish");
+      } else if (blockerRecord?.state === "queued") {
+        addRoot(`queued:${blockerId}`, nextSegments, null, `Dispatch ${blockerRef} through the normal workflow - it is queued and not started.`, "queued");
+      } else {
+        addRoot(`resume:${blockerId}`, nextSegments, null, `Resume ${blockerRef} through the normal workflow - it is not actively running.`, "resume");
+      }
     }
     if (blockerIds.length === 0) {
       const gate = futureTimeGate(startRecord, now);
@@ -1019,6 +1037,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       || mate.counts.holds !== (mate.holds || []).length
       || mate.counts.queued !== (mate.queued || []).length;
     if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
+    if (secondmateInventoryComplete && !mateIncomplete) authoritativeWaitOwners.add(mate.id);
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
@@ -1425,7 +1444,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   // One observation per run: completed waits roll into the per-kind duration
   // history, live ones get an honest elapsed-vs-typical estimate (or "time
   // unknown" when no history exists for that kind yet).
-  const waitElapsed = observeWaits(waitHistory, observedWaits, Math.floor(now / 1000));
+  const waitElapsed = observeWaits(waitHistory, observedWaits, Math.floor(now / 1000), authoritativeWaitOwners);
   for (const { card, key, kind } of measurableWaits) {
     const estimate = estimateWait(waitElapsed.get(key) ?? 0, waitHistory.durations[kind]);
     card.wait.progress = { ...estimate, label: progressLabel(estimate) };
@@ -1917,13 +1936,13 @@ function main() {
     throw new Error("dashboard path must stay inside the effective data directory");
   }
   const waitHistoryPath = path.join(allowedData, "capacity-wait-history.json");
-  const waitHistory = loadWaitHistory(waitHistoryPath);
-  const { model, captainActions } = classify(snapshot, environment, waitHistory);
-  writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
-  writePrivateAtomic(waitHistoryPath, `${JSON.stringify(waitHistory, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
+  if (output === waitHistoryPath) {
+    throw new Error("dashboard path must not replace the capacity wait history");
+  }
+  let refsPath = null;
   if (opts.refs) {
     const allowedState = path.resolve(snapshot.roots?.state || path.join(snapshot.fm_home || ROOT, "state"));
-    const refsPath = path.resolve(opts.refs);
+    refsPath = path.resolve(opts.refs);
     const insideOf = (root) => {
       const relative = path.relative(root, refsPath);
       return relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
@@ -1931,6 +1950,15 @@ function main() {
     if (!insideOf(allowedState) && !insideOf(allowedData)) {
       throw new Error("refs sidecar path must stay inside the effective state or data directory");
     }
+    if (refsPath === waitHistoryPath) {
+      throw new Error("refs sidecar path must not replace the capacity wait history");
+    }
+  }
+  const waitHistory = loadWaitHistory(waitHistoryPath);
+  const { model, captainActions } = classify(snapshot, environment, waitHistory);
+  writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
+  writePrivateAtomic(waitHistoryPath, `${JSON.stringify(waitHistory, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
+  if (refsPath) {
     const refs = {};
     for (const [key, ref] of opaqueRefs.entries()) {
       const separator = key.indexOf("\0");
