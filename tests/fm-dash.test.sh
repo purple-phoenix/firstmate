@@ -615,7 +615,7 @@ test_installer_plist_and_funnel_stance() {
 }
 
 test_installer_tracks_custom_serve_port() {
-  local fake_bin install_home launch_home launchctl_log launchctl_state prior_config real_mv tailscale_log tailscale_state
+  local fake_bin install_home launch_home launchctl_log launchctl_state occupied_error prior_config real_mv tailscale_log tailscale_state
   fake_bin="$TMP_ROOT/fake-bin"
   install_home="$TMP_ROOT/install-home"
   launch_home="$TMP_ROOT/launch-home"
@@ -670,23 +670,30 @@ EOF
 if [ "$1" = status ] && [ "${2:-}" = --json ]; then
   printf '%s\n' '{"Self":{"UserID":1,"DNSName":"dash.tail.ts.net."},"User":{"1":{"LoginName":"captain@example.com"}}}'
 elif [ "$1" = serve ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
-  state=$(cat "$TAILSCALE_STATE")
-  if [ -z "$state" ]; then
-    printf '%s\n' '{"TCP":{},"Web":{},"AllowFunnel":{}}'
-    exit 0
-  fi
-  port=${state%%|*}
-  target=${state#*|}
-  funnel=false
-  [ "${TAILSCALE_FUNNEL_PORT:-}" != "$port" ] || funnel=true
-  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{"Handlers":{"/":{"Proxy":"%s"}}}},"AllowFunnel":{"dash.tail.ts.net:%s":%s}}\n' "$port" "$port" "$target" "$port" "$funnel"
+  node -e '
+    const fs = require("node:fs");
+    const state = fs.existsSync(process.argv[1]) ? fs.readFileSync(process.argv[1], "utf8").trim().split("\n").filter(Boolean) : [];
+    const payload = { TCP: {}, Web: {}, AllowFunnel: {} };
+    for (const record of state) {
+      const separator = record.indexOf("|");
+      const port = record.slice(0, separator);
+      const target = record.slice(separator + 1);
+      const hostport = "dash.tail.ts.net:" + port;
+      payload.TCP[port] = { HTTPS: true };
+      payload.Web[hostport] = { Handlers: { "/": { Proxy: target } } };
+      payload.AllowFunnel[hostport] = process.argv[2] === port;
+    }
+    console.log(JSON.stringify(payload));
+  ' "$TAILSCALE_STATE" "${TAILSCALE_FUNNEL_PORT:-}"
 elif [ "$1" = serve ] && [ "${2:-}" = --bg ]; then
   port=${3#--https=}
   if [ "${TAILSCALE_FAIL_MAP_PORT:-}" = "$port" ]; then
     printf 'map-failed %s\n' "$port" >> "$TAILSCALE_LOG"
     exit 1
   fi
-  printf '%s|%s\n' "$port" "$4" > "$TAILSCALE_STATE"
+  awk -F '|' -v port="$port" '$1 != port' "$TAILSCALE_STATE" > "$TAILSCALE_STATE.next"
+  printf '%s|%s\n' "$port" "$4" >> "$TAILSCALE_STATE.next"
+  mv "$TAILSCALE_STATE.next" "$TAILSCALE_STATE"
   printf 'map %s\n' "$port" >> "$TAILSCALE_LOG"
 elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
   port=${2#--https=}
@@ -696,21 +703,31 @@ elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
     exit 1
   fi
   printf 'off %s\n' "$port" >> "$TAILSCALE_LOG"
-  state=$(cat "$TAILSCALE_STATE")
-  if [ "${state%%|*}" = "$port" ]; then
-    : > "$TAILSCALE_STATE"
-  fi
+  awk -F '|' -v port="$port" '$1 != port' "$TAILSCALE_STATE" > "$TAILSCALE_STATE.next"
+  mv "$TAILSCALE_STATE.next" "$TAILSCALE_STATE"
 else
   exit 1
 fi
 EOF
   chmod 700 "$fake_bin/uname" "$fake_bin/launchctl" "$fake_bin/mv" "$fake_bin/tailscale"
+  : > "$tailscale_state"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --read-only --port 18847 --serve-port 19443 --captain "$CAPTAIN" >/dev/null \
     || fail "custom-port install failed"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
     || fail "install did not persist the custom serve port"
   cp "$install_home/config/dash.json" "$prior_config"
+  : > "$tailscale_log"
+  printf '%s\n' '20553|http://127.0.0.1:29999' >> "$tailscale_state"
+  occupied_error=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18847 --serve-port 20553 --captain "$CAPTAIN" 2>&1) && fail "occupied replacement port was reported as installed"
+  assert_contains "$occupied_error" 'requested dashboard serve port 20553 carries a non-dashboard mapping' "occupied replacement port refusal was unclear"
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "occupied replacement port mutated the dashboard config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "occupied replacement port mutated the launchd service"
+  assert_no_grep 'map 20553' "$tailscale_log" "occupied replacement port was overwritten"
+  assert_no_grep 'off 20553' "$tailscale_log" "occupied replacement port was removed"
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$fake_bin/tailscale" serve --https=20553 off >/dev/null || fail "could not remove the foreign mapping fixture"
   : > "$tailscale_log"
   if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19663 PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --port 18848 --serve-port 19663 --captain "other@example.com" >/dev/null 2>&1; then

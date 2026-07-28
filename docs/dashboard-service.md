@@ -105,6 +105,7 @@ A read-only install is the right shape for running the service ahead of command-
 
 Install is idempotent and prints the stable URL, `https://<machine>.<tailnet>.ts.net:8443/`.
 Changing `--serve-port` stages the full replacement, verifies it, removes the previous mapping, and restores the prior config, launchd state, watcher registration, and observed live mapping state if any step fails.
+Install refuses a requested serve port that is already owned by another mapping.
 Uninstall removes the serve mapping, launchd agent, watcher check, and watcher trust registration but keeps `config/dash.json` and any pending commands.
 The launchd agent logs to `state/dash-serve.log`.
 On a non-macOS host the installer refuses and the service can be run under the local init system with the same tailscale serve mapping.

@@ -185,6 +185,21 @@ configured_serve_port() {
   ' "$CONFIG" "$DEFAULT_SERVE_PORT"
 }
 
+configured_mapping_target() {
+  [ -f "$CONFIG" ] || return 0
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const port = parsed.port === undefined ? Number(process.argv[2]) : parsed.port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) process.exit(1);
+      console.log("http://127.0.0.1:" + port);
+    } catch {
+      process.exit(1);
+    }
+  ' "$CONFIG" "$DEFAULT_PORT"
+}
+
 snapshot_serve_mapping() {
   local serve_port=$1 status_json
   status_json=$("$(tailscale_bin)" serve status --json 2>/dev/null) || return 1
@@ -205,9 +220,10 @@ snapshot_serve_mapping() {
         if (!tcpMapping || tcpMapping.HTTPS !== true || webMappings.length !== 1) throw new Error();
         const handlers = webMappings[0][1] && webMappings[0][1].Handlers;
         if (!handlers || Array.isArray(handlers) || typeof handlers !== "object") throw new Error();
-        const proxies = Object.values(handlers).map((handler) => handler && handler.Proxy).filter((proxy) => typeof proxy === "string" && proxy.length > 0);
-        if (proxies.length !== 1) throw new Error();
-        console.log(proxies[0]);
+        const paths = Object.keys(handlers);
+        const proxy = handlers["/"] && handlers["/"].Proxy;
+        if (paths.length !== 1 || paths[0] !== "/" || typeof proxy !== "string" || proxy.length === 0) throw new Error();
+        console.log(proxy);
       } catch {
         process.exit(1);
       }
@@ -343,7 +359,7 @@ unregister_check() {
 }
 
 cmd_install() {
-  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT previous_serve_port read_only=false captains=() label plist_path node_path dnsname
+  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT previous_serve_port previous_mapping_target requested_mapping_target expected_mapping_target read_only=false captains=() label plist_path node_path dnsname
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -358,9 +374,22 @@ cmd_install() {
   node_path=$(node_bin)
   tailscale_bin >/dev/null
   previous_serve_port=$(configured_serve_port) || err "could not read the previously configured dashboard serve port"
+  expected_mapping_target=$(configured_mapping_target) || err "could not read the previously configured dashboard mapping target"
   if [ -n "$previous_serve_port" ]; then
-    TX_PREVIOUS_MAPPING_TARGET=$(snapshot_serve_mapping "$previous_serve_port") || err "could not snapshot the previous dashboard mapping"
-    [ -z "$TX_PREVIOUS_MAPPING_TARGET" ] || TX_PREVIOUS_MAPPING_PRESENT=true
+    previous_mapping_target=$(snapshot_serve_mapping "$previous_serve_port") || err "could not inspect the previously configured dashboard serve port"
+    if [ -n "$previous_mapping_target" ] && [ "$previous_mapping_target" != "$expected_mapping_target" ]; then
+      err "configured dashboard serve port $previous_serve_port carries a non-dashboard mapping; refusing to replace it"
+    fi
+    TX_PREVIOUS_MAPPING_TARGET=$previous_mapping_target
+    [ -z "$previous_mapping_target" ] || TX_PREVIOUS_MAPPING_PRESENT=true
+  fi
+  if [ "$serve_port" = "$previous_serve_port" ]; then
+    requested_mapping_target=$previous_mapping_target
+  else
+    requested_mapping_target=$(snapshot_serve_mapping "$serve_port") || err "could not inspect requested dashboard serve port $serve_port"
+  fi
+  if [ -n "$requested_mapping_target" ] && { [ "$serve_port" != "$previous_serve_port" ] || [ "$requested_mapping_target" != "$expected_mapping_target" ]; }; then
+    err "requested dashboard serve port $serve_port carries a non-dashboard mapping; choose another --serve-port"
   fi
 
   if [ "${#captains[@]}" -eq 0 ]; then
