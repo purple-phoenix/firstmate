@@ -670,17 +670,21 @@ EOF
 if [ "$1" = status ] && [ "${2:-}" = --json ]; then
   printf '%s\n' '{"Self":{"UserID":1,"DNSName":"dash.tail.ts.net."},"User":{"1":{"LoginName":"captain@example.com"}}}'
 elif [ "$1" = serve ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
+  if [ "${TAILSCALE_INVALID_SERVE_STATUS:-}" = 1 ]; then
+    printf '{\n'
+    exit 0
+  fi
   node -e '
     const fs = require("node:fs");
     const state = fs.existsSync(process.argv[1]) ? fs.readFileSync(process.argv[1], "utf8").trim().split("\n").filter(Boolean) : [];
     const payload = { TCP: {}, Web: {}, AllowFunnel: {} };
     for (const record of state) {
-      const separator = record.indexOf("|");
-      const port = record.slice(0, separator);
-      const target = record.slice(separator + 1);
+      const [port, target, shape] = record.split("|");
       const hostport = "dash.tail.ts.net:" + port;
       payload.TCP[port] = { HTTPS: true };
-      payload.Web[hostport] = { Handlers: { "/": { Proxy: target } } };
+      payload.Web[hostport] = shape === "complex"
+        ? { Handlers: { "/api": { Proxy: target }, "/": { Text: "foreign service" } } }
+        : { Handlers: { "/": { Proxy: target } } };
       payload.AllowFunnel[hostport] = process.argv[2] === port;
     }
     console.log(JSON.stringify(payload));
@@ -780,10 +784,16 @@ EOF
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19553) process.exit(1)' "$install_home/config/dash.json" \
     || fail "replacement install did not persist the active serve port"
   : > "$tailscale_log"
+  uninstall_output=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_INVALID_SERVE_STATUS=1 TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" uninstall 2>&1) && fail "uninstall accepted unreadable serve status"
+  assert_contains "$uninstall_output" 'could not inspect or remove the dashboard mapping for port 19553' "uninstall did not fail clearly on unreadable serve status"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "unreadable serve status removed the launchd service"
+  assert_no_grep 'off 19553' "$tailscale_log" "unreadable serve status removed the dashboard mapping"
+  : > "$tailscale_log"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
   assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
-  printf '%s\n' '19553|http://127.0.0.1:29998' '20554|http://127.0.0.1:29999' >> "$tailscale_state"
+  printf '%s\n' '19553|http://127.0.0.1:29998' '20554|http://127.0.0.1:29999|complex' >> "$tailscale_state"
   : > "$tailscale_log"
   uninstall_output=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall --serve-port 20554) || fail "repeated uninstall with foreign mappings failed"
@@ -792,7 +802,7 @@ EOF
   assert_no_grep 'off 20554' "$tailscale_log" "uninstall removed a foreign requested mapping"
   assert_no_grep 'off 19553' "$tailscale_log" "uninstall removed a foreign configured mapping"
   assert_grep '19553|http://127.0.0.1:29998' "$tailscale_state" "uninstall mutated the foreign configured mapping"
-  assert_grep '20554|http://127.0.0.1:29999' "$tailscale_state" "uninstall mutated the foreign requested mapping"
+  assert_grep '20554|http://127.0.0.1:29999|complex' "$tailscale_state" "uninstall mutated the complex foreign requested mapping"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$fake_bin/tailscale" serve --https=19553 off >/dev/null || fail "could not remove the configured foreign mapping fixture"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \

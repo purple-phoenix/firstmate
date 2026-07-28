@@ -217,12 +217,21 @@ snapshot_serve_mapping() {
         const tcpMapping = tcp[process.argv[1]];
         const webMappings = Object.entries(web).filter(([hostport]) => hostport.endsWith(":" + process.argv[1]));
         if (tcpMapping === undefined && webMappings.length === 0) return;
-        if (!tcpMapping || tcpMapping.HTTPS !== true || webMappings.length !== 1) throw new Error();
+        if (!tcpMapping || tcpMapping.HTTPS !== true || webMappings.length !== 1) {
+          console.log("foreign");
+          return;
+        }
         const handlers = webMappings[0][1] && webMappings[0][1].Handlers;
-        if (!handlers || Array.isArray(handlers) || typeof handlers !== "object") throw new Error();
+        if (!handlers || Array.isArray(handlers) || typeof handlers !== "object") {
+          console.log("foreign");
+          return;
+        }
         const paths = Object.keys(handlers);
         const proxy = handlers["/"] && handlers["/"].Proxy;
-        if (paths.length !== 1 || paths[0] !== "/" || typeof proxy !== "string" || proxy.length === 0) throw new Error();
+        if (paths.length !== 1 || paths[0] !== "/" || typeof proxy !== "string" || proxy.length === 0) {
+          console.log("foreign");
+          return;
+        }
         console.log(proxy);
       } catch {
         process.exit(1);
