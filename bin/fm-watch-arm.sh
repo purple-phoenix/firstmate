@@ -268,6 +268,13 @@ cleanup_child() {
       sleep 0.1
       i=$((i + 1))
     done
+    # Bash may defer the watcher's TERM trap while it waits on its poll sleep.
+    # Reap the exact owned child before checking for a healthy successor, or a
+    # still-fresh dying child can suppress the arm-death alarm on Linux.
+    if fm_pid_alive "$child"; then
+      kill -KILL "$child" 2>/dev/null || true
+    fi
+    wait "$child" 2>/dev/null || true
   fi
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
