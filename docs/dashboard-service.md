@@ -15,6 +15,7 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 - A service bar shows how many captain commands are queued for firstmate.
 - A Subscription usage band shows cached `quota-axi --json` windows for Claude, Codex, and Grok, including percent used and reset distance with reset time formatted by the captain's browser in local time.
 - Every blocked row carries its plain-language blocker chain resolved to the root cause plus an explicit "What you can do" line, so no blocked row leaves the captain guessing; chains stay privacy-safe in the on-disk file and de-anonymize at serve time like every other reference.
+- A keyless `needs-decision` status event renders honestly as a worker question that Firstmate is handling in chat, with no fabricated decision identity, `Decide` framing, or dead-end decision detail view.
 - The served page has zero copy-prompt affordances: each producer copy button is replaced by direct dispatch, or removed outright in read-only mode, while the offline file keeps its copy buttons for `file://` use.
 - The installer pins the installing shell's `PATH` into the launchd agent so the generator's state-reader tools resolve, and the service marks a render `RENDER DEGRADED` loudly on the page and in its log when most worker states read unknown - degraded data is never presented as truth.
 
@@ -34,10 +35,10 @@ The on-disk dashboard stays identity-opaque: the producer's opt-in `--refs` side
 Button clicks never execute anything.
 The design keeps the web process outside every fleet-mutation path:
 
-1. The captain clicks "Send to firstmate" on a `CAP-NN` action.
+1. The captain clicks a send or verdict control for a `CAP-NN` action, structured decision answer, or idea verdict.
 2. The service validates the request (see trust design) and writes one durable `fm-dash-command.v1` record into `state/dash-inbox/` with an atomic temp-file rename, mode 0600.
 3. The registered `fm-dash` watcher check notices the pending record on its normal cadence (`FM_CHECK_INTERVAL`, default 300 seconds) and wakes the running firstmate through the standard durable wake queue.
-4. Firstmate claims the records with `bin/fm-dash-inbox.sh claim` and handles each prompt as the captain's approval of that action ID under the capacity skill's section 4 semantics.
+4. Firstmate claims the records with `bin/fm-dash-inbox.sh claim` and handles each record by its kind under the capacity skill's dashboard-command semantics.
 
 Consequences of that shape:
 
