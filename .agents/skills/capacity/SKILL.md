@@ -25,10 +25,11 @@ Do not assemble a competing snapshot with ad hoc state reads, GitHub calls, term
 Never infer current state from `state/<id>.status`, because it is append-only wake-event history rather than current-state truth.
 Do not scrape scout reports, browser review artifacts, or Lavish surfaces to discover decisions.
 Structured captain holds and the keyed open-decision fold are the only decision inputs.
+Decision filing and its structured options document are owned by the decision-hold lifecycle.
 
 The generated dashboard is a polished, responsive, accessible, self-contained HTML file that works directly from disk.
 Do not invoke, depend on, open, poll, share, or embed Lavish for `/capacity`.
-Do not expose the dashboard through a local, LAN, Tailscale, public, or third-party service.
+Do not expose the dashboard through any local, LAN, public, or third-party service; the sole sanctioned exposure is the tailnet-only dashboard service in section 6, and even that surface is never Funnel and never public.
 The normal invocation may replace only the generated private dashboard and must not write a cache unless the producing script's help explicitly adds and owns one in the future.
 Never put secrets, credentials, PHI, production data, or report bodies into the dashboard.
 
@@ -84,3 +85,20 @@ Do not compare against, incrementally patch, or rely on the prior dashboard as c
 The normal `/capacity` invocation is read-mostly and must not dispatch, merge, tear down, mutate task state, edit the backlog, register decisions, or create speculative work as a side effect.
 If the fresh result reveals an action, report its stable ID and wait for or discuss the captain's ordinary chat direction.
 Continue the already-required live supervision cycle after presenting the result whenever fleet work or X mode is under way.
+
+## 6. Dashboard command service
+
+The optional persistent dashboard service (`bin/fm-dash-serve.mjs`, installed by `bin/fm-dash-install.sh`, designed in `docs/dashboard-service.md`) publishes the generated dashboard tailnet-only, never Funnel, and lets the captain click a current `CAP-NN` action or a server-side refresh.
+The service never executes fleet commands: a click only writes a durable command record into `state/dash-inbox/`, and the registered `fm-dash` watcher check wakes Firstmate while records are pending.
+Its refresh button reruns the producer server-side and is equivalent to a fresh normal invocation, so it needs no Firstmate action.
+
+On a `check:` wake naming `fm-dash.check.sh`, run `bin/fm-dash-inbox.sh claim` and handle each claimed record by its kind:
+Claim delivery is at-least-once across interruption, so check whether a re-surfaced record was already handled before applying it again.
+
+- A `CAP-NN` record is the captain's ordinary chat approval of that action ID under section 4, including its full re-resolution and authority limits.
+- A `decision` record is the captain's answer for the owner-qualified decision identity with either the recorded option text or bounded custom answer; route `decision_origin` in `decision_home` through `decision-hold-lifecycle` exactly as a chat answer, and re-confirm in chat before acting when the answer has a destructive or irreversible consequence.
+- An `idea` record is the captain's verdict on the named `data/ideas/` idea: on approve, create the follow-up work item(s) through the normal backlog lifecycle; on deny, record the outcome against the idea; on suggest, treat the suggestion text as captain input on that idea.
+
+A claimed record never authorizes a PR merge, `local-only` landing, destructive action, irreversible action, security-sensitive action, or discard of unlanded work; when a claimed action leads to such a choice, escalate it to captain chat exactly as section 4 requires.
+Report the outcome of handled commands to the captain through normal escalation etiquette rather than assuming the dashboard told them.
+While the service is installed and registered, treat pending dashboard commands like X-mode mentions for supervision: keep the live supervision cycle running even with no other fleet work so a click can wake Firstmate.

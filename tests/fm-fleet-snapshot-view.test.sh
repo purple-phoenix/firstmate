@@ -281,7 +281,7 @@ EOF
       and (.backlog.records[] | select(.id == "orphan")
         | .current_role == "worker" and .requires_child_metadata == true)
       and (.backlog.records[] | select(.id == "captain-run")
-        | .blocked_by == "review"
+        | .blocked_by == "worker,review"
           and .blocked_by_ids == ["worker", "review"]
           and .unresolved_blocker_ids == ["worker", "review"]
           and .captain_actionable == false)
@@ -303,7 +303,7 @@ EOF
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-run")
-    | .blocked_by == "review"
+    | .blocked_by == "worker,review"
       and .blocked_by_ids == ["worker", "review"]
       and .unresolved_blocker_ids == ["review"]
       and .captain_actionable == false
@@ -324,7 +324,7 @@ EOF
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-run")
-    | .blocked_by == "review"
+    | .blocked_by == "worker,review"
       and .blocked_by_ids == ["worker", "review"]
       and .unresolved_blocker_ids == []
       and .captain_actionable == true
@@ -433,7 +433,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 ## Queued
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
-- [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
+- [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma blocked-by: missing-edge - waits on both blockers
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
 
 ## Done
@@ -482,8 +482,9 @@ EOF
     .backlog.records[] | select(.id == "blocked-reason")
     | .title == "Blocked Reason"
       and .repo == "beta"
-      and .blocked_by == "queued-comma"
-      and .blocked_reason == "waits on queued-comma"
+      and .blocked_by == "queued-comma,missing-edge"
+      and .blocked_by_all == ["queued-comma","missing-edge"]
+      and .blocked_reason == "waits on both blockers"
   ' >/dev/null || fail "blocked suffix did not parse into title and reason"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "sample-decision-route")
@@ -531,7 +532,7 @@ EOF
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
   assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
-  assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
+  assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma,missing-edge - waits on both blockers | - |" \
     "view should render blocked reason without title metadata"
   assert_contains "$view" "| done-bracket-pr | Done Bracket PR | gamma | ship | - | https://github.com/kunchenguid/firstmate/pull/43 |" \
     "view should render bracketed PR artifact outside the title"

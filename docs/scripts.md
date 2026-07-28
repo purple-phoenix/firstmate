@@ -16,6 +16,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-capacity.mjs`        | Classify meaningful fleet capacity and replace the private offline pipeline dashboard |
+| `fm-dash-serve.mjs`      | Serve the capacity dashboard tailnet-only with one-click CAP dispatch and server-side refresh (docs/dashboard-service.md) |
+| `fm-dash-install.sh`     | Install the persistent dashboard service: launchd agent, never-Funnel tailscale serve mapping, and registered fm-dash check |
+| `fm-dash-inbox.sh`       | List and claim durable captain dashboard commands from `state/dash-inbox/`           |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-task-add.sh`         | Create backlog items with creation-time task-ID validation and safe mint fitting     |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
