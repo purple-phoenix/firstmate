@@ -279,8 +279,9 @@ function previewLinks(...texts) {
 function decisionRef(entry) {
   const parts = entry.value.split("/");
   if (parts[0] !== "decision") return null;
-  if (parts.length >= 3) return { home: parts[1], id: parts.slice(2).join("/") };
-  return { home: "main", id: parts.slice(1).join("/") };
+  if (parts.length >= 4) return { home: parts[1], origin: parts[2], key: parts.slice(3).join("/") };
+  if (parts.length === 3) return { home: parts[1], origin: null, key: parts[2] };
+  return { home: "main", origin: null, key: parts.slice(1).join("/") };
 }
 
 function decisionHome(home) {
@@ -289,11 +290,15 @@ function decisionHome(home) {
   return meta.home ? path.resolve(meta.home) : null;
 }
 
-function decisionDocument(home, id) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
+function decisionDocument(home, origin, key) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key)) return null;
+  if (origin !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(origin)) return null;
   const root = decisionHome(home);
   if (!root) return null;
-  const text = readText(path.join(root, "data", "decisions", `${id}.md`), 131072);
+  const file = origin === null
+    ? path.join(root, "data", "decisions", `${key}.md`)
+    : path.join(root, "data", origin, "decisions", `${key}.md`);
+  const text = readText(file, 131072);
   if (!text) return null;
   const title = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim();
   const sections = text.split(/^##\s+Options\s*$/im);
@@ -335,7 +340,7 @@ function refDisplayMap(refsFile) {
       const separator = entry.value.indexOf("/");
       const owner = entry.value.slice(0, separator);
       const decision = decisionRef(entry);
-      const id = decision ? decision.id : entry.value.slice(separator + 1);
+      const id = decision ? `${decision.origin ? `${decision.origin}/` : ""}${decision.key}` : entry.value.slice(separator + 1);
       display[ref] = owner === "decision"
         ? { t: "decision", label: id }
         : { t: "work", label: id, owner };
@@ -352,21 +357,23 @@ function assembleDetail(ref) {
   const separator = entry.value.indexOf("/");
   const owner = entry.value.slice(0, separator);
   const decision = decisionRef(entry);
-  const id = decision ? decision.id : entry.value.slice(separator + 1);
-  const backlogItem = parseBacklog().find((item) => item.id === id) || null;
+  const id = decision ? decision.key : entry.value.slice(separator + 1);
+  const holdId = decision?.origin ? `${decision.origin}-decision-${decision.key}` : id;
+  const backlogItem = parseBacklog().find((item) => item.id === holdId) || null;
 
   if (owner === "decision") {
-    const document = decisionDocument(decision.home, id);
+    const document = decisionDocument(decision.home, decision.origin, decision.key);
     return {
       type: "decision",
       ref,
       id,
       decision_home: decision.home,
-      decision_identity: `${decision.home}/${id}`,
+      decision_origin: decision.origin,
+      decision_identity: `${decision.home}/${decision.origin || ""}/${decision.key}`,
       title: document?.title || backlogItem?.title || id,
       description: document?.context || null,
       options: document?.options || [],
-      recent: statusTail(id),
+      recent: statusTail(decision.origin || id),
       note: document ? null : "This legacy decision has no structured options document; answer it in captain chat.",
     };
   }
@@ -1213,14 +1220,15 @@ async function handle(req, res) {
         id: body.ref,
         decision_key: detail.id,
         decision_home: detail.decision_home,
+        decision_origin: detail.decision_origin,
         decision_identity: detail.decision_identity,
         option_text: option?.text || null,
         custom_answer: option ? null : customAnswer,
         requested_by: requesterLogin(req),
         requested_at: new Date().toISOString(),
         prompt: option
-          ? `Captain approved decision ${detail.id} in ${detail.decision_home}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
-          : `Captain answered decision ${detail.id} in ${detail.decision_home}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
+          ? `Captain approved decision ${detail.id} for ${detail.decision_origin || "legacy"} in ${detail.decision_home}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
+          : `Captain answered decision ${detail.id} for ${detail.decision_origin || "legacy"} in ${detail.decision_home}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
       };
       const name = enqueueCommand(record);
       log(`queued decision ${detail.id} as ${name} for ${record.requested_by}`);

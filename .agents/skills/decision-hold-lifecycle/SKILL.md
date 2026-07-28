@@ -14,7 +14,7 @@ This skill is the single policy owner for unresolved captain decisions discovere
 
 ## Policy
 
-Before filing a new decision, author its title, context, options, and per-option impacts in the format owned by `docs/dashboard-service.md`, then pass that file to `bin/fm-decision-hold.sh hold --options-file`; legacy holds that already exist without a document remain answer-in-chat decisions.
+Before filing a new decision, author its title, context, options, and per-option impacts in the origin-qualified format owned by `docs/dashboard-service.md`, then pass that file to `bin/fm-decision-hold.sh hold --options-file`; legacy holds that already exist without a document remain answer-in-chat decisions.
 
 Every unresolved decision that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must become a structured captain-held work item in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 The agent performs the semantic inventory because scripts must not infer decisions from report prose, visual-review artifacts, terminal output, or chat.

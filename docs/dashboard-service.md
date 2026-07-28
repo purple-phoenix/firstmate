@@ -10,7 +10,7 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 - Every current one-click-eligible `CAP-NN` action gets an "Approve & send" button.
 - A "Refresh capacity" button reruns `bin/fm-capacity.mjs` server-side and reloads the page; the producer also reruns automatically on the configured interval so the page never goes stale.
 - The page is de-anonymized for the authenticated captain: opaque `item-NN`/`project-NN`/`home-NN` references become real names, and work items and decisions are clickable rich detail views (description, test plan, PR link, tailnet preview links, report excerpt, recent activity) assembled from task briefs, recorded metadata, the backlog, and scout reports.
-- Open decisions with `data/decisions/<key>.md` records show each recorded option with its impact, a per-option Approve button, and a bounded custom-answer control.
+- Open decisions with `data/<origin>/decisions/<key>.md` records show each recorded option with its impact, a per-option Approve button, and a bounded custom-answer control.
 - An Ideas section renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.
 - A service bar shows how many captain commands are queued for firstmate.
 - A Subscription usage band shows cached `quota-axi --json` windows for Claude, Codex, and Grok, including percent used and reset distance with reset time formatted by the captain's browser in local time.
@@ -58,7 +58,7 @@ Dispatch is validated against records the server itself reads:
 
 - A `CAP-NN` request must currently be recommended by the served dashboard itself AND sit in the service's fixed one-click allowlist of reviewed lifecycle-safe actions; unknown or future IDs are refused with guidance to raise them in captain chat, so new actions default to chat-only.
 - A decision answer must name a decision in the producer's current-generation refs sidecar, and its integer option index must match the options document the server just parsed; a custom answer is accepted only for a decision with that document and is bounded to 2,000 characters.
-- Decision answers persist and deduplicate against an owner-qualified home and key so equal keys in different homes remain independently routable after refs regenerate.
+- Decision answers persist and deduplicate against an owner-qualified home, origin, and key so equal keys from different origins or homes remain independently routable after refs regenerate.
 - An idea verdict must name an idea currently listed in `data/ideas/idea-backlog.md` and one of the approve, deny, or suggest verbs; on approval, firstmate creates the work item(s) through the normal backlog lifecycle - the service itself never creates work.
 - The only free text accepted is a bounded idea-suggestion note or decision custom answer, which is captain-authored data for firstmate, never a command the service interprets or executes.
 - A newer approve or deny verdict is published under a fresh immutable inbox name before the unchanged older pending verdict is removed, while suggestions remain additive.
@@ -66,7 +66,8 @@ Dispatch is validated against records the server itself reads:
 
 ## Decision options document
 
-The home that owns a decision writes `data/decisions/<key>.md`, where `<key>` is the stable decision key carried by the refs sidecar even when it is not a backlog item ID.
+The home that owns a decision writes `data/<origin>/decisions/<key>.md`, where `<origin>` is the originating work ID and `<key>` is its stable decision key.
+The refs sidecar carries `decision/<home>/<origin>/<key>`, preserving the same durable identity even when the key is not a backlog item ID.
 The document is producer-owned decision data and uses this format:
 
 ```markdown
@@ -83,7 +84,7 @@ Explain the decision context and constraints here.
 The first level-one heading is the title, prose before `## Options` is context, and each option is one bullet with an optional `[recommended]` marker followed by ` - ` and its impact.
 Indented continuation lines extend the preceding impact.
 The service accepts at most 20 options and applies bounded text limits while rendering.
-Firstmate and workers author this document when filing a new decision, and `bin/fm-decision-hold.sh hold --options-file` publishes it in the deciding home under the decision-hold lifecycle.
+Firstmate and workers author this document when filing a new decision, and `bin/fm-decision-hold.sh hold --options-file` publishes it under the originating work in the deciding home through the decision-hold lifecycle.
 Legacy decisions without the document remain visible but route the captain to answer in chat.
 In v1, a secondmate-owned work item deliberately shows only a limited ownership note because the main service does not ingest rich task records across home boundaries.
 

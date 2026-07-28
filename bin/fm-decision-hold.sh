@@ -140,9 +140,9 @@ validate_options_file() {  # <path> <title>
   ' "$file" || fail "options file must include context and at least one option with its impact"
 }
 
-publish_options_file() {  # <key> <source>
-  local key=$1 source=$2 directory target tmp
-  directory="$DATA/decisions"
+publish_options_file() {  # <origin> <key> <source>
+  local origin=$1 key=$2 source=$3 directory target tmp
+  directory="$DATA/$origin/decisions"
   target="$directory/$key.md"
   if [ -e "$target" ]; then
     cmp -s "$source" "$target" || fail "decision options already exist with different content: $target"
@@ -307,10 +307,10 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
-    [ -z "$options_file" ] || publish_options_file "$key" "$options_file"
+    [ -z "$options_file" ] || publish_options_file "$origin" "$key" "$options_file"
   else
     [ -n "$options_file" ] || fail "new captain hold $id requires --options-file"
-    publish_options_file "$key" "$options_file"
+    publish_options_file "$origin" "$key" "$options_file"
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}

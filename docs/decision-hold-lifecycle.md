@@ -10,7 +10,7 @@ The command runs tasks-axi in the active `FM_HOME`, so the existing backlog rema
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
-For a new hold, it requires `--options-file`, validates the dashboard format owned by `docs/dashboard-service.md`, and atomically publishes it as `data/decisions/<key>.md` in the active home before creating the backlog item.
+For a new hold, it requires `--options-file`, validates the dashboard format owned by `docs/dashboard-service.md`, and atomically publishes it as `data/<origin>/decisions/<key>.md` in the active home before creating the backlog item.
 An already existing legacy hold can still be retried without an options document and remains on the dashboard's answer-in-chat fallback.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.

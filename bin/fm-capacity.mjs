@@ -387,13 +387,15 @@ function itemRef(owner, id) {
   return opaqueRef("item", `${owner}/${id}`);
 }
 
-function decisionRef(owner, id) {
-  return opaqueRef("item", `decision/${owner}/${id}`);
+function decisionRef(owner, origin, key) {
+  return opaqueRef("item", `decision/${owner}/${origin}/${key}`);
 }
 
-function backlogDecisionKey(record) {
-  const match = String(record.body_excerpt || "").match(/(?:^|\n)Decision key:\s*([A-Za-z0-9._-]+)/);
-  return match ? match[1] : record.id;
+function backlogDecisionIdentity(record) {
+  const body = String(record.body_excerpt || "");
+  const origin = body.match(/(?:^|\n)Origin:\s*([A-Za-z0-9._-]+)/)?.[1] || record.id;
+  const key = body.match(/(?:^|\n)Decision key:\s*([A-Za-z0-9._-]+)/)?.[1] || record.id;
+  return { origin, key };
 }
 
 function ownerRef(owner) {
@@ -609,7 +611,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: "main",
         task: itemRef("main", task.id),
-        key: decisionRef("main", decision.key || task.id),
+        key: decisionRef("main", task.id, decision.key || task.id),
         reason: "Open decision raised by work already under way.",
       });
     }
@@ -647,10 +649,11 @@ function classify(snapshot, environment) {
     }
     if (isSuperseded(record)) continue;
     if (record.kind === "captain" && record.hold_kind === "captain") {
+      const decision = backlogDecisionIdentity(record);
       decisions.push({
         owner: "main",
         task: itemRef("main", record.id),
-        key: decisionRef("main", backlogDecisionKey(record)),
+        key: decisionRef("main", decision.origin, decision.key),
         reason: "A queued choice is held for your decision.",
       });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
@@ -715,7 +718,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: ownerRef(mate.id),
         task: itemRef(mate.id, decision.id || mate.id),
-        key: decisionRef(mate.id, decision.key || decision.id || mate.id),
+        key: decisionRef(mate.id, decision.origin || decision.id || mate.id, decision.key || decision.id || mate.id),
         reason: "Open decision raised by work already under way.",
       });
     }

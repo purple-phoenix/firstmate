@@ -191,8 +191,8 @@ EOF
     || fail "idempotent retry duplicated the route hold"
   [ "$(grep -cE "^- \[ \] $access_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "second decision did not retain one distinct backlog identity"
-  assert_grep "Conservative route" "$home/data/decisions/route.md" "route options were not published with the hold"
-  assert_grep "Fast route" "$home/data/decisions/access.md" "access options were not published with the hold"
+  assert_grep "Conservative route" "$home/data/$id/decisions/route.md" "route options were not published with the hold"
+  assert_grep "Fast route" "$home/data/$id/decisions/access.md" "access options were not published with the hold"
 
   run_decisions "$home" complete "$id" route access >/dev/null \
     || fail "shared investigation completion gate failed"
@@ -485,8 +485,37 @@ EOF
   ' >/dev/null || fail "secondmate captain hold did not surface with authoritative owner: $json"
   assert_no_grep "$hold" "$parent/data/backlog.md" "secondmate hold leaked into the main backlog"
   assert_grep "$hold" "$mate/data/backlog.md" "secondmate hold left its authoritative backlog"
-  assert_grep "Conservative route" "$mate/data/decisions/release.md" "secondmate options were not published in the owning home"
+  assert_grep "Conservative route" "$mate/data/$origin/decisions/release.md" "secondmate options were not published in the owning home"
   pass "main-home and secondmate-home captain holds remain correctly routed"
+}
+
+test_same_home_same_key_decisions_are_origin_qualified() {
+  local home first second first_hold second_hold
+  home=$(make_home same-home-same-key)
+  first=sample-alpha-review
+  second=sample-beta-review
+  mkdir -p "$home/data/$first" "$home/data/$second"
+  tasks_in "$home" add "$first" "Review sample alpha" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create first same-key origin"
+  tasks_in "$home" add "$second" "Review sample beta" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create second same-key origin"
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+  first_hold=$(run_decisions "$home" hold "$first" route \
+    --title "Choose the alpha route" --reason "captain alpha route pending" \
+    --options-file "$(write_options "$home" route "Choose the alpha route")" --repo sample) \
+    || fail "first same-key decision was not filed"
+  second_hold=$(run_decisions "$home" hold "$second" route \
+    --title "Choose the beta route" --reason "captain beta route pending" \
+    --options-file "$(write_options "$home" route "Choose the beta route")" --repo sample) \
+    || fail "second same-key decision collided with the first"
+  [ "$first_hold" = "$first-decision-route" ] || fail "first same-key hold lost its origin identity"
+  [ "$second_hold" = "$second-decision-route" ] || fail "second same-key hold lost its origin identity"
+  assert_grep "Choose the alpha route" "$home/data/$first/decisions/route.md" "first origin options were not retained"
+  assert_grep "Choose the beta route" "$home/data/$second/decisions/route.md" "second origin options were not retained"
+  cmp -s "$home/data/$first/decisions/route.md" "$home/data/$second/decisions/route.md" \
+    && fail "distinct same-key options collapsed to one document"
+  pass "same-home same-key decisions retain distinct origin-qualified documents"
 }
 
 test_overlong_captain_hold_is_non_dispatchable() {
@@ -628,5 +657,6 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_same_home_same_key_decisions_are_origin_qualified
 test_overlong_captain_hold_is_non_dispatchable
 test_resolve_matches_quoted_blocked_by_edges

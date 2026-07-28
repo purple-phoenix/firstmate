@@ -41,7 +41,8 @@ make_fixture() {
       {"order":0,"state":"in_flight","structured":true,"id":"active-task","title":"Run the active rollout","repo":"alpha","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: rollout remains observable."},
       {"order":1,"state":"queued","structured":true,"id":"ready-safe","title":"Ship the gamma feature","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
       {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout","body_excerpt":"Origin: active-task\nDecision key: rollout-policy\nState: awaiting captain decision."},
-      {"order":3,"state":"queued","structured":true,"id":"blocked-child","title":"Ship after rollout choice","repo":"alpha","project_resolved":true,"kind":"ship","blocked_by":"captain-choice","body_excerpt":"Acceptance criteria: follows the selected rollout."}
+      {"order":3,"state":"queued","structured":true,"id":"captain-choice-two","title":"Choose the secondary rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick a secondary rollout","body_excerpt":"Origin: secondary-task\nDecision key: rollout-policy\nState: awaiting captain decision."},
+      {"order":4,"state":"queued","structured":true,"id":"blocked-child","title":"Ship after rollout choice","repo":"alpha","project_resolved":true,"kind":"ship","blocked_by":"captain-choice","body_excerpt":"Acceptance criteria: follows the selected rollout."}
     ]
   },
   "tasks": [
@@ -74,12 +75,14 @@ EOF
   Pick the alpha rollout pace before dependent work starts.
   - Conservative rollout: slower, safest for existing users
   - Fast rollout: reaches everyone this week, higher regression risk
+- [ ] captain-choice-two - Choose the secondary rollout policy (repo: alpha) (kind: captain)
+  Pick the secondary rollout pace independently.
 - [ ] blocked-child - Ship after rollout choice (repo: alpha) (kind: ship) (blocked-by: captain-choice)
   Acceptance criteria: follows the selected rollout.
 
 ## Done
 EOF
-  mkdir -p "$home/data/ready-safe" "$home/data/ideas/pitches" "$home/data/decisions"
+  mkdir -p "$home/data/ready-safe" "$home/data/ideas/pitches" "$home/data/active-task/decisions" "$home/data/secondary-task/decisions"
   cat > "$home/data/ready-safe/brief.md" <<'EOF'
 # Task
 Ship the gamma feature so gamma users get streaming exports.
@@ -102,7 +105,7 @@ New crew homes should self-provision in one command.
 Send the captain a nightly fleet digest.
 EOF
   printf '# Faster onboarding pitch\n\nOne command provisions a ready home.\n' > "$home/data/ideas/pitches/IDEA-01.md"
-  cat > "$home/data/decisions/rollout-policy.md" <<'EOF'
+  cat > "$home/data/active-task/decisions/rollout-policy.md" <<'EOF'
 # Choose the rollout policy
 
 Pick the alpha rollout pace before dependent work starts.
@@ -112,7 +115,7 @@ Pick the alpha rollout pace before dependent work starts.
 - [recommended] Conservative rollout - Slower delivery with the lowest regression risk.
 - Fast rollout - Reaches everyone this week with higher regression risk.
 EOF
-  cat > "$home/data/decisions/runtime-policy.md" <<'EOF'
+  cat > "$home/data/active-task/decisions/runtime-policy.md" <<'EOF'
 # Choose the runtime policy
 
 Choose how the active rollout should continue.
@@ -121,6 +124,16 @@ Choose how the active rollout should continue.
 
 - [recommended] Conservative rollout - Slower delivery with the lowest regression risk.
 - Fast rollout - Reaches everyone this week with higher regression risk.
+EOF
+  cat > "$home/data/secondary-task/decisions/rollout-policy.md" <<'EOF'
+# Choose the secondary rollout policy
+
+Choose the independent secondary rollout pace.
+
+## Options
+
+- [recommended] Staged secondary rollout - Keeps secondary users isolated during validation.
+- Immediate secondary rollout - Moves faster with broader secondary exposure.
 EOF
 }
 
@@ -273,7 +286,7 @@ EOF
 }
 
 ref_for() {
-  # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/main/runtime-policy"
+  # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/main/active-task/runtime-policy"
   node -e '
     const refs = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).refs;
     const wanted = process.argv[2];
@@ -285,12 +298,16 @@ ref_for() {
 }
 
 test_refs_sidecar_and_rich_work_item_detail() {
-  local ref decision_ref
+  local ref decision_ref same_key_ref
   assert_present "$HOME_DIR/state/dash-refs.json" "producer did not write the refs sidecar"
   assert_grep 'fm-capacity-refs.v1' "$HOME_DIR/state/dash-refs.json" "refs sidecar lacks its schema"
-  decision_ref=$(ref_for "decision/main/rollout-policy") || fail "captain hold ref did not preserve its filed decision key"
+  decision_ref=$(ref_for "decision/main/active-task/rollout-policy") || fail "captain hold ref did not preserve its filed decision identity"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$decision_ref" "$CAPTAIN"
   assert_contains "$RESP" 'Conservative rollout' "filed captain hold did not resolve its options document"
+  same_key_ref=$(ref_for "decision/main/secondary-task/rollout-policy") || fail "second same-home decision did not retain its origin-qualified ref"
+  [ "$same_key_ref" != "$decision_ref" ] || fail "same-key decisions from distinct origins shared one opaque ref"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$same_key_ref" "$CAPTAIN"
+  assert_contains "$RESP" 'Staged secondary rollout' "second same-key decision did not resolve its own options document"
   ref=$(ref_for "main/ready-safe") || fail "refs sidecar does not map the main work item"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "work item detail failed (got $REQ_STATUS: $RESP)"
@@ -305,7 +322,7 @@ test_refs_sidecar_and_rich_work_item_detail() {
 
 test_decision_detail_options_and_validated_approval() {
   local ref record
-  ref=$(ref_for "decision/main/runtime-policy") || fail "refs sidecar does not map a non-backlog decision key"
+  ref=$(ref_for "decision/main/active-task/runtime-policy") || fail "refs sidecar does not map an origin-qualified non-backlog decision key"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "decision detail failed (got $REQ_STATUS: $RESP)"
   assert_contains "$RESP" 'Conservative rollout' "decision detail lacks its first option"
@@ -332,38 +349,43 @@ test_decision_detail_options_and_validated_approval() {
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" | head -1)")
   assert_contains "$record" 'Use a 10% canary for 48 hours' "decision record lacks the custom answer"
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" -delete
-  mv "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/data/decisions/runtime-policy.md.off"
+  mv "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$HOME_DIR/data/active-task/decisions/runtime-policy.md.off"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
   assert_contains "$RESP" 'legacy decision' "legacy decision does not route to captain chat"
   assert_contains "$RESP" '"options":[]' "legacy backlog bullets were treated as structured decision options"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"answer\":\"unsafe fallback\"}"
   [ "$REQ_STATUS" = 400 ] || fail "legacy decision accepted free text without an options document"
-  mv "$HOME_DIR/data/decisions/runtime-policy.md.off" "$HOME_DIR/data/decisions/runtime-policy.md"
+  mv "$HOME_DIR/data/active-task/decisions/runtime-policy.md.off" "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
   pass "decision documents validate option picks and bounded custom answers"
 }
 
-test_decision_answers_are_qualified_by_owning_home() {
-  local main_ref mate_ref files records file
-  mkdir -p "$HOME_DIR/design/data/decisions"
+test_decision_answers_are_qualified_by_home_and_origin() {
+  local main_ref same_home_ref mate_ref files records file
+  mkdir -p "$HOME_DIR/data/origin-alpha/decisions" "$HOME_DIR/data/origin-beta/decisions" "$HOME_DIR/design/data/design-origin/decisions"
   printf 'home=%s\n' "$HOME_DIR/design" > "$HOME_DIR/state/design.meta"
-  cp "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/data/decisions/shared-policy.md"
-  cp "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/design/data/decisions/shared-policy.md"
+  cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$HOME_DIR/data/origin-alpha/decisions/shared-policy.md"
+  cp "$HOME_DIR/data/active-task/decisions/rollout-policy.md" "$HOME_DIR/data/origin-beta/decisions/shared-policy.md"
+  cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$HOME_DIR/design/data/design-origin/decisions/shared-policy.md"
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
     const refs = JSON.parse(fs.readFileSync(file, "utf8"));
-    refs.refs["item-90"] = { kind: "item", value: "decision/main/shared-policy" };
-    refs.refs["item-91"] = { kind: "item", value: "decision/design/shared-policy" };
+    refs.refs["item-90"] = { kind: "item", value: "decision/main/origin-alpha/shared-policy" };
+    refs.refs["item-91"] = { kind: "item", value: "decision/main/origin-beta/shared-policy" };
+    refs.refs["item-92"] = { kind: "item", value: "decision/design/design-origin/shared-policy" };
     fs.writeFileSync(file, `${JSON.stringify(refs, null, 2)}\n`);
   ' "$HOME_DIR/state/dash-refs.json"
   main_ref=item-90
-  mate_ref=item-91
+  same_home_ref=item-91
+  mate_ref=item-92
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$main_ref\",\"option\":0}"
   [ "$REQ_STATUS" = 200 ] || fail "main-home decision answer failed (got $REQ_STATUS: $RESP)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$same_home_ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "same-key same-home decision was wrongly coalesced (got $REQ_STATUS: $RESP)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$mate_ref\",\"option\":0}"
   [ "$REQ_STATUS" = 200 ] || fail "same-key secondmate decision was wrongly coalesced (got $REQ_STATUS: $RESP)"
-  files=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*item-9[01].json')
-  [ "$(printf '%s\n' "$files" | grep -c .)" = 2 ] || fail "owner-qualified decision answers did not produce two records"
+  files=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*item-9[012].json')
+  [ "$(printf '%s\n' "$files" | grep -c .)" = 3 ] || fail "origin-qualified decision answers did not produce three records"
   records=''
   while IFS= read -r file; do
     records="$records$(cat "$file")"
@@ -371,14 +393,15 @@ test_decision_answers_are_qualified_by_owning_home() {
   done <<EOF
 $files
 EOF
-  assert_contains "$records" '"decision_identity": "main/shared-policy"' "main decision record lacks durable owner identity"
-  assert_contains "$records" '"decision_identity": "design/shared-policy"' "secondmate decision record lacks durable owner identity"
-  pass "equal decision keys remain distinct across owning homes"
+  assert_contains "$records" '"decision_identity": "main/origin-alpha/shared-policy"' "first main decision record lacks durable origin identity"
+  assert_contains "$records" '"decision_identity": "main/origin-beta/shared-policy"' "same-home decision record lacks distinct origin identity"
+  assert_contains "$records" '"decision_identity": "design/design-origin/shared-policy"' "secondmate decision record lacks durable owner identity"
+  pass "equal decision keys remain distinct across origins and homes"
 }
 
 test_stale_refs_are_disabled() {
   local ref
-  ref=$(ref_for "decision/main/runtime-policy") || fail "refs sidecar does not map the decision"
+  ref=$(ref_for "decision/main/active-task/runtime-policy") || fail "refs sidecar does not map the decision"
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
@@ -591,7 +614,7 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'config/dash.json' "$ROOT/.gitignore" "config/dash.json is not gitignored"
   assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
   assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
-  assert_grep 'data/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the decision-options format"
+  assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
   assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
   assert_grep 'secondmate-owned work item deliberately shows only a limited ownership note' "$ROOT/docs/dashboard-service.md" "service doc omits the accepted secondmate detail boundary"
   pass "the service is documented and wired into the operating contract"
@@ -604,7 +627,7 @@ test_subscription_usage_panel
 test_inline_config_is_script_safe
 test_refs_sidecar_and_rich_work_item_detail
 test_decision_detail_options_and_validated_approval
-test_decision_answers_are_qualified_by_owning_home
+test_decision_answers_are_qualified_by_home_and_origin
 test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts
 test_dispatch_writes_one_durable_record

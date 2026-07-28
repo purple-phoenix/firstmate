@@ -96,7 +96,7 @@ On a `check:` wake naming `fm-dash.check.sh`, run `bin/fm-dash-inbox.sh claim` a
 Claim delivery is at-least-once across interruption, so check whether a re-surfaced record was already handled before applying it again.
 
 - A `CAP-NN` record is the captain's ordinary chat approval of that action ID under section 4, including its full re-resolution and authority limits.
-- A `decision` record is the captain's answer for the owner-qualified decision identity with either the recorded option text or bounded custom answer; route it in `decision_home` through `decision-hold-lifecycle` exactly as a chat answer, and re-confirm in chat before acting when the answer has a destructive or irreversible consequence.
+- A `decision` record is the captain's answer for the owner-qualified decision identity with either the recorded option text or bounded custom answer; route `decision_origin` in `decision_home` through `decision-hold-lifecycle` exactly as a chat answer, and re-confirm in chat before acting when the answer has a destructive or irreversible consequence.
 - An `idea` record is the captain's verdict on the named `data/ideas/` idea: on approve, create the follow-up work item(s) through the normal backlog lifecycle; on deny, record the outcome against the idea; on suggest, treat the suggestion text as captain input on that idea.
 
 A claimed record never authorizes a PR merge, `local-only` landing, destructive action, irreversible action, security-sensitive action, or discard of unlanded work; when a claimed action leads to such a choice, escalate it to captain chat exactly as section 4 requires.
