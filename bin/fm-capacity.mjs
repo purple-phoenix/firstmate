@@ -18,13 +18,19 @@
  *   pipeline, lanes, readiness, aging, recommendations, and omissions.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
+ * Blocked and self-clearing cards carry a wait treatment (wait.class, copy,
+ * and honest progress); bin/fm-wait-progress.mjs owns the estimator math and
+ * the private rolling observed-duration record it feeds from.
  * Run --help for the exact inherited snapshot bounds, environment-probe budget,
- * bottleneck order, CAP-01 through CAP-10 meanings, and output replacement rules.
+ * bottleneck order, CAP-01 through CAP-10 meanings, wait-progress honesty
+ * rules, and output replacement rules.
  *
  * The producer is read-mostly. It writes only the selected dashboard path,
- * plus the opt-in --refs identity sidecar it owns for the authenticated
- * dashboard service, and never dispatches, merges, tears down, changes
- * backlog/task state, or opens a service. Inline dashboard JavaScript copies prompts only and cannot run actions.
+ * the data/capacity-wait-history.json observed-duration record it owns for
+ * honest wait-progress estimates, plus the opt-in --refs identity sidecar it
+ * owns for the authenticated dashboard service, and never dispatches, merges,
+ * tears down, changes backlog/task state, or opens a service. Inline dashboard
+ * JavaScript copies prompts only and cannot run actions.
  * Live environment probes share one 30-second fleet-wide deadline and preserve
  * unavailable evidence for homes that cannot be inspected within that bound.
  */
@@ -35,6 +41,7 @@ import process from "node:process";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { loadWaitHistory, observeWaits, estimateWait, deadlineWait, progressLabel } from "./fm-wait-progress.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -98,6 +105,23 @@ BOUNDS AND PROBES
   Backend, bootstrap credential, and dispatch probes share one 30-second fleet-wide
   deadline. Per-home steps are capped at 5, 15, and 3 seconds respectively, reduced
   by remaining aggregate time; unvisited or incomplete homes become unavailable.
+
+WAIT TREATMENT AND PROGRESS
+  Every blocked card carries wait.class: "self_clearing" for a wait expected to
+  clear with no actor (its own test suite or validation, CI checks, a declared
+  external delay, or a future time gate), or "needs_actor", where the blocker
+  chain and what-you-can-do line stay authoritative. Working validation and CI
+  cards carry the same self-clearing treatment. Self-clearing waits carry
+  plain-language copy and, where measurable, wait.progress with basis "history"
+  (elapsed vs the recorded typical duration), "deadline" (exact time-gate
+  math), or "none". Progress never fabricates precision: with no recorded
+  history it shows elapsed time and "time unknown", an exceeded estimate shows
+  "running longer than usual" instead of a frozen percentage, and history-based
+  figures are labeled as estimates from past runs. bin/fm-wait-progress.mjs
+  owns the estimator and the fm-capacity-wait-history.v1 schema of
+  data/capacity-wait-history.json, the private (mode 0600, gitignored)
+  rolling observed-duration record this producer reads and replaces on every
+  run alongside the dashboard.
 
 BOTTLENECK ORDER AND STABLE ACTIONS
   Lower numeric priority wins; ties sort by stable ID:
@@ -543,9 +567,48 @@ function cardFromBacklog(record, owner, stage, reason = null) {
   };
 }
 
-function classify(snapshot, environment) {
+// Wait treatment: root kinds that clear with no actor at all, the captain
+// copy per measurable wait kind, and the observation plumbing that feeds
+// bin/fm-wait-progress.mjs. Only validation, CI, and declared external delays
+// are history-measurable; time gates get exact deadline math instead.
+const SELF_CLEARING_ROOTS = new Set(["gate", "paused", "finish"]);
+const WAIT_COPY = {
+  validation: "Waiting on its test suite and validation - resumes by itself",
+  ci: "Waiting on CI checks - resumes by itself",
+  paused: "Waiting on a declared external delay - resumes by itself",
+};
+
+function waitKindFromDetail(detail) {
+  return /\bci\b/i.test(detail || "") ? "ci" : "validation";
+}
+
+function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wait-history.v1", active: {}, durations: {} }) {
   if (snapshot.schema !== "fm-fleet-snapshot.v1") throw new Error(`unsupported snapshot schema: ${snapshot.schema || "missing"}`);
   const now = Date.parse(snapshot.generated) || Date.now();
+  const observedWaits = new Map();
+  const measurableWaits = [];
+  // Self-clearing card with a history-measurable wait: record the observation
+  // (real identities stay in the private history file only) and fill progress
+  // once every observation this run is known.
+  const attachMeasurable = (card, owner, id, kind) => {
+    const key = `${owner}/${id}:${kind}`;
+    observedWaits.set(key, kind);
+    card.wait = { class: "self_clearing", kind, copy: WAIT_COPY[kind], progress: null };
+    measurableWaits.push({ card, key, kind });
+  };
+  // Self-clearing card whose end is a known future date: exact math, no history.
+  const attachTimeGate = (card, gateDate, sinceDate = null) => {
+    const gateEpoch = Date.parse(`${gateDate}T00:00:00Z`);
+    const sinceEpoch = sinceDate ? Date.parse(`${sinceDate}T00:00:00Z`) : NaN;
+    const elapsed = Number.isFinite(sinceEpoch) && sinceEpoch < now ? Math.floor((now - sinceEpoch) / 1000) : null;
+    const progress = deadlineWait(Math.floor((gateEpoch - now) / 1000), elapsed);
+    card.wait = {
+      class: "self_clearing",
+      kind: "time_gate",
+      copy: `Scheduled wait - resumes automatically after ${gateDate}`,
+      progress: { ...progress, label: progressLabel(progress) },
+    };
+  };
   const pipeline = Object.fromEntries(STAGES.map((stage) => [stage, []]));
   const mainRecords = snapshot.backlog?.records || [];
   const taskById = new Map((snapshot.tasks || []).map((task) => [task.id, task]));
@@ -624,6 +687,7 @@ function classify(snapshot, environment) {
         key: `paused:${task.id}`,
         wait: "waiting on a declared external delay expected to clear on its own",
         action: "Nothing - this unblocks itself when the external wait clears.",
+        self_clearing: true,
       }];
     }
     if (state === "unknown") {
@@ -686,12 +750,13 @@ function classify(snapshot, environment) {
     const approvalReady = taskApprovalReady(task);
     let taskWaits = null;
     let taskCanDo = null;
+    let taskContexts = null;
     if (stage === "blocked") {
-      const contexts = taskRootContexts(task, "main");
-      taskWaits = contexts.map((context) => context.wait);
-      taskCanDo = [...new Set(contexts.map((context) => context.action))].join(" ");
+      taskContexts = taskRootContexts(task, "main");
+      taskWaits = taskContexts.map((context) => context.wait);
+      taskCanDo = [...new Set(taskContexts.map((context) => context.action))].join(" ");
     }
-    pipeline[stage].push({
+    const taskCard = {
       id: itemRef("main", task.id),
       title: `${STAGE_LABELS[stage]} work item`,
       owner: "ephemeral worker",
@@ -709,7 +774,17 @@ function classify(snapshot, environment) {
       captain_approval_required: approvalReady && task.yolo !== "on",
       waits_on: taskWaits,
       what_you_can_do: taskCanDo,
-    });
+    };
+    pipeline[stage].push(taskCard);
+    if (taskContexts) {
+      if (taskContexts.every((context) => context.kind === "paused")) {
+        attachMeasurable(taskCard, "main", task.id, "paused");
+      } else {
+        taskCard.wait = { class: taskContexts.every((context) => context.self_clearing === true) ? "self_clearing" : "needs_actor" };
+      }
+    } else if (stage === "validating_fixing" && (task.current_state?.state || "") === "working") {
+      attachMeasurable(taskCard, "main", task.id, waitKindFromDetail(task.current_state?.detail));
+    }
   }
 
   const blockedByIds = (record) => (Array.isArray(record.blocked_by_all)
@@ -721,11 +796,13 @@ function classify(snapshot, environment) {
     const roots = new Map();
     const expandedEdges = new Set();
     const stack = [];
-    const addRoot = (key, segments, suffix, action) => {
+    const addRoot = (key, segments, suffix, action, kind, until = null) => {
       if (roots.has(key)) return;
       roots.set(key, {
         wait: [...segments, ...(suffix ? [suffix] : [])].join("; then "),
         action,
+        kind,
+        until,
       });
     };
     const blockerIds = blockedByIds(startRecord);
@@ -735,6 +812,8 @@ function classify(snapshot, environment) {
       return {
         waits: contexts.map((context) => context.wait),
         action: [...new Set(contexts.map((context) => context.action))].join(" "),
+        root_kinds: contexts.map((context) => context.kind),
+        gate_until: null,
       };
     }
     for (const blockerId of [...blockerIds].reverse()) {
@@ -747,14 +826,14 @@ function classify(snapshot, environment) {
       const blockerTask = blockerTaskById.get(blockerId) || null;
       const currentState = blockerTask ? safeState(blockerTask.current_state?.state || blockerTask.state) : null;
       if (!blockerRecord && !blockerTask) {
-        addRoot(`missing:${blockerId}`, [...segments, `blocked by ${blockerRef}, whose current state is unavailable`], null, "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed.");
+        addRoot(`missing:${blockerId}`, [...segments, `blocked by ${blockerRef}, whose current state is unavailable`], null, "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed.", "missing");
         continue;
       }
       const terminalState = ["done", "failed"].includes(currentState)
         ? currentState
         : (["done", "failed"].includes(blockerRecord?.state) ? blockerRecord.state : null);
       if (terminalState) {
-        addRoot(`stale:${blockerId}`, [...segments, `blocked by ${blockerRef}, but it is already ${terminalState}; the dependency edge is stale`], null, "Nothing yet - firstmate reconciles this stale dependency");
+        addRoot(`stale:${blockerId}`, [...segments, `blocked by ${blockerRef}, but it is already ${terminalState}; the dependency edge is stale`], null, "Nothing yet - firstmate reconciles this stale dependency", "stale");
         continue;
       }
       const prefix = currentState
@@ -764,18 +843,18 @@ function classify(snapshot, environment) {
       const taskContexts = blockerTask ? taskRootContexts(blockerTask, owner, true) : [];
       const applicableContexts = taskContexts.filter((context) => ["chat", "decision", "paused", "unknown"].includes(context.kind));
       if (applicableContexts.length > 0) {
-        for (const context of applicableContexts) addRoot(context.key, nextSegments, context.wait, context.action);
+        for (const context of applicableContexts) addRoot(context.key, nextSegments, context.wait, context.action, context.kind);
         continue;
       }
       if (blockerRecord?.kind === "captain" && blockerRecord.hold_kind === "captain") {
         const identity = backlogDecisionIdentity(blockerRecord);
         const ref = decisionRef(owner, identity.origin, identity.key);
-        addRoot(`decision:${ref}`, nextSegments, `waiting on your decision ${ref}`, `Answer decision ${ref} - it is the root cause.`);
+        addRoot(`decision:${ref}`, nextSegments, `waiting on your decision ${ref}`, `Answer decision ${ref} - it is the root cause.`, "decision");
         continue;
       }
       const gate = blockerRecord && futureTimeGate(blockerRecord, now);
       if (gate) {
-        addRoot(`gate:${blockerId}`, nextSegments, `waiting until ${gate}`, `Nothing - this unblocks itself when the ${gate} time gate passes.`);
+        addRoot(`gate:${blockerId}`, nextSegments, `waiting until ${gate}`, `Nothing - this unblocks itself when the ${gate} time gate passes.`, "gate", gate);
         continue;
       }
       const nestedIds = blockerRecord ? blockedByIds(blockerRecord) : [];
@@ -783,7 +862,7 @@ function classify(snapshot, environment) {
         const nextAncestors = new Set(ancestors).add(blockerId);
         for (const nestedId of [...nestedIds].reverse()) {
           if (nextAncestors.has(nestedId)) {
-            addRoot(`cycle:${[...nextAncestors, nestedId].sort().join(":")}`, nextSegments, `circular dependency through ${itemRef(owner, nestedId)}`, "Nothing yet - firstmate reconciles this circular dependency.");
+            addRoot(`cycle:${[...nextAncestors, nestedId].sort().join(":")}`, nextSegments, `circular dependency through ${itemRef(owner, nestedId)}`, "Nothing yet - firstmate reconciles this circular dependency.", "cycle");
           } else {
             const edgeKey = `${blockerId}\0${nestedId}`;
             if (!expandedEdges.has(edgeKey)) {
@@ -795,32 +874,58 @@ function classify(snapshot, environment) {
         continue;
       }
       if (blockerRecord?.hold_reason) {
-        addRoot(`hold:${blockerId}`, nextSegments, "held by a structured hold", "Nothing yet - firstmate watches this hold and escalates if your input is needed.");
+        addRoot(`hold:${blockerId}`, nextSegments, "held by a structured hold", "Nothing yet - firstmate watches this hold and escalates if your input is needed.", "hold");
         continue;
       }
       const workerContext = taskContexts.find((context) => context.kind === "worker");
       if (workerContext && currentState === "blocked") {
-        addRoot(workerContext.key, nextSegments, workerContext.wait, workerContext.action);
+        addRoot(workerContext.key, nextSegments, workerContext.wait, workerContext.action, "worker");
         continue;
       }
-      addRoot(`finish:${blockerId}`, nextSegments, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`);
+      addRoot(`finish:${blockerId}`, nextSegments, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`, "finish");
     }
     if (blockerIds.length === 0) {
       const gate = futureTimeGate(startRecord, now);
-      if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
-      return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
+      if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.`, root_kinds: ["gate"], gate_until: gate };
+      return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed.", root_kinds: ["hold"], gate_until: null };
     }
     const resolvedRoots = [...roots.values()];
     if (resolvedRoots.length === 0) {
       return {
         waits: ["circular dependency could not be resolved from the blocker graph"],
         action: "Nothing yet - firstmate reconciles this circular dependency.",
+        root_kinds: ["cycle"],
+        gate_until: null,
       };
     }
     return {
       waits: resolvedRoots.map((root) => root.wait),
       action: [...new Set(resolvedRoots.map((root) => root.action))].join(" "),
+      root_kinds: resolvedRoots.map((root) => root.kind),
+      gate_until: resolvedRoots.every((root) => root.kind === "gate")
+        ? resolvedRoots.map((root) => root.until).sort().at(-1)
+        : null,
     };
+  };
+
+  // Wait treatment for a chain-derived blocked card. An all-gate chain gets
+  // exact deadline math; a declared external delay on the record's own state is
+  // history-measurable; other all-self-clearing chains are classed calm without
+  // invented numbers; everything else keeps the needs-actor treatment.
+  const attachChainWait = (card, chain, owner, record) => {
+    if (chain.gate_until) {
+      attachTimeGate(card, chain.gate_until, record.since || null);
+      return;
+    }
+    const kinds = chain.root_kinds || [];
+    const selfClearing = kinds.length > 0 && kinds.every((kind) => SELF_CLEARING_ROOTS.has(kind));
+    if (selfClearing && kinds.every((kind) => kind === "paused") && blockedByIds(record).length === 0) {
+      attachMeasurable(card, owner, record.id, "paused");
+      return;
+    }
+    card.wait = selfClearing
+      ? { class: "self_clearing", kind: "dependency", copy: "Waiting on work already under way - resumes by itself", progress: null }
+      : { class: "needs_actor" };
   };
 
   const queue = mainRecords.filter((record) => record.state === "queued");
@@ -845,6 +950,7 @@ function classify(snapshot, environment) {
       pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", "Captain hold"), {
         waits_on: [`waiting on your decision ${holdRef}`],
         what_you_can_do: `Answer decision ${holdRef} - it is the root cause.`,
+        wait: { class: "needs_actor" },
       }));
       continue;
     }
@@ -854,20 +960,24 @@ function classify(snapshot, environment) {
         : "Structured hold";
       const chain = describeBlockedRecord(record, "main", mainRecords, snapshot.tasks || []);
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
-      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
+      const chainCard = Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
         waits_on: chain.waits,
         what_you_can_do: chain.action,
-      }));
+      });
+      pipeline.blocked.push(chainCard);
+      attachChainWait(chainCard, chain, "main", record);
       continue;
     }
     const timeGate = futureTimeGate(record, now);
     if (timeGate) {
       const reason = `time gate until ${timeGate}`;
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
-      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
+      const gateCard = Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
         waits_on: [`waiting until ${timeGate}`],
         what_you_can_do: `Nothing - this unblocks itself when the ${timeGate} time gate passes.`,
-      }));
+      });
+      pipeline.blocked.push(gateCard);
+      attachTimeGate(gateCard, timeGate, record.since || null);
       continue;
     }
     const gaps = definitionGaps(record);
@@ -942,10 +1052,12 @@ function classify(snapshot, environment) {
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
       const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
-      pipeline.blocked.push(Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
+      const holdCard = Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
         waits_on: chain.waits,
         what_you_can_do: chain.action,
-      }));
+      });
+      pipeline.blocked.push(holdCard);
+      attachChainWait(holdCard, chain, mate.id, hold);
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
       }
@@ -963,7 +1075,7 @@ function classify(snapshot, environment) {
         markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "active child work lacks project provenance");
       }
       const ageDays = dateAgeDays(child.since, now);
-      pipeline[stage].push({
+      const childCard = {
         id: itemRef(mate.id, child.id),
         title: `${STAGE_LABELS[stage]} work item`,
         owner: ownerRef(mate.id),
@@ -975,7 +1087,11 @@ function classify(snapshot, environment) {
         artifact: null,
         provenance: "validated structured-home summary",
         age_days: ageDays,
-      });
+      };
+      pipeline[stage].push(childCard);
+      if (stage === "validating_fixing" && (child.state || "working") === "working") {
+        attachMeasurable(childCard, mate.id, child.id, waitKindFromDetail(detail));
+      }
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, child.id), owner: ownerRef(mate.id), age_days: ageDays, state: safeState(child.state), evidence: "structured backlog age; structured-home current state" });
       }
@@ -990,6 +1106,7 @@ function classify(snapshot, environment) {
         pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", "Captain hold"), {
           waits_on: [`waiting on your decision ${ref}`],
           what_you_can_do: `Answer decision ${ref} - it is the root cause.`,
+          wait: { class: "needs_actor" },
         }));
         continue;
       }
@@ -999,20 +1116,24 @@ function classify(snapshot, environment) {
           : "Structured hold";
         const chain = describeBlockedRecord(record, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
-        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+        const mateChainCard = Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
           waits_on: chain.waits,
           what_you_can_do: chain.action,
-        }));
+        });
+        pipeline.blocked.push(mateChainCard);
+        attachChainWait(mateChainCard, chain, mate.id, record);
         continue;
       }
       const timeGate = futureTimeGate(record, now);
       if (timeGate) {
         const reason = `time gate until ${timeGate}`;
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
-        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+        const mateGateCard = Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
           waits_on: [`waiting until ${timeGate}`],
           what_you_can_do: `Nothing - this unblocks itself when the ${timeGate} time gate passes.`,
-        }));
+        });
+        pipeline.blocked.push(mateGateCard);
+        attachTimeGate(mateGateCard, timeGate, record.since || null);
         continue;
       }
       const gaps = definitionGaps(record, true);
@@ -1301,6 +1422,15 @@ function classify(snapshot, environment) {
     "Approve CAP-10: investigate the oldest active flow using current-state evidence, without interrupting healthy work by age alone."
   );
 
+  // One observation per run: completed waits roll into the per-kind duration
+  // history, live ones get an honest elapsed-vs-typical estimate (or "time
+  // unknown" when no history exists for that kind yet).
+  const waitElapsed = observeWaits(waitHistory, observedWaits, Math.floor(now / 1000));
+  for (const { card, key, kind } of measurableWaits) {
+    const estimate = estimateWait(waitElapsed.get(key) ?? 0, waitHistory.durations[kind]);
+    card.wait.progress = { ...estimate, label: progressLabel(estimate) };
+  }
+
   recommendations.sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   const primary = recommendations[0] || {
     id: null,
@@ -1469,12 +1599,37 @@ function blockedContext(card) {
   return `<small class="chain">${chain}.</small>${action}`;
 }
 
+// Honest progress affordance for a measurable wait. The visible text always
+// carries the whole message, so the bar is never color-only information; the
+// bar itself is exposed as a labeled progressbar (indeterminate when no honest
+// percentage exists). Element sizes are fixed so a refresh never jumps layout.
+function renderProgress(progress) {
+  if (!progress || !progress.label) return "";
+  const percent = progress.overrun ? 100 : progress.percent;
+  const known = Number.isFinite(percent);
+  const fill = known ? `<span class="wfill${progress.overrun ? " wfill-over" : ""}" style="width:${h(percent)}%"></span>` : "";
+  const aria = Number.isFinite(progress.percent) ? ` aria-valuenow="${h(progress.percent)}"` : "";
+  return `<span class="wprog"><span class="wbar${known ? "" : " wbar-unknown"}" role="progressbar" aria-valuemin="0" aria-valuemax="100"${aria} aria-label="${h(progress.label)}">${fill}</span><span class="wtext">${h(progress.label)}</span></span>`;
+}
+
+// Calm treatment for a self-clearing wait: plain-language copy, the honest
+// progress affordance where one exists, and the chain retained as context.
+function selfClearingContext(card) {
+  const copy = card.wait?.copy || "Waiting on an automatic process - resumes by itself";
+  const chain = card.waits_on?.length ? `<small class="chain">${card.waits_on.map((wait) => h(wait)).join("; ")}.</small>` : "";
+  return `<small class="wait-self">${h(copy)}.</small>${renderProgress(card.wait?.progress)}${chain}`;
+}
+
+function waitContext(card) {
+  return card.wait?.class === "self_clearing" ? selfClearingContext(card) : blockedContext(card);
+}
+
 function manifestRow(card) {
   const meta = [card.kind, card.age_days !== null && card.age_days !== undefined ? `${card.age_days}d` : null]
     .filter(Boolean).map((part) => h(part)).join(" · ");
   return `<li class="mrow">
     <span class="mid"><span class="item-id">${h(card.id)}</span><span class="mowner">${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span></span>
-    <span class="mreason">${h(card.reason || "No additional gate detail.")}${card.artifact ? ` ${artifact(card.artifact)}` : ""}${blockedContext(card)}</span>
+    <span class="mreason">${h(card.reason || "No additional gate detail.")}${card.artifact ? ` ${artifact(card.artifact)}` : ""}${waitContext(card)}</span>
     <span class="mmeta">${meta}</span>
   </li>`;
 }
@@ -1506,7 +1661,12 @@ function renderHtml(model, captainActions) {
 
   const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
   const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
-  const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold");
+  const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold" && card.wait?.class !== "self_clearing");
+  const selfClearingBlocked = model.pipeline.blocked.filter((card) => card.wait?.class === "self_clearing");
+  const selfWaitCards = [
+    ...model.pipeline.validating_fixing.filter((card) => card.wait?.class === "self_clearing"),
+    ...selfClearingBlocked,
+  ];
   const needsYouCount = model.measures.open_captain_actions;
   const needsYouRows = [
     ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
@@ -1524,6 +1684,7 @@ function renderHtml(model, captainActions) {
   const whys = [
     ...(captainHeldWaiting ? [{ tone: "decide", count: captainHeldWaiting, label: "held for your decision", detail: "" }] : []),
     { tone: "blocked", count: otherBlockedCards.length, label: "blocked", detail: [...blockedReasonCounts.entries()].map(([reason, count]) => `${count} ${reason}`).join(" · ") },
+    { tone: "self", count: selfClearingBlocked.length, label: "waiting on their own", detail: "resume automatically - no action needed" },
     { tone: "gates", count: gatesCount, label: "at delivery gates", detail: approvalReadyCount ? `${approvalReadyCount} ready for approval` : "validation or CI under way" },
     { tone: "ready", count: readyCount, label: "ready, not yet started", detail: "waiting on dispatch" },
     { tone: "queued", count: queuedCount, label: "not ready", detail: [model.readiness.definition_gaps.length ? `${model.readiness.definition_gaps.length} definition gap${model.readiness.definition_gaps.length === 1 ? "" : "s"}` : "", model.readiness.conservative_overlap_gates.length ? `${model.readiness.conservative_overlap_gates.length} serialized for overlap` : ""].filter(Boolean).join(" · ") },
@@ -1534,6 +1695,15 @@ function renderHtml(model, captainActions) {
   const meterBar = total === 0
     ? `<p class="empty">No current work items are in the pipeline.</p>`
     : `<div class="meterbar" role="img" aria-label="${h(`${working} working and ${waiting} waiting of ${total} current items`)}">${working ? `<span class="m-working" style="flex-grow:${working}"></span>` : ""}${waiting ? `<span class="m-waiting" style="flex-grow:${waiting}"></span>` : ""}</div>`;
+
+  const selfWaitRows = selfWaitCards.map((card) => `<li><span class="verb verb-waiting">Waiting</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${selfClearingContext(card)}</span></li>`).join("");
+  const selfWaitBand = selfWaitCards.length ? `<section class="band band-selfwait" aria-labelledby="selfwait-title"><div class="wrap">
+      <p class="kicker">Waiting on automatic processes</p>
+      <div class="rollcall selfwait-items" id="selfwait-items">
+        <h2 id="selfwait-title"><span class="n">${h(selfWaitCards.length)}</span> running or waiting on their own - no action needed</h2>
+        <ul>${selfWaitRows}</ul>
+      </div>
+    </div></section>` : "";
 
   const manifest = STAGES.map((stage) => `<section class="stage-group" aria-labelledby="stage-${stage}">
     <h3 id="stage-${stage}" class="stage-h"><span class="stage-n${stage === "blocked" && model.pipeline.blocked.length ? " stage-n-alarm" : ""}">${model.pipeline[stage].length}</span>${h(STAGE_LABELS[stage])}</h3>
@@ -1607,6 +1777,19 @@ function renderHtml(model, captainActions) {
     .why{color:var(--ink2);font-size:.92rem;min-width:0}
     .chain{display:block;color:var(--muted);font-size:.8rem;margin-top:.25rem}
     .cando{display:block;color:var(--ink);font-size:.8rem;font-weight:650;margin-top:.15rem}
+    .band-selfwait{border-bottom:1px solid var(--line)}
+    .band-selfwait .kicker{color:var(--good)}
+    .selfwait-items{margin-top:0}
+    .selfwait-items h2{color:var(--good)}
+    .selfwait-items li{border-top:1px solid var(--hair)}
+    .verb-waiting{color:var(--good)}
+    .wait-self{display:block;color:var(--ink2);font-size:.85rem;margin-top:.25rem}
+    .wprog{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-top:.35rem;min-height:1rem}
+    .wbar{flex:0 1 9rem;min-width:4rem;height:.5rem;background:var(--hair);overflow:hidden}
+    .wfill{display:block;height:100%;background:var(--good)}
+    .wfill-over{background:var(--warn)}
+    .wbar-unknown{background:repeating-linear-gradient(90deg,var(--hair) 0 .4rem,transparent .4rem .8rem)}
+    .wtext{font-size:.78rem;color:var(--ink2);min-width:0}
     .item-id{font:700 .82rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
     .next{margin-top:2rem;font-size:clamp(1.05rem,1.8vw,1.25rem)}
     .prompt{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin-top:.9rem;border:1px solid var(--line);padding:.65rem .8rem;background:color-mix(in srgb,var(--bg) 55%,transparent)}
@@ -1627,7 +1810,7 @@ function renderHtml(model, captainActions) {
     .whys ul{display:flex;flex-wrap:wrap;gap:1.1rem 2.75rem;margin-top:.8rem}
     .whys li{display:flex;align-items:baseline;gap:.65rem;min-width:0}
     .why-n{font-size:1.9rem;font-weight:800;line-height:1}
-    .why-decide{color:var(--serious)}.why-blocked{color:var(--crit)}.why-gates{color:var(--warn)}.why-ready{color:var(--blue)}.why-queued{color:var(--muted)}
+    .why-decide{color:var(--serious)}.why-blocked{color:var(--crit)}.why-self{color:var(--good)}.why-gates{color:var(--warn)}.why-ready{color:var(--blue)}.why-queued{color:var(--muted)}
     .why-l{font-size:.92rem;color:var(--ink2)}.why-l small{display:block;color:var(--muted);font-size:.76rem}
     .band-quiet{border-top:1px solid var(--line);font-size:.88rem}
     .qhead{font-size:.76rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--hair);padding-bottom:.45rem;margin-top:2.4rem}
@@ -1679,10 +1862,11 @@ function renderHtml(model, captainActions) {
       </div>
       <div class="rollcall blocked-items" id="blocked-items">
         <h2><span class="n">${h(otherBlockedCards.length)}</span> blocked</h2>
-        <ul>${blockedRows || `<li class="empty">No work is blocked on dependencies, time gates, or external waits.</li>`}</ul>
+        <ul>${blockedRows || `<li class="empty">Nothing is stuck waiting on a person or a decision.</li>`}</ul>
       </div>
       ${alarmTail}
     </div></section>
+    ${selfWaitBand}
     <section class="band band-meter" aria-labelledby="meter-title"><div class="wrap">
       <p class="kicker">Working vs waiting</p>
       <h2 class="split" id="meter-title">
@@ -1732,8 +1916,11 @@ function main() {
   if (!outputRelative || outputRelative.startsWith(`..${path.sep}`) || path.isAbsolute(outputRelative)) {
     throw new Error("dashboard path must stay inside the effective data directory");
   }
-  const { model, captainActions } = classify(snapshot, environment);
+  const waitHistoryPath = path.join(allowedData, "capacity-wait-history.json");
+  const waitHistory = loadWaitHistory(waitHistoryPath);
+  const { model, captainActions } = classify(snapshot, environment, waitHistory);
   writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
+  writePrivateAtomic(waitHistoryPath, `${JSON.stringify(waitHistory, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
   if (opts.refs) {
     const allowedState = path.resolve(snapshot.roots?.state || path.join(snapshot.fm_home || ROOT, "state"));
     const refsPath = path.resolve(opts.refs);
