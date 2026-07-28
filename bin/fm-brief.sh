@@ -283,23 +283,25 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
-case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+# Each mode's Definition-of-done text lives in its own function body rather than
+# inline as DOD=$(cat <<EOF ... EOF). Stock macOS Bash 3.2 tracks quote state
+# through a heredoc body while scanning for the closing paren of a command
+# substitution, so one apostrophe in an inline body (issue #166, and again in the
+# upstream text below) makes the whole script unparseable there. A heredoc inside
+# a plain function body is parsed normally, so prose here can use apostrophes
+# freely; tests/fm-brief.test.sh parses this file with the stock interpreter too.
+dod_direct_pr() {
+  cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
-)
-    ;;
-  local-only)
-    SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
+}
+
+dod_local_only() {
+  cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -307,13 +309,10 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
-)
-    ;;
-  *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+}
+
+dod_no_mistakes() {
+  cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -327,11 +326,28 @@ Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass the firstmate authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
+}
+
+case "$MODE" in
+  direct-PR)
+    SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    DOD=$(dod_direct_pr)
+    ;;
+  local-only)
+    SETUP2=""
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    DOD=$(dod_local_only)
+    ;;
+  *)  # no-mistakes (default)
+    SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    RULE1='1. Never push to the default branch. Never merge a PR.'
+    DOD=$(dod_no_mistakes)
     ;;
 esac
 
