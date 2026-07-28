@@ -15,6 +15,9 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     Structured records with a repo include its resolved delivery_mode and
+#     project_resolved provenance from data/projects.md; unresolved projects
+#     retain the fail-safe no-mistakes mode while project_resolved stays false.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
@@ -35,9 +38,16 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override a valid structured summary.
+#     The embedded registry records preserve the route's summary, scope, and
+#     projects fields when its canonical one-line syntax is parseable, so projections
+#     can describe routing alignment without reopening data/secondmates.md.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted; captain holds appear in
-#     decisions_open and are also preserved in queued with hold metadata.
+#     queued, landed, endpoints, counts, and omitted.
+#     Active children and holds preserve bounded project, delivery, age, and kind
+#     evidence; queued work additionally preserves priority, order, and definition
+#     evidence used by cross-home projections.
+#     Captain holds appear in decisions_open and are also preserved in queued
+#     with hold metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[]} - the compatibility
 #     landed-work roll-up derived from secondmate_current.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
@@ -352,10 +362,29 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
        end)
     | .records |= map(
         if (.body_lines | length) > 0 then
-          .body_excerpt = ((.body_lines | join(" "))[:240])
+          .body_excerpt = ((.body_lines | join("\n"))[:240])
         else . end)
     | del(.section,.order)
   ' < "$backlog"
+}
+
+attach_delivery_modes_json() {  # <backlog-json>
+  local backlog_json=$1 repo resolution mode project_resolved
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    resolution=$(
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_HOME="$FM_HOME" \
+      FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-project-mode.sh" --json "$repo" 2>/dev/null
+    ) || resolution='{"mode":"no-mistakes","yolo":"off","project_resolved":false}'
+    mode=$(printf '%s' "$resolution" | jq -r '.mode')
+    project_resolved=$(printf '%s' "$resolution" | jq -r '.project_resolved')
+    backlog_json=$(printf '%s' "$backlog_json" | jq --arg repo "$repo" --arg mode "$mode" --argjson project_resolved "$project_resolved" '
+      .records |= map(if .repo == $repo then .delivery_mode = $mode | .project_resolved = $project_resolved else . end)
+    ')
+  done < <(printf '%s' "$backlog_json" | jq -r '[.records[]? | .repo // empty] | unique[]')
+  printf '%s\n' "$backlog_json"
 }
 
 task_json_lines() {
@@ -567,17 +596,32 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,source:.current_state.source,
+         | {id,kind,
+            repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+            delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
+            project_resolved:($work.project_resolved == true),
+            since:(($work.since // null) | if . == null then null else trunc(20) end),
+            state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[] | select(.blocked_by != null)
-         | {id:(.id | trunc(120)),title:(.title | trunc(90)),blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+         | {id:(.id | trunc(120)),title:(.title | trunc(90)),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            kind:((.kind // null) | if . == null then null else trunc(40) end),
+            since:((.since // null) | if . == null then null else trunc(20) end),
+            blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
-           | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
+           | {id,title:((.backlog.title // .id) | trunc(90)),
+              repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+              kind:(($work.kind // null) | if . == null then null else trunc(40) end),
+              delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
+              project_resolved:($work.project_resolved == true),
+              since:(($work.since // null) | if . == null then null else trunc(20) end),
+              blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
@@ -617,7 +661,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          delivery_mode:((.delivery_mode // null) | if . == null then null else trunc(40) end),
+          project_resolved:(.project_resolved == true),
+          priority:((.priority // null) | if . == null then null else trunc(40) end),
+          order:((.order // null) | if type == "number" then . else null end),
+          body_excerpt:((.body_excerpt // null) | if . == null then null else trunc(240) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
@@ -741,8 +790,14 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
+        | (capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>[^;)]*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[^)]*\\)[[:space:]]*$")?) as $route
         | (capture("\\(home:[[:space:]]*(?<home>[^;)]*);")?) as $home
-        | {id:$id.id,home:($home.home // null),registered:true,
+        | {id:$id.id,
+           home:($route.home // $home.home // null),
+           summary:($route.summary // null),
+           scope:($route.scope // null),
+           projects:(($route.projects // "") | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))),
+           registered:true,
            registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
@@ -1170,6 +1225,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+BACKLOG_JSON=$(attach_delivery_modes_json "$BACKLOG_JSON") || { echo "fm-fleet-snapshot: delivery mode projection failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
