@@ -235,7 +235,6 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
-META_TMP=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -256,10 +255,6 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ -n "$META_TMP" ]; then
-    rm -f -- "$META_TMP"
-    META_TMP=
-  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1438,50 +1433,45 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-write_spawn_metadata() {
-  printf 'window=%s\n' "$META_WINDOW" || return 1
-  printf 'worktree=%s\n' "$WT" || return 1
-  printf 'project=%s\n' "$PROJ_ABS" || return 1
-  printf 'harness=%s\n' "$HARNESS" || return 1
-  printf 'kind=%s\n' "$KIND" || return 1
-  printf 'mode=%s\n' "$MODE" || return 1
-  printf 'yolo=%s\n' "$YOLO" || return 1
-  printf 'tasktmp=%s\n' "$TASK_TMP" || return 1
-  printf 'model=%s\n' "${MODEL:-default}" || return 1
-  printf 'effort=%s\n' "${EFFORT:-default}" || return 1
+{
+  echo "window=$META_WINDOW"
+  echo "worktree=$WT"
+  echo "project=$PROJ_ABS"
+  echo "harness=$HARNESS"
+  echo "kind=$KIND"
+  echo "mode=$MODE"
+  echo "yolo=$YOLO"
+  echo "tasktmp=$TASK_TMP"
+  echo "model=${MODEL:-default}"
+  echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || printf 'backend=%s\n' "$BACKEND" || return 1
+  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
-    printf 'herdr_session=%s\n' "$HERDR_SES" || return 1
-    printf 'herdr_workspace_id=%s\n' "$HERDR_WORKSPACE_ID" || return 1
-    printf 'herdr_tab_id=%s\n' "$HERDR_TAB_ID" || return 1
-    printf 'herdr_pane_id=%s\n' "$HERDR_PANE_ID" || return 1
+    echo "herdr_session=$HERDR_SES"
+    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+    echo "herdr_tab_id=$HERDR_TAB_ID"
+    echo "herdr_pane_id=$HERDR_PANE_ID"
   fi
   if [ "$BACKEND" = zellij ]; then
-    printf 'zellij_session=%s\n' "$ZELLIJ_SES" || return 1
-    printf 'zellij_tab_id=%s\n' "$ZELLIJ_TAB_ID" || return 1
-    printf 'zellij_pane_id=%s\n' "$ZELLIJ_PANE_ID" || return 1
+    echo "zellij_session=$ZELLIJ_SES"
+    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
   fi
   if [ "$BACKEND" = orca ]; then
-    printf 'orca_worktree_id=%s\n' "$ORCA_WORKTREE_ID" || return 1
-    printf 'terminal=%s\n' "$ORCA_TERMINAL" || return 1
+    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+    echo "terminal=$ORCA_TERMINAL"
   fi
   if [ "$BACKEND" = cmux ]; then
-    printf 'cmux_workspace_id=%s\n' "$CMUX_WORKSPACE_ID" || return 1
-    printf 'cmux_surface_id=%s\n' "$CMUX_SURFACE_ID" || return 1
+    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+    echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
-    printf 'home=%s\n' "$PROJ_ABS" || return 1
-    printf 'projects=%s\n' "$SECONDMATE_PROJECTS" || return 1
+    echo "home=$PROJ_ABS"
+    echo "projects=$SECONDMATE_PROJECTS"
   fi
-}
-META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || {
-  echo "error: could not record task metadata at $STATE/$ID.meta" >&2
-  exit 1
-}
-write_spawn_metadata > "$META_TMP" || {
+} > "$STATE/$ID.meta" || {
   # The durable record is what makes the worker supervisable: without it the
   # watcher, recovery, and teardown cannot find the task at all. Reporting a
   # successful spawn here would leave a live worker nobody is tracking, so this
@@ -1490,11 +1480,6 @@ write_spawn_metadata > "$META_TMP" || {
   echo "error: could not record task metadata at $STATE/$ID.meta" >&2
   exit 1
 }
-[ ! -d "$STATE/$ID.meta" ] && mv -f "$META_TMP" "$STATE/$ID.meta" || {
-  echo "error: could not record task metadata at $STATE/$ID.meta" >&2
-  exit 1
-}
-META_TMP=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
