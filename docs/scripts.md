@@ -15,6 +15,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-capacity.mjs`        | Classify meaningful fleet capacity and replace the private offline pipeline dashboard |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
+| `fm-task-add.sh`         | Create backlog items with creation-time task-ID validation and safe mint fitting     |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
