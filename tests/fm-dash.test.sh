@@ -847,6 +847,12 @@ test_launchd_env_and_degraded_render_selfcheck() {
   printf '%s' "$(sed "s|</body>|$rows$non_worker_rows</body>|" "$TMP_ROOT/dashboard.bak")" > "$HOME_DIR/data/capacity-dashboard.html"
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   assert_contains "$RESP" 'RENDER DEGRADED' "a mostly-unknown render is presented as truth instead of loudly degraded"
+  printf '%s' "$(sed "s|</body>|<li class=\"mrow\"><span class=\"mreason\">Authoritative current state: unknown</span></li>$non_worker_rows</body>|" "$TMP_ROOT/dashboard.bak")" > "$HOME_DIR/data/capacity-dashboard.html"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'RENDER DEGRADED' "a one-worker all-unknown fleet is presented as healthy"
+  sed 's/Authoritative current state:/Observed worker state:/g' "$TMP_ROOT/dashboard.bak" > "$HOME_DIR/data/capacity-dashboard.html"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  case "$RESP" in *'"degraded":true'*) fail "an empty authoritative worker set is marked degraded" ;; esac
   cp "$TMP_ROOT/dashboard.bak" "$HOME_DIR/data/capacity-dashboard.html"
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   case "$RESP" in *'"degraded":true'*) fail "a healthy render is marked degraded" ;; esac

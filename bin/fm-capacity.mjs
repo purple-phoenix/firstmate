@@ -673,13 +673,15 @@ function classify(snapshot, environment) {
     });
   }
 
-  const blockedByIds = (record) => String(record.blocked_by || "").split(",").map((id) => id.trim()).filter(Boolean);
+  const blockedByIds = (record) => (Array.isArray(record.blocked_by_all)
+    ? record.blocked_by_all
+    : String(record.blocked_by || "").split(",")).map((id) => String(id).trim()).filter(Boolean);
   const describeBlockedRecord = (startRecord, owner, records, tasks = []) => {
     const recordById = new Map(records.filter((record) => record.structured !== false).map((record) => [record.id, record]));
     const currentById = new Map(tasks.map((task) => [task.id, task.current_state?.state || task.state]));
-    const resolveBlocker = (blockerId, seen, depth) => {
+    const resolveBlocker = (blockerId, seen) => {
       const blockerRef = itemRef(owner, blockerId);
-      if (seen.has(blockerId) || depth >= 5) {
+      if (seen.has(blockerId)) {
         return [{ wait: `blocked by ${blockerRef}, whose blocker chain could not be resolved`, action: "Nothing yet - firstmate reconciles this blocker and escalates if your input is needed." }];
       }
       const blockerRecord = recordById.get(blockerId) || null;
@@ -702,7 +704,7 @@ function classify(snapshot, environment) {
       const nestedIds = blockerRecord ? blockedByIds(blockerRecord) : [];
       if (nestedIds.length > 0) {
         const nextSeen = new Set(seen).add(blockerId);
-        return nestedIds.flatMap((id) => resolveBlocker(id, nextSeen, depth + 1).map((root) => ({
+        return nestedIds.flatMap((id) => resolveBlocker(id, nextSeen).map((root) => ({
           wait: `${prefix}; then ${root.wait}`,
           action: root.action,
         })));
@@ -718,7 +720,7 @@ function classify(snapshot, environment) {
       if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
       return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
     }
-    const roots = blockerIds.flatMap((id) => resolveBlocker(id, new Set(), 0));
+    const roots = blockerIds.flatMap((id) => resolveBlocker(id, new Set()));
     return {
       waits: roots.map((root) => root.wait),
       action: [...new Set(roots.map((root) => root.action))].join(" "),

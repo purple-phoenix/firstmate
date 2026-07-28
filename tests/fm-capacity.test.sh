@@ -932,7 +932,14 @@ test_keyless_questions_and_blocker_chains() {
       {"order":3,"state":"queued","structured":true,"id":"dependent","title":"Publish the dependent release","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"asker","blocked_reason":"needs exporter","body_excerpt":"Acceptance criteria: release ships."},
       {"order":4,"state":"queued","structured":true,"id":"policy-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast"},
       {"order":5,"state":"queued","structured":true,"id":"after-policy","title":"Apply the rollout policy","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: rollout applied."},
-      {"order":6,"state":"queued","structured":true,"id":"multi-dependent","title":"Publish after two blockers","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"asker,missing-root","body_excerpt":"Acceptance criteria: both blockers clear."}
+      {"order":6,"state":"queued","structured":true,"id":"multi-dependent","title":"Publish after two blockers","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"missing-root","blocked_by_all":["asker","missing-root"],"body_excerpt":"Acceptance criteria: both blockers clear."},
+      {"order":7,"state":"queued","structured":true,"id":"deep-dependent","title":"Publish after a deep chain","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-1","body_excerpt":"Acceptance criteria: the full chain clears."},
+      {"order":8,"state":"queued","structured":true,"id":"deep-1","title":"Deep dependency one","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-2","body_excerpt":"Acceptance criteria: continue."},
+      {"order":9,"state":"queued","structured":true,"id":"deep-2","title":"Deep dependency two","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-3","body_excerpt":"Acceptance criteria: continue."},
+      {"order":10,"state":"queued","structured":true,"id":"deep-3","title":"Deep dependency three","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-4","body_excerpt":"Acceptance criteria: continue."},
+      {"order":11,"state":"queued","structured":true,"id":"deep-4","title":"Deep dependency four","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-5","body_excerpt":"Acceptance criteria: continue."},
+      {"order":12,"state":"queued","structured":true,"id":"deep-5","title":"Deep dependency five","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-6","body_excerpt":"Acceptance criteria: continue."},
+      {"order":13,"state":"queued","structured":true,"id":"deep-6","title":"Deep dependency six","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."}
     ]
     | .tasks = [
       {"id":"asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting reply"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision","summary":"which port should the exporter bind"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
@@ -954,6 +961,10 @@ test_keyless_questions_and_blocker_chains() {
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("blocked by") and contains("currently")))
     and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2)] | length) == 1
     and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2) | .waits_on | join(" ")] | .[0] | contains("unavailable"))
+    and any(.pipeline.blocked[];
+      ((.waits_on // [] | join(" ")) as $chain
+       | ([$chain | scan("blocked by")] | length) >= 6
+         and ($chain | contains("waiting on your decision"))))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("which port")) | not)
   ' >/dev/null || fail "keyless questions or blocker chains are wrong: $json"
   html=$(cat "$output")

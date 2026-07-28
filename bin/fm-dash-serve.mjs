@@ -1167,7 +1167,7 @@ async function handle(req, res) {
     // degraded data as truth.
     const unknownStates = (dashboard.html.match(/Authoritative current state: unknown/g) || []).length;
     const authoritativeStates = (dashboard.html.match(/Authoritative current state:/g) || []).length;
-    const degraded = unknownStates >= 3 && unknownStates * 2 >= authoritativeStates;
+    const degraded = authoritativeStates > 0 && unknownStates * 2 >= authoritativeStates;
     if (degraded) log(`degraded render detected: ${unknownStates} of ${authoritativeStates} authoritative worker states read unknown; check the service environment (PATH/tools)`);
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
