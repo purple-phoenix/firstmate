@@ -12,6 +12,7 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 - The page is de-anonymized for the authenticated captain: opaque `item-NN`/`project-NN`/`home-NN` references become real names, and work items and decisions are clickable rich detail views (description, test plan, PR link, tailnet preview links, report excerpt, recent activity) assembled from task briefs, recorded metadata, the backlog, and scout reports.
 - Open decisions with `data/<origin>/decisions/<key>.md` records show each recorded option with its impact, a per-option Approve button, and a bounded custom-answer control.
 - An Ideas section renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.
+- The producer's collapsed parking lot of captain-parked work (active hold kind `parked`, kept out of the blocked band by `bin/fm-capacity.mjs`) is enriched with each item's real title, park reason, and dates read from the owning home's backlog, plus an Unpark button; the click only enqueues an `unpark` command record and firstmate lifts the hold through the normal backlog lifecycle.
 - A service bar shows how many captain commands are queued for firstmate.
 - A Subscription usage band shows cached `quota-axi --json` windows for Claude, Codex, and Grok, including percent used and reset distance with reset time formatted by the captain's browser in local time.
 - Every blocked row carries its plain-language blocker chain resolved to the root cause plus an explicit "What you can do" line, so no blocked row leaves the captain guessing; chains stay privacy-safe in the on-disk file and de-anonymize at serve time like every other reference.
@@ -35,7 +36,7 @@ The on-disk dashboard stays identity-opaque: the producer's opt-in `--refs` side
 Button clicks never execute anything.
 The design keeps the web process outside every fleet-mutation path:
 
-1. The captain clicks a send or verdict control for a `CAP-NN` action, structured decision answer, or idea verdict.
+1. The captain clicks a send or verdict control for a `CAP-NN` action, structured decision answer, idea verdict, or parking-lot unpark.
 2. The service validates the request (see trust design) and writes one durable `fm-dash-command.v1` record into `state/dash-inbox/` with an atomic temp-file rename, mode 0600.
 3. The registered `fm-dash` watcher check notices the pending record on its normal cadence (`FM_CHECK_INTERVAL`, default 300 seconds) and wakes the running firstmate through the standard durable wake queue.
 4. Firstmate claims the records with `bin/fm-dash-inbox.sh claim` and handles each record by its kind under the capacity skill's dashboard-command semantics.
@@ -64,6 +65,7 @@ Dispatch is validated against records the server itself reads:
 - A decision answer must name a decision in the producer's current-generation refs sidecar, and its integer option index must match the options document the server just parsed; a custom answer is accepted only for a decision with that document and is bounded to 2,000 characters.
 - Decision answers persist and deduplicate against an owner-qualified home, origin, and key so equal keys from different origins or homes remain independently routable after refs regenerate.
 - An idea verdict must name an idea currently listed in `data/ideas/idea-backlog.md` and one of the approve, deny, or suggest verbs; on approval, firstmate creates the work item(s) through the normal backlog lifecycle - the service itself never creates work.
+- An unpark request must name an item the currently served dashboard itself lists in its parking lot and resolve through the current-generation refs sidecar; the record only asks firstmate to lift the parked hold through the normal backlog lifecycle, and the service never edits any backlog.
 - The only free text accepted anywhere is bounded captain-authored content: an idea-suggestion note or decision custom answer authenticated as above and delivered as data for Firstmate, never interpreted or executed by the service.
 - A newer approve or deny verdict is published under a fresh immutable inbox name before the unchanged older pending verdict is removed, while suggestions remain additive.
 - Destructive, irreversible, and security-sensitive choices stay in captain chat structurally: no current `CAP-NN` prompt grants such authority, the capacity skill forbids treating a dashboard approval as merge or discard authority, decision records carry an explicit re-confirm-in-chat boundary for destructive consequences, and firstmate re-resolves every claimed command through the normal lifecycle before acting.

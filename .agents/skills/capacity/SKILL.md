@@ -37,6 +37,7 @@ Never put secrets, credentials, PHI, production data, or report bodies into the 
 
 Use the model's evidence-backed classifications and do not substitute a utilization percentage.
 The model separates grounded ready-work supply, conservative independent starts, active delivery stages, structured waiting gates, persistent scope alignment, configured dispatch lanes, definition health, aging signals, and recent completions.
+Captain-parked work (an active structured hold with kind `parked`) is deliberately dormant rather than stuck: the model keeps it in the separate `parked` collection, out of the blocked band, blocked counts, attention summaries, and wait treatments, and the dashboard shows it only in a collapsed parking-lot section that disappears when empty.
 Treat a main-home item as independently startable only when the model places it in `pipeline.ready` after its definition, dependency, and conservative coarse-overlap checks.
 Treat an idle secondmate as an opportunity only when its validated structured home already contains grounded ready work in its own scope.
 Treat every other idle secondmate as healthy rather than proposing busywork.
@@ -98,6 +99,7 @@ Claim delivery is at-least-once across interruption, so check whether a re-surfa
 - A `CAP-NN` record is the captain's ordinary chat approval of that action ID under section 4, including its full re-resolution and authority limits.
 - A `decision` record is the captain's answer for the owner-qualified decision identity with either the recorded option text or bounded custom answer; route `decision_origin` in `decision_home` through `decision-hold-lifecycle` exactly as a chat answer, and re-confirm in chat before acting when the answer has a destructive or irreversible consequence.
 - An `idea` record is the captain's verdict on the named `data/ideas/` idea: on approve, create the follow-up work item(s) through the normal backlog lifecycle; on deny, record the outcome against the idea; on suggest, treat the suggestion text as captain input on that idea.
+- An `unpark` record is the captain's request to return the named parked work item to the active queue: lift its parked hold in the owning home through the normal backlog lifecycle (for a `tasks-axi` backend, `tasks-axi unhold <id>`), then re-evaluate the queue; the lift grants no dispatch authority beyond normal re-evaluation, and work owned by a secondmate is routed to that home rather than edited from the main home.
 
 A claimed record never authorizes a PR merge, `local-only` landing, destructive action, irreversible action, security-sensitive action, or discard of unlanded work; when a claimed action leads to such a choice, escalate it to captain chat exactly as section 4 requires.
 Report the outcome of handled commands to the captain through normal escalation etiquette rather than assuming the dashboard told them.

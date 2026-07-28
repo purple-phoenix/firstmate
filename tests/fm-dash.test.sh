@@ -469,6 +469,54 @@ test_idea_pitch_and_verdicts() {
   pass "ideas render their pitches and verdicts flow through the durable inbox"
 }
 
+test_parking_lot_enrichment_and_unpark() {
+  local ref record
+  cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.parked.bak"
+  cp "$HOME_DIR/state/dash-refs.json" "$TMP_ROOT/refs.parked.bak"
+  cp "$HOME_DIR/data/backlog.md" "$TMP_ROOT/backlog.parked.bak"
+  jq '.backlog.records += [
+    {"order":9,"state":"queued","structured":true,"id":"parked-rest","title":"Refresh the omicron gateway","repo":"omicron","project_resolved":true,"kind":"ship","since":"2026-07-10","hold_kind":"parked","hold_reason":"Captain parked omicron work until the retreat","body_excerpt":"Acceptance criteria: omicron gateway upgraded."}
+  ]' "$SNAPSHOT" > "$TMP_ROOT/parked-snapshot.json"
+  printf -- '- [ ] parked-rest - Refresh the omicron gateway (repo: omicron) (kind: ship) (since 2026-07-10) (hold: Captain parked omicron work until the retreat) (hold-kind: parked)\n' >> "$HOME_DIR/data/backlog.md"
+  FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/parked-snapshot.json" --environment "$ENVIRONMENT" \
+    --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
+    || fail "could not render the parked fixture dashboard"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'Parking lot (1)' "served page lacks the parking lot"
+  assert_contains "$RESP" '"title":"Refresh the omicron gateway"' "parked entry was not enriched with its real title"
+  assert_contains "$RESP" '"reason":"Captain parked omicron work until the retreat"' "parked entry was not enriched with the park reason"
+  assert_contains "$RESP" '"since":"2026-07-10"' "parked entry was not enriched with its date"
+  assert_contains "$RESP" 'Unpark' "parked entry lacks the unpark control"
+  ref=$(ref_for "main/parked-rest") || fail "refs sidecar does not map the parked item"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"unpark":"item-99"}'
+  [ "$REQ_STATUS" = 409 ] || fail "an unlisted unpark reference was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"unpark":"nonsense"}'
+  [ "$REQ_STATUS" = 400 ] || fail "a malformed unpark reference was not refused (got $REQ_STATUS)"
+  [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
+    || fail "a refused unpark still wrote an inbox record"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"unpark\":\"$ref\"}"
+  [ "$REQ_STATUS" = 200 ] || fail "unpark dispatch failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" | head -1)")
+  assert_contains "$record" '"kind": "unpark"' "unpark record lacks its kind"
+  assert_contains "$record" '"work_id": "parked-rest"' "unpark record lacks the real work id"
+  assert_contains "$record" '"work_home": "main"' "unpark record lacks the owning home"
+  assert_contains "$record" 'normal backlog lifecycle' "unpark record does not route the lift through firstmate"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"unpark\":\"$ref\"}"
+  assert_contains "$RESP" 'already-queued' "a repeated unpark was not coalesced"
+  [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "repeated unpark clicks wrote duplicate records"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
+  mv "$TMP_ROOT/dashboard.parked.bak" "$HOME_DIR/data/capacity-dashboard.html"
+  mv "$TMP_ROOT/refs.parked.bak" "$HOME_DIR/state/dash-refs.json"
+  mv "$TMP_ROOT/backlog.parked.bak" "$HOME_DIR/data/backlog.md"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"unpark\":\"$ref\"}"
+  [ "$REQ_STATUS" = 409 ] || fail "an unpark for a no-longer-parked item was not refused (got $REQ_STATUS)"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"parked":[]' "an empty parking lot still carried parked entries"
+  assert_not_contains "$RESP" 'Parking lot (' "an empty parking lot still rendered a section"
+  pass "the parking lot is enriched for the captain and unpark clicks become one durable lifted-through-firstmate command"
+}
+
 test_dispatch_writes_one_durable_record() {
   local body record file
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
@@ -893,6 +941,7 @@ test_decision_detail_options_and_validated_approval
 test_decision_answers_are_qualified_by_home_and_origin
 test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts
+test_parking_lot_enrichment_and_unpark
 test_dispatch_writes_one_durable_record
 test_dispatch_refuses_unknown_and_uncurrent_actions
 test_refresh_reruns_producer_server_side
