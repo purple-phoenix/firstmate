@@ -18,6 +18,8 @@
  *   pipeline, lanes, readiness, aging, recommendations, and omissions.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
+ * Run --help for the exact inherited snapshot bounds, environment-probe budget,
+ * bottleneck order, CAP-01 through CAP-10 meanings, and output replacement rules.
  *
  * The producer is read-mostly. It writes only the selected dashboard path and
  * never dispatches, merges, tears down, changes backlog/task state, or opens a
@@ -58,11 +60,47 @@ const STAGE_LABELS = {
 
 function usage(exitCode = 0) {
   const out = exitCode === 0 ? process.stdout : process.stderr;
-  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>]\n\n`);
-  out.write(`Gather a fresh bounded fleet snapshot, classify meaningful capacity, and replace a\n`);
-  out.write(`self-contained offline dashboard. The default output is data/capacity-dashboard.html\n`);
-  out.write(`under the effective FM_HOME. --snapshot and --environment are deterministic fixture\n`);
-  out.write(`inputs for tests/offline review and must not be used for a normal /capacity run.\n`);
+  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>]
+
+Gather a fresh bounded fleet snapshot, classify meaningful capacity, and atomically
+replace a self-contained offline dashboard. The default destination is
+data/capacity-dashboard.html under the effective FM_HOME. The destination must stay
+inside the canonical data root, may traverse legitimate system symlink ancestors,
+must not traverse a symlink below FM_HOME or replace a symlink leaf, and is mode 0600.
+--json prints the complete model after writing the dashboard. --snapshot and
+--environment are deterministic fixture inputs for tests/offline review and must not
+be used for a normal /capacity run.
+
+MODEL fm-capacity.v1
+  generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
+  lanes, readiness, aging, recommendations, omissions. Pipeline owns queued, ready,
+  building, validating_fixing, pr_ci_approval, blocked, and recently_landed arrays.
+  Each recommendation owns id, classification, priority, evidence,
+  expected_throughput_consequence, safety_authority_boundary,
+  recommended_next_action, and prompt.
+
+BOUNDS AND PROBES
+  The canonical fm-fleet-snapshot.v1 producer owns snapshot completion; this wrapper
+  does not impose a shorter aggregate timeout. Its normal defaults inspect at most 20
+  secondmate homes sequentially, bound each structured-home read to 8 seconds and
+  262144 bytes, and emit explicit per-home unavailable/truncated evidence instead of
+  aborting the fleet result. FM_SNAPSHOT_SECONDMATES,
+  FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES are the
+  canonical overrides; fm-fleet-snapshot.sh --help owns its remaining exact bounds.
+  Backend, bootstrap credential, and dispatch probes share one 30-second fleet-wide
+  deadline. Per-home steps are capped at 5, 15, and 3 seconds respectively, reduced
+  by remaining aggregate time; unvisited or incomplete homes become unavailable.
+
+BOTTLENECK ORDER AND STABLE ACTIONS
+  Lower numeric priority wins; ties sort by stable ID:
+   10 CAP-02 credentials             20 CAP-03 unavailable state
+   25 CAP-09 lane mismatch           30 CAP-01 captain-held decisions
+   35 CAP-10 aging flow              40 CAP-07 validation, CI, or approval
+   50 CAP-05 dependencies/overlap    60 CAP-04 definition shortage
+   70 CAP-06 execution shortage      80 CAP-08 demand shortage
+  CAP IDs are discussion handles only. Their copyable prompts re-enter normal
+  Firstmate lifecycles; neither the model nor dashboard executes an action.
+`);
   process.exit(exitCode);
 }
 
@@ -93,17 +131,18 @@ function readJson(file, label) {
 }
 
 function run(command, args, options = {}) {
-  return spawnSync(command, args, {
+  const spawnOptions = {
     encoding: "utf8",
-    timeout: options.timeout ?? 12000,
     env: options.env ?? process.env,
     maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024,
-  });
+  };
+  if (options.timeout !== null) spawnOptions.timeout = options.timeout ?? 12000;
+  return spawnSync(command, args, spawnOptions);
 }
 
 function gatherSnapshot(file) {
   if (file) return readJson(file, "snapshot fixture");
-  const result = run(path.join(SCRIPT_DIR, "fm-fleet-snapshot.sh"), ["--json"], { timeout: 45000 });
+  const result = run(path.join(SCRIPT_DIR, "fm-fleet-snapshot.sh"), ["--json"], { timeout: null });
   if (result.status !== 0) {
     throw new Error(`fresh fleet snapshot failed: ${(result.stderr || result.stdout || "unknown error").trim()}`);
   }

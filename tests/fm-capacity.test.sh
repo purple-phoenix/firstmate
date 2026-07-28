@@ -79,6 +79,7 @@ EOF
 }
 
 test_skill_discovery_and_read_mostly_contract() {
+  local help
   assert_present "$SKILL" "capacity SKILL.md is missing"
   assert_grep 'name: capacity' "$SKILL" "capacity skill frontmatter has the wrong name"
   assert_grep 'user-invocable: true' "$SKILL" "capacity skill is not captain-invocable"
@@ -89,6 +90,15 @@ test_skill_discovery_and_read_mostly_contract() {
   assert_grep "| \`/capacity\`" "$ROOT/README.md" "README does not list /capacity"
   assert_grep 'Do not invoke, depend on, open, poll, share, or embed Lavish' "$SKILL" "capacity skill does not forbid Lavish"
   assert_grep 'must not dispatch, merge, tear down, mutate task state, edit the backlog' "$SKILL" "capacity read-mostly boundary is incomplete"
+  help=$("$CAPACITY" --help) || fail "capacity help failed"
+  assert_contains "$help" 'MODEL fm-capacity.v1' "capacity help omits the model contract"
+  assert_contains "$help" 'at most 20' "capacity help omits the inherited home bound"
+  assert_contains "$help" 'bound each structured-home read to 8 seconds' "capacity help omits the inherited probe timeout"
+  assert_contains "$help" 'does not impose a shorter aggregate timeout' "capacity help permits wrapper timeout regression"
+  assert_contains "$help" 'share one 30-second fleet-wide' "capacity help omits the environment deadline"
+  assert_contains "$help" '10 CAP-02 credentials' "capacity help omits bottleneck priority"
+  assert_contains "$help" '80 CAP-08 demand shortage' "capacity help omits the complete priority order"
+  assert_contains "$help" 'CAP IDs are discussion handles only' "capacity help omits stable action semantics"
   pass "capacity is discoverable and its conditional read-mostly procedure has one owner"
 }
 
