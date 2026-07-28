@@ -799,7 +799,11 @@ test_output_replacement_rejects_symlinks_and_enforces_mode() {
   chmod 0644 "$output"
   "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null ||
     fail "capacity could not replace an existing regular dashboard"
-  mode=$(stat -f '%Lp' "$output" 2>/dev/null || stat -c '%a' "$output")
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f '%Lp' "$output")
+  else
+    mode=$(stat -c '%a' "$output")
+  fi
   [ "$mode" = 600 ] || fail "capacity dashboard mode is $mode, expected 600"
 
   rm -rf "$redirected"
