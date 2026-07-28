@@ -113,7 +113,7 @@ test_classification_priority_overlap_and_idle_semantics() {
     and .readiness.available == true
     and (.pipeline.ready | length) == 2
     and (.readiness.conservative_overlap_gates | length) == 1
-    and (.readiness.explicit_gates | any(.reason == "dependency or structured hold"))
+    and (.readiness.explicit_gates | any(.reason == "Blocked by item-01"))
     and (.readiness.explicit_gates | any(.reason == "time gate until 2026-08-01"))
     and (.readiness.definition_gaps | any(.gaps | index("project unresolved")))
     and (.lanes.persistent_secondmates | any(.utilization == "idle with grounded ready in-scope work"))
