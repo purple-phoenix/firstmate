@@ -12,17 +12,18 @@
 # Usage: fm-dash-install.sh <command> [options]
 #   install       write config, launchd agent, tailscale serve mapping, and the
 #                 fm-dash watcher check; idempotent, prints the stable URL
-#   uninstall     remove the serve mapping and launchd agent; keeps config and
-#                 any pending commands in state/dash-inbox/
+#   uninstall     remove the serve mapping, launchd agent, and watcher registration;
+#                 keeps config and any pending commands in state/dash-inbox/
 #   status        report agent, serve mapping, and pending-command state
 #   print-plist   print the launchd plist to stdout without installing
 #   write-check   write and register only the fm-dash watcher check
+#   unregister-check  remove only the fm-dash watcher registration
 # Options:
 #   --port <n>        local loopback port for the service (default 8847)
 #   --serve-port <n>  tailnet HTTPS port for tailscale serve (default 8443)
 #   --captain <login> authorized tailnet login; repeatable; defaults to the
 #                     tailnet self login reported by tailscale status
-#   --read-only       serve the dashboard without command dispatch and skip the
+#   --read-only       serve the dashboard without command dispatch and remove the
 #                     watcher check; for running the service ahead of command wiring
 # FM_HOME selects the home; scripts and the service always run from this
 # checkout. docs/dashboard-service.md owns the architecture and evidence.
@@ -35,6 +36,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG_DIR="$FM_HOME/config"
 CONFIG="$CONFIG_DIR/dash.json"
 CHECK="$STATE/fm-dash.check.sh"
+CHECK_TRUST="$STATE/fm-dash.check-trust"
 DEFAULT_PORT=8847
 DEFAULT_SERVE_PORT=8443
 
@@ -204,6 +206,10 @@ SHIM
   "$SCRIPT_DIR/fm-check-register.sh" fm-dash || err "could not register the fm-dash watcher check"
 }
 
+unregister_check() {
+  rm -f -- "$CHECK" "$CHECK_TRUST" || err "could not unregister the fm-dash watcher check"
+}
+
 cmd_install() {
   local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT read_only=false captains=() label plist_path node_path dnsname
   while [ $# -gt 0 ]; do
@@ -227,9 +233,11 @@ cmd_install() {
   fi
 
   write_config "$port" "$read_only" "${captains[@]}"
-  # A read-only install serves the dashboard without command dispatch, so the
-  # watcher check that surfaces clicked commands is not registered.
-  [ "$read_only" = true ] || write_check
+  if [ "$read_only" = true ]; then
+    unregister_check
+  else
+    write_check
+  fi
 
   label=$(home_label)
   plist_path="$HOME/Library/LaunchAgents/$label.plist"
@@ -273,6 +281,7 @@ cmd_uninstall() {
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   rm -f "$plist_path"
+  unregister_check
   printf 'uninstalled: %s (config and any pending commands were kept)\n' "$label"
 }
 
@@ -298,5 +307,6 @@ case "${1:-}" in
   status) shift; cmd_status ;;
   print-plist) shift; render_plist "$(home_label)" "$(node_bin)" "$STATE" ;;
   write-check) shift; write_check ;;
+  unregister-check) shift; unregister_check ;;
   *) usage 2 >&2 ;;
 esac

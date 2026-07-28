@@ -60,7 +60,7 @@ Dispatch is validated against records the server itself reads:
 - A decision answer must name a decision in the producer's current-generation refs sidecar, and its integer option index must match the options document the server just parsed; a custom answer is accepted only for a decision with that document and is bounded to 2,000 characters.
 - Decision answers persist and deduplicate against an owner-qualified home, origin, and key so equal keys from different origins or homes remain independently routable after refs regenerate.
 - An idea verdict must name an idea currently listed in `data/ideas/idea-backlog.md` and one of the approve, deny, or suggest verbs; on approval, firstmate creates the work item(s) through the normal backlog lifecycle - the service itself never creates work.
-- The only free text accepted is a bounded idea-suggestion note or decision custom answer, which is captain-authored data for firstmate, never a command the service interprets or executes.
+- The only free text accepted anywhere is bounded captain-authored content: an idea-suggestion note or decision custom answer authenticated as above and delivered as data for Firstmate, never interpreted or executed by the service.
 - A newer approve or deny verdict is published under a fresh immutable inbox name before the unchanged older pending verdict is removed, while suggestions remain additive.
 - Destructive, irreversible, and security-sensitive choices stay in captain chat structurally: no current `CAP-NN` prompt grants such authority, the capacity skill forbids treating a dashboard approval as merge or discard authority, decision records carry an explicit re-confirm-in-chat boundary for destructive consequences, and firstmate re-resolves every claimed command through the normal lifecycle before acting.
 
@@ -101,10 +101,10 @@ bin/fm-dash-install.sh status
 bin/fm-dash-install.sh uninstall
 ```
 
-A read-only install is the right shape for running the service ahead of command-consumption wiring: the page, detail views, refresh, and auto-render all work, while every mutation route refuses.
+A read-only install is the right shape for running the service ahead of command-consumption wiring: the page, detail views, refresh, and auto-render all work, every mutation route refuses, and any watcher registration from a prior writable install is removed.
 
 Install is idempotent and prints the stable URL, `https://<machine>.<tailnet>.ts.net:8443/`.
-Uninstall removes the serve mapping and launchd agent but keeps `config/dash.json` and any pending commands.
+Uninstall removes the serve mapping, launchd agent, watcher check, and watcher trust registration but keeps `config/dash.json` and any pending commands.
 The launchd agent logs to `state/dash-serve.log`.
 On a non-macOS host the installer refuses and the service can be run under the local init system with the same tailscale serve mapping.
 

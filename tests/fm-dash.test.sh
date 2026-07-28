@@ -568,18 +568,23 @@ EOF
 }
 
 test_check_shim_wakes_only_when_pending() {
-  local out
+  local out pending_record
   FM_HOME="$HOME_DIR" "$INSTALL_SH" write-check >/dev/null || fail "write-check failed"
   [ -f "$HOME_DIR/state/fm-dash.check-trust" ] || fail "write-check did not register the check"
   out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
   [ -z "$out" ] || fail "check shim woke with an empty inbox: $out"
-  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x"}\n' > "$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
+  pending_record="$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x"}\n' > "$pending_record"
   out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
   assert_contains "$out" '1 captain command(s) pending' "check shim did not report the pending command"
   assert_contains "$out" 'fm-dash-inbox.sh claim' "check shim does not name the claim helper"
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "check shim printed more than one line"
-  rm -f "$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
-  pass "the registered watcher check wakes firstmate only while commands are pending"
+  FM_HOME="$HOME_DIR" "$INSTALL_SH" unregister-check >/dev/null || fail "unregister-check failed"
+  [ ! -e "$HOME_DIR/state/fm-dash.check.sh" ] || fail "unregister-check left the watcher check installed"
+  [ ! -e "$HOME_DIR/state/fm-dash.check-trust" ] || fail "unregister-check left the watcher trust registration installed"
+  [ -f "$pending_record" ] || fail "unregister-check removed a pending inbox record"
+  rm -f "$pending_record"
+  pass "watcher registration follows writable mode without deleting pending commands"
 }
 
 test_installer_plist_and_funnel_stance() {
@@ -599,6 +604,8 @@ test_installer_plist_and_funnel_stance() {
   assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
   assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
   assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'serve --https="$serve_port" off' "failed Funnel verification does not tear down the mapping"
+  assert_contains "$(sed -n '/write_config .*port/,/label=/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
+  assert_contains "$(sed -n '/^cmd_uninstall()/,/^cmd_status()/p' "$INSTALL_SH")" 'unregister_check' "uninstall does not unregister the watcher"
   escaped_home="$HOME_DIR/xml & < >"
   plist=$(FM_HOME="$escaped_home" FM_ROOT_OVERRIDE="$HOME_DIR/root & < >" "$INSTALL_SH" print-plist) || fail "print-plist with XML metacharacters failed"
   assert_contains "$plist" "$HOME_DIR/xml &amp; &lt; &gt;" "plist did not XML-escape FM_HOME"
@@ -617,6 +624,8 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
   assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
   assert_grep 'secondmate-owned work item deliberately shows only a limited ownership note' "$ROOT/docs/dashboard-service.md" "service doc omits the accepted secondmate detail boundary"
+  assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
+  assert_grep 'at-least-once' "$INBOX_SH" "inbox consumer omits its delivery contract"
   pass "the service is documented and wired into the operating contract"
 }
 

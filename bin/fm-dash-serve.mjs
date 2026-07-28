@@ -21,10 +21,12 @@
  * Tailscale-User-Login header injected by tailscale serve to match a login in
  * config/dash.json. Requests without a matching identity get 403 and cause no
  * writes. Dispatch accepts only known CAP-NN identifiers that are present in
- * the currently served dashboard AND in the fixed one-click allowlist below;
- * free-text commands are structurally impossible and unknown or future action
- * IDs are refused (route those through captain chat). The server binds
- * 127.0.0.1 only, so the only remote path in is the tailnet proxy.
+ * the currently served dashboard AND in the fixed one-click allowlist below.
+ * The only free text accepted anywhere is bounded captain-authored content: an
+ * idea suggestion or decision custom answer delivered to firstmate as data,
+ * never interpreted or executed by this service. Unknown or future action IDs
+ * are refused (route those through captain chat). The server binds 127.0.0.1
+ * only, so the only remote path in is the tailnet proxy.
  *
  * Environment: FM_HOME selects the home (defaults to this checkout);
  * FM_DASH_CAPACITY_ARGS appends producer fixture args for tests ONLY and must

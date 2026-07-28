@@ -5,7 +5,8 @@
 # fm-dash-command.v1 records written by bin/fm-dash-serve.mjs and claiming them
 # durably. "claim" prints each record before archiving it under
 # state/dash-inbox/archive/ (newest 50 kept), so an interruption can re-surface
-# a command but can never silently lose one. Consumption semantics are owned by the capacity skill:
+# a command but can never silently lose one. Delivery is at-least-once across
+# interruption, and the capacity skill requires idempotency checks before handling re-surfaced records:
 # each claimed prompt is the captain's approval of that CAP action ID with all
 # of that skill's authority limits, never destructive or merge authority.
 #
