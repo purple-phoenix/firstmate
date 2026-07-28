@@ -51,8 +51,9 @@ TX_TRUST_EXISTED=false
 TX_CONFIG_STAGE=""
 TX_PLIST_STAGE=""
 TX_PRIOR_LOADED=false
-TX_PREVIOUS_PORT=""
 TX_PREVIOUS_SERVE_PORT=""
+TX_PREVIOUS_MAPPING_PRESENT=false
+TX_PREVIOUS_MAPPING_TARGET=""
 TX_NEW_SERVE_PORT=""
 TX_NEW_MAPPING=false
 TX_LABEL=""
@@ -184,19 +185,34 @@ configured_serve_port() {
   ' "$CONFIG" "$DEFAULT_SERVE_PORT"
 }
 
-configured_loopback_port() {
-  [ -f "$CONFIG" ] || return 0
-  node -e '
-    const fs = require("node:fs");
-    try {
-      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      const port = parsed.port === undefined ? Number(process.argv[2]) : parsed.port;
-      if (!Number.isInteger(port) || port < 1 || port > 65535) process.exit(1);
-      console.log(port);
-    } catch {
-      process.exit(1);
-    }
-  ' "$CONFIG" "$DEFAULT_PORT"
+snapshot_serve_mapping() {
+  local serve_port=$1 status_json
+  status_json=$("$(tailscale_bin)" serve status --json 2>/dev/null) || return 1
+  printf '%s' "$status_json" | node -e '
+    let raw = "";
+    process.stdin.on("data", (c) => { raw += c; });
+    process.stdin.on("end", () => {
+      try {
+        const s = JSON.parse(raw);
+        if (!s || Array.isArray(s) || typeof s !== "object") throw new Error();
+        const tcp = s.TCP === undefined ? {} : s.TCP;
+        const web = s.Web === undefined ? {} : s.Web;
+        if (!tcp || Array.isArray(tcp) || typeof tcp !== "object"
+          || !web || Array.isArray(web) || typeof web !== "object") throw new Error();
+        const tcpMapping = tcp[process.argv[1]];
+        const webMappings = Object.entries(web).filter(([hostport]) => hostport.endsWith(":" + process.argv[1]));
+        if (tcpMapping === undefined && webMappings.length === 0) return;
+        if (!tcpMapping || tcpMapping.HTTPS !== true || webMappings.length !== 1) throw new Error();
+        const handlers = webMappings[0][1] && webMappings[0][1].Handlers;
+        if (!handlers || Array.isArray(handlers) || typeof handlers !== "object") throw new Error();
+        const proxies = Object.values(handlers).map((handler) => handler && handler.Proxy).filter((proxy) => typeof proxy === "string" && proxy.length > 0);
+        if (proxies.length !== 1) throw new Error();
+        console.log(proxies[0]);
+      } catch {
+        process.exit(1);
+      }
+    });
+  ' "$serve_port"
 }
 
 disable_serve_port() {
@@ -240,8 +256,8 @@ rollback_install() {
     launchctl bootstrap "gui/$(id -u)" "$TX_PLIST_PATH" >/dev/null 2>&1 || status=1
     launchctl kickstart "gui/$(id -u)/$TX_LABEL" >/dev/null 2>&1 || status=1
   fi
-  if [ -n "$TX_PREVIOUS_SERVE_PORT" ]; then
-    "$(tailscale_bin)" serve --bg --https="$TX_PREVIOUS_SERVE_PORT" "http://127.0.0.1:$TX_PREVIOUS_PORT" >/dev/null 2>&1 || status=1
+  if [ "$TX_PREVIOUS_MAPPING_PRESENT" = true ]; then
+    "$(tailscale_bin)" serve --bg --https="$TX_PREVIOUS_SERVE_PORT" "$TX_PREVIOUS_MAPPING_TARGET" >/dev/null 2>&1 || status=1
     assert_no_funnel "$TX_PREVIOUS_SERVE_PORT" >/dev/null 2>&1 || status=1
   fi
   cleanup_install_transaction
@@ -342,7 +358,10 @@ cmd_install() {
   node_path=$(node_bin)
   tailscale_bin >/dev/null
   previous_serve_port=$(configured_serve_port) || err "could not read the previously configured dashboard serve port"
-  TX_PREVIOUS_PORT=$(configured_loopback_port) || err "could not read the previously configured dashboard loopback port"
+  if [ -n "$previous_serve_port" ]; then
+    TX_PREVIOUS_MAPPING_TARGET=$(snapshot_serve_mapping "$previous_serve_port") || err "could not snapshot the previous dashboard mapping"
+    [ -z "$TX_PREVIOUS_MAPPING_TARGET" ] || TX_PREVIOUS_MAPPING_PRESENT=true
+  fi
 
   if [ "${#captains[@]}" -eq 0 ]; then
     local self_login

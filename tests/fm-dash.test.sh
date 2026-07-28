@@ -670,17 +670,23 @@ EOF
 if [ "$1" = status ] && [ "${2:-}" = --json ]; then
   printf '%s\n' '{"Self":{"UserID":1,"DNSName":"dash.tail.ts.net."},"User":{"1":{"LoginName":"captain@example.com"}}}'
 elif [ "$1" = serve ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
-  port=$(cat "$TAILSCALE_STATE")
+  state=$(cat "$TAILSCALE_STATE")
+  if [ -z "$state" ]; then
+    printf '%s\n' '{"TCP":{},"Web":{},"AllowFunnel":{}}'
+    exit 0
+  fi
+  port=${state%%|*}
+  target=${state#*|}
   funnel=false
   [ "${TAILSCALE_FUNNEL_PORT:-}" != "$port" ] || funnel=true
-  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{}},"AllowFunnel":{"dash.tail.ts.net:%s":%s}}\n' "$port" "$port" "$port" "$funnel"
+  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{"Handlers":{"/":{"Proxy":"%s"}}}},"AllowFunnel":{"dash.tail.ts.net:%s":%s}}\n' "$port" "$port" "$target" "$port" "$funnel"
 elif [ "$1" = serve ] && [ "${2:-}" = --bg ]; then
   port=${3#--https=}
   if [ "${TAILSCALE_FAIL_MAP_PORT:-}" = "$port" ]; then
     printf 'map-failed %s\n' "$port" >> "$TAILSCALE_LOG"
     exit 1
   fi
-  printf '%s\n' "$port" > "$TAILSCALE_STATE"
+  printf '%s|%s\n' "$port" "$4" > "$TAILSCALE_STATE"
   printf 'map %s\n' "$port" >> "$TAILSCALE_LOG"
 elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
   port=${2#--https=}
@@ -690,7 +696,8 @@ elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
     exit 1
   fi
   printf 'off %s\n' "$port" >> "$TAILSCALE_LOG"
-  if [ -f "$TAILSCALE_STATE" ] && [ "$(cat "$TAILSCALE_STATE")" = "$port" ]; then
+  state=$(cat "$TAILSCALE_STATE")
+  if [ "${state%%|*}" = "$port" ]; then
     : > "$TAILSCALE_STATE"
   fi
 else
@@ -759,6 +766,16 @@ EOF
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
   assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
+  cp "$install_home/config/dash.json" "$prior_config"
+  : > "$tailscale_log"
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19668 PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18848 --serve-port 19668 --captain "$CAPTAIN" >/dev/null 2>&1; then
+    fail "failed reinstall after uninstall was reported as installed"
+  fi
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed reinstall after uninstall did not restore the retained config"
+  [ ! -s "$launchctl_state" ] || fail "failed reinstall after uninstall restored an absent launchd service"
+  [ ! -s "$tailscale_state" ] || fail "failed reinstall after uninstall recreated an absent mapping"
+  assert_no_grep 'map 19553' "$tailscale_log" "failed reinstall after uninstall recreated the removed prior mapping"
   pass "custom serve ports persist and old mappings are removed"
 }
 
