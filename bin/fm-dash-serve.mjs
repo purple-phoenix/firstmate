@@ -1166,9 +1166,9 @@ async function handle(req, res) {
     // stripped launchd environment). Say so loudly rather than presenting
     // degraded data as truth.
     const unknownStates = (dashboard.html.match(/Authoritative current state: unknown/g) || []).length;
-    const manifestRows = (dashboard.html.match(/class="mrow"/g) || []).length;
-    const degraded = unknownStates >= 3 && unknownStates * 2 >= manifestRows;
-    if (degraded) log(`degraded render detected: ${unknownStates} of ${manifestRows} manifest rows read unknown; check the service environment (PATH/tools)`);
+    const authoritativeStates = (dashboard.html.match(/Authoritative current state:/g) || []).length;
+    const degraded = unknownStates >= 3 && unknownStates * 2 >= authoritativeStates;
+    if (degraded) log(`degraded render detected: ${unknownStates} of ${authoritativeStates} authoritative worker states read unknown; check the service environment (PATH/tools)`);
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),

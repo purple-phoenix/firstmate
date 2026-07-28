@@ -673,54 +673,56 @@ function classify(snapshot, environment) {
     });
   }
 
-  // Resolve a blocked backlog item's full blocker chain to its root cause in
-  // plain language, so no blocked row leaves the captain guessing what it
-  // waits on or whether anything is theirs to do.
-  const describeBlockedRecord = (startRecord) => {
-    const waits = [];
-    const seen = new Set();
-    let record = startRecord;
-    for (let hop = 0; hop < 5 && record; hop += 1) {
-      if (record !== startRecord && record.kind === "captain" && record.hold_kind === "captain") {
-        const identity = backlogDecisionIdentity(record);
-        const ref = decisionRef("main", identity.origin, identity.key);
-        waits.push(`waiting on your decision ${ref}`);
-        return { waits, action: `Answer decision ${ref} - it is the root cause.` };
+  const blockedByIds = (record) => String(record.blocked_by || "").split(",").map((id) => id.trim()).filter(Boolean);
+  const describeBlockedRecord = (startRecord, owner, records, tasks = []) => {
+    const recordById = new Map(records.filter((record) => record.structured !== false).map((record) => [record.id, record]));
+    const currentById = new Map(tasks.map((task) => [task.id, task.current_state?.state || task.state]));
+    const resolveBlocker = (blockerId, seen, depth) => {
+      const blockerRef = itemRef(owner, blockerId);
+      if (seen.has(blockerId) || depth >= 5) {
+        return [{ wait: `blocked by ${blockerRef}, whose blocker chain could not be resolved`, action: "Nothing yet - firstmate reconciles this blocker and escalates if your input is needed." }];
       }
-      const gate = futureTimeGate(record, now);
+      const blockerRecord = recordById.get(blockerId) || null;
+      const currentState = currentById.get(blockerId);
+      if (!blockerRecord && !currentState) {
+        return [{ wait: `blocked by ${blockerRef}, whose current state is unavailable`, action: "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed." }];
+      }
+      const prefix = currentState
+        ? `blocked by ${blockerRef}, which is currently ${safeState(currentState)}`
+        : `blocked by ${blockerRef}, which is ${blockerRecord.state === "in_flight" ? "under way" : "queued and not started"}`;
+      if (blockerRecord?.kind === "captain" && blockerRecord.hold_kind === "captain") {
+        const identity = backlogDecisionIdentity(blockerRecord);
+        const ref = decisionRef(owner, identity.origin, identity.key);
+        return [{ wait: `${prefix}; then waiting on your decision ${ref}`, action: `Answer decision ${ref} - it is the root cause.` }];
+      }
+      const gate = blockerRecord && futureTimeGate(blockerRecord, now);
       if (gate) {
-        waits.push(`waiting until ${gate}`);
-        return { waits, action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
+        return [{ wait: `${prefix}; then waiting until ${gate}`, action: `Nothing - this unblocks itself when the ${gate} time gate passes.` }];
       }
-      if (!record.blocked_by) {
-        if (record.hold_reason) {
-          waits.push("held by a structured hold");
-          return { waits, action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
-        }
-        break;
+      const nestedIds = blockerRecord ? blockedByIds(blockerRecord) : [];
+      if (nestedIds.length > 0) {
+        const nextSeen = new Set(seen).add(blockerId);
+        return nestedIds.flatMap((id) => resolveBlocker(id, nextSeen, depth + 1).map((root) => ({
+          wait: `${prefix}; then ${root.wait}`,
+          action: root.action,
+        })));
       }
-      const blockerId = record.blocked_by;
-      if (seen.has(blockerId)) break;
-      seen.add(blockerId);
-      const blockerTask = taskById.get(blockerId);
-      const blockerRecord = mainRecords.find((entry) => entry.structured && entry.id === blockerId) || null;
-      const blockerRef = itemRef("main", blockerId);
-      if (blockerTask) {
-        waits.push(`blocked by ${blockerRef} which is currently ${safeState(blockerTask.current_state?.state)}`);
-      } else if (blockerRecord) {
-        const nextHop = blockerRecord.blocked_by || futureTimeGate(blockerRecord, now) || (blockerRecord.kind === "captain" && blockerRecord.hold_kind === "captain");
-        waits.push(`blocked by ${blockerRef} which is ${blockerRecord.state === "in_flight" ? "under way" : "queued and not started"}${nextHop ? "" : ""}`);
-      } else {
-        waits.push(`blocked by ${blockerRef} whose current state is unavailable`);
-        return { waits, action: "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed." };
+      if (blockerRecord?.hold_reason) {
+        return [{ wait: `${prefix}; then held by a structured hold`, action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." }];
       }
-      if (!blockerRecord || (!blockerRecord.blocked_by && !futureTimeGate(blockerRecord, now) && !(blockerRecord.kind === "captain" && blockerRecord.hold_kind === "captain"))) {
-        return { waits, action: `Nothing - this unblocks itself when ${blockerRef} finishes.` };
-      }
-      record = blockerRecord;
+      return [{ wait: prefix, action: `Nothing - this unblocks itself when ${blockerRef} finishes.` }];
+    };
+    const blockerIds = blockedByIds(startRecord);
+    if (blockerIds.length === 0) {
+      const gate = futureTimeGate(startRecord, now);
+      if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
+      return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
     }
-    if (waits.length === 0) waits.push("its blocker could not be resolved from the structured queue");
-    return { waits, action: "Nothing yet - firstmate reconciles this blocker and escalates if your input is needed." };
+    const roots = blockerIds.flatMap((id) => resolveBlocker(id, new Set(), 0));
+    return {
+      waits: roots.map((root) => root.wait),
+      action: [...new Set(roots.map((root) => root.action))].join(" "),
+    };
   };
 
   const queue = mainRecords.filter((record) => record.state === "queued");
@@ -749,8 +751,10 @@ function classify(snapshot, environment) {
       continue;
     }
     if (record.blocked_by || record.hold_reason) {
-      const reason = record.blocked_by ? `Blocked by ${itemRef("main", record.blocked_by)}` : "Structured hold";
-      const chain = describeBlockedRecord(record);
+      const reason = record.blocked_by
+        ? `Blocked by ${blockedByIds(record).map((id) => itemRef("main", id)).join(", ")}`
+        : "Structured hold";
+      const chain = describeBlockedRecord(record, "main", mainRecords, snapshot.tasks || []);
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
       pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
         waits_on: chain.waits,
@@ -810,7 +814,7 @@ function classify(snapshot, environment) {
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
-      if ((decision.key || "default") === "default" && !decision.id) continue;
+      if (!decision.key || decision.key === "default") continue;
       decisions.push({
         owner: ownerRef(mate.id),
         task: itemRef(mate.id, decision.id || mate.id),
@@ -831,7 +835,11 @@ function classify(snapshot, environment) {
       }
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
-      pipeline.blocked.push(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"));
+      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mate.active_children || []);
+      pipeline.blocked.push(Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
+        waits_on: chain.waits,
+        what_you_can_do: chain.action,
+      }));
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
       }
@@ -870,21 +878,35 @@ function classify(snapshot, environment) {
       if (isSuperseded(record) || heldIds.has(record.id)) continue;
       secondmateQueuedConsidered += 1;
       if (record.kind === "captain" && record.hold_kind === "captain") {
+        const identity = backlogDecisionIdentity(record);
+        const ref = decisionRef(mate.id, identity.origin, identity.key);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Captain hold"));
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", "Captain hold"), {
+          waits_on: [`waiting on your decision ${ref}`],
+          what_you_can_do: `Answer decision ${ref} - it is the root cause.`,
+        }));
         continue;
       }
       if (record.blocked_by || record.hold_reason) {
-        const reason = record.blocked_by ? `Blocked by ${itemRef(mate.id, record.blocked_by)}` : "Structured hold";
+        const reason = record.blocked_by
+          ? `Blocked by ${blockedByIds(record).map((id) => itemRef(mate.id, id)).join(", ")}`
+          : "Structured hold";
+        const chain = describeBlockedRecord(record, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mate.active_children || []);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+          waits_on: chain.waits,
+          what_you_can_do: chain.action,
+        }));
         continue;
       }
       const timeGate = futureTimeGate(record, now);
       if (timeGate) {
         const reason = `time gate until ${timeGate}`;
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+          waits_on: [`waiting until ${timeGate}`],
+          what_you_can_do: `Nothing - this unblocks itself when the ${timeGate} time gate passes.`,
+        }));
         continue;
       }
       const gaps = definitionGaps(record, true);
@@ -1336,7 +1358,7 @@ function artifact(value) {
 // captain action (or explicit nothing-to-do), rendered under a blocked row.
 function blockedContext(card) {
   if (!card.waits_on || card.waits_on.length === 0) return "";
-  const chain = card.waits_on.map((wait) => h(wait)).join("; then ");
+  const chain = card.waits_on.map((wait) => h(wait)).join("; ");
   const action = card.what_you_can_do ? `<small class="cando">What you can do: ${h(card.what_you_can_do)}</small>` : "";
   return `<small class="chain">${chain}.</small>${action}`;
 }

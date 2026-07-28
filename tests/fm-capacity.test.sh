@@ -547,20 +547,28 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
     ]
     |
     .secondmate_current.records[0].decisions_open = [
+      {"id":"mate-question","key":"default","verb":"needs-decision","summary":"Sensitive question","source":"child-state"},
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
-    | .secondmate_current.records[0].queued += [
-      {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"}
+    | .secondmate_current.records[0].holds = [
+      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","source":"child-state"}
     ]
-    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":1,"holds":0,"queued":2}
+    | .secondmate_current.records[0].queued += [
+      {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"},
+      {"id":"mate-structured","title":"Wait on a structured hold","repo":"delta","project_resolved":true,"kind":"ship","hold_reason":"Sensitive reason"},
+      {"id":"mate-time","title":"Resume after 2026-08-15","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: resume safely."}
+    ]
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":1,"queued":4}
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 5
+    (.pipeline.blocked | length) == 8
     and .measures.open_captain_actions == 4
     and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 4
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .what_you_can_do] | all(type == "string" and length > 0))
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
   [ "$(grep -o 'class="verb verb-decide"' "$output" | wc -l | tr -d ' ')" = 4 ] ||
     fail "captain decisions were collapsed or duplicated in the needs-you roll call"
@@ -923,7 +931,8 @@ test_keyless_questions_and_blocker_chains() {
       {"order":2,"state":"in_flight","structured":true,"id":"keyed-asker","title":"Build the API","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: API ships."},
       {"order":3,"state":"queued","structured":true,"id":"dependent","title":"Publish the dependent release","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"asker","blocked_reason":"needs exporter","body_excerpt":"Acceptance criteria: release ships."},
       {"order":4,"state":"queued","structured":true,"id":"policy-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast"},
-      {"order":5,"state":"queued","structured":true,"id":"after-policy","title":"Apply the rollout policy","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: rollout applied."}
+      {"order":5,"state":"queued","structured":true,"id":"after-policy","title":"Apply the rollout policy","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: rollout applied."},
+      {"order":6,"state":"queued","structured":true,"id":"multi-dependent","title":"Publish after two blockers","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"asker,missing-root","body_excerpt":"Acceptance criteria: both blockers clear."}
     ]
     | .tasks = [
       {"id":"asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting reply"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision","summary":"which port should the exporter bind"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
@@ -943,6 +952,8 @@ test_keyless_questions_and_blocker_chains() {
     and ([.pipeline.blocked[] | select(.waits_on != null) | .waits_on[0]] | any(contains("waiting on your decision")))
     and ([.pipeline.blocked[] | .what_you_can_do // ""] | any(contains("unblocks itself when")))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("blocked by") and contains("currently")))
+    and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2)] | length) == 1
+    and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2) | .waits_on | join(" ")] | .[0] | contains("unavailable"))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("which port")) | not)
   ' >/dev/null || fail "keyless questions or blocker chains are wrong: $json"
   html=$(cat "$output")
