@@ -77,7 +77,8 @@ function usage(exitCode = 0) {
 
 Serve the FM_HOME capacity dashboard on 127.0.0.1 for a tailnet-only
 tailscale serve proxy. Config lives in config/dash.json:
-  {"port": 8847, "captain_logins": ["captain@example.com"],
+  {"port": 8847, "serve_port": 8443,
+   "captain_logins": ["captain@example.com"],
    "read_only": false, "auto_refresh_seconds": 900}
 --port overrides the configured port. read_only=true refuses dispatch and
 serves the page without send buttons, for running the service before command

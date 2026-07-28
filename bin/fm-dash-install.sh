@@ -138,16 +138,35 @@ assert_no_funnel() {
 }
 
 write_config() {
-  local port=$1 read_only=$2
-  shift 2
+  local port=$1 serve_port=$2 read_only=$3
+  shift 3
   mkdir -p "$CONFIG_DIR"
   node -e '
     const fs = require("node:fs");
-    const [config, port, readOnly, ...logins] = process.argv.slice(1);
-    const payload = { port: Number(port), captain_logins: logins, read_only: readOnly === "true" };
+    const [config, port, servePort, readOnly, ...logins] = process.argv.slice(1);
+    const payload = { port: Number(port), serve_port: Number(servePort), captain_logins: logins, read_only: readOnly === "true" };
     fs.writeFileSync(config, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  ' "$CONFIG" "$port" "$read_only" "$@" || err "could not write $CONFIG"
+  ' "$CONFIG" "$port" "$serve_port" "$read_only" "$@" || err "could not write $CONFIG"
   chmod 600 "$CONFIG" 2>/dev/null || true
+}
+
+configured_serve_port() {
+  [ -f "$CONFIG" ] || return 0
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const port = parsed.serve_port === undefined ? Number(process.argv[2]) : parsed.serve_port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) process.exit(1);
+      console.log(port);
+    } catch {
+      process.exit(1);
+    }
+  ' "$CONFIG" "$DEFAULT_SERVE_PORT"
+}
+
+disable_serve_port() {
+  "$(tailscale_bin)" serve --https="$1" off >/dev/null 2>&1 || true
 }
 
 render_plist() {
@@ -211,7 +230,7 @@ unregister_check() {
 }
 
 cmd_install() {
-  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT read_only=false captains=() label plist_path node_path dnsname
+  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT previous_serve_port read_only=false captains=() label plist_path node_path dnsname
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -225,6 +244,7 @@ cmd_install() {
   command -v launchctl >/dev/null 2>&1 || err "launchctl is required"
   node_path=$(node_bin)
   tailscale_bin >/dev/null
+  previous_serve_port=$(configured_serve_port) || err "could not read the previously configured dashboard serve port"
 
   if [ "${#captains[@]}" -eq 0 ]; then
     local self_login
@@ -232,7 +252,7 @@ cmd_install() {
     captains=("$self_login")
   fi
 
-  write_config "$port" "$read_only" "${captains[@]}"
+  write_config "$port" "$serve_port" "$read_only" "${captains[@]}"
   if [ "$read_only" = true ]; then
     unregister_check
   else
@@ -255,8 +275,11 @@ cmd_install() {
   "$(tailscale_bin)" serve --bg --https="$serve_port" "http://127.0.0.1:$port" >/dev/null \
     || err "tailscale serve refused the mapping; is tailscale up?"
   if ! assert_no_funnel "$serve_port"; then
-    "$(tailscale_bin)" serve --https="$serve_port" off >/dev/null 2>&1 || true
+    disable_serve_port "$serve_port"
     err "could not verify tailnet-only exposure for port $serve_port; the mapping was removed - this service must stay tailnet-only"
+  fi
+  if [ -n "$previous_serve_port" ] && [ "$previous_serve_port" != "$serve_port" ]; then
+    disable_serve_port "$previous_serve_port"
   fi
 
   dnsname=$(tailscale_self_dnsname) || err "could not resolve this machine's tailnet name"
@@ -266,7 +289,7 @@ cmd_install() {
 }
 
 cmd_uninstall() {
-  local serve_port=$DEFAULT_SERVE_PORT label plist_path
+  local serve_port="" configured_port label plist_path
   while [ $# -gt 0 ]; do
     case "$1" in
       --serve-port) serve_port=${2:?--serve-port needs a value}; shift 2 ;;
@@ -274,10 +297,15 @@ cmd_uninstall() {
     esac
   done
   [ "$(uname)" = Darwin ] || err "uninstall requires macOS launchd"
+  configured_port=$(configured_serve_port) || err "could not read the configured dashboard serve port"
+  [ -n "$serve_port" ] || serve_port=${configured_port:-$DEFAULT_SERVE_PORT}
   label=$(home_label)
   plist_path="$HOME/Library/LaunchAgents/$label.plist"
   if command -v tailscale >/dev/null 2>&1; then
-    tailscale serve --https="$serve_port" off >/dev/null 2>&1 || true
+    disable_serve_port "$serve_port"
+    if [ -n "$configured_port" ] && [ "$configured_port" != "$serve_port" ]; then
+      disable_serve_port "$configured_port"
+    fi
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   rm -f "$plist_path"

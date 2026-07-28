@@ -603,7 +603,7 @@ test_installer_plist_and_funnel_stance() {
   assert_contains "$funnel_check" 'unsupported tailscale serve status schema' "Funnel verification does not reject unexpected schemas"
   assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
   assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
-  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'serve --https="$serve_port" off' "failed Funnel verification does not tear down the mapping"
+  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'disable_serve_port "$serve_port"' "failed Funnel verification does not tear down the mapping"
   assert_contains "$(sed -n '/write_config .*port/,/label=/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
   assert_contains "$(sed -n '/^cmd_uninstall()/,/^cmd_status()/p' "$INSTALL_SH")" 'unregister_check' "uninstall does not unregister the watcher"
   escaped_home="$HOME_DIR/xml & < >"
@@ -611,6 +611,63 @@ test_installer_plist_and_funnel_stance() {
   assert_contains "$plist" "$HOME_DIR/xml &amp; &lt; &gt;" "plist did not XML-escape FM_HOME"
   assert_contains "$plist" "$HOME_DIR/root &amp; &lt; &gt;/bin/fm-dash-serve.mjs" "plist did not XML-escape the executable path"
   pass "the launchd agent survives reboots and the installer is structurally funnel-free"
+}
+
+test_installer_tracks_custom_serve_port() {
+  local fake_bin install_home launch_home tailscale_log tailscale_state
+  fake_bin="$TMP_ROOT/fake-bin"
+  install_home="$TMP_ROOT/install-home"
+  launch_home="$TMP_ROOT/launch-home"
+  tailscale_log="$TMP_ROOT/tailscale.log"
+  tailscale_state="$TMP_ROOT/tailscale.state"
+  mkdir -p "$fake_bin" "$install_home" "$launch_home"
+  cat > "$fake_bin/uname" <<'EOF'
+#!/bin/sh
+echo Darwin
+EOF
+  cat > "$fake_bin/launchctl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  cat > "$fake_bin/tailscale" <<'EOF'
+#!/bin/sh
+if [ "$1" = status ] && [ "${2:-}" = --json ]; then
+  printf '%s\n' '{"Self":{"UserID":1,"DNSName":"dash.tail.ts.net."},"User":{"1":{"LoginName":"captain@example.com"}}}'
+elif [ "$1" = serve ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
+  port=$(cat "$TAILSCALE_STATE")
+  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{}},"AllowFunnel":{"dash.tail.ts.net:%s":false}}\n' "$port" "$port" "$port"
+elif [ "$1" = serve ] && [ "${2:-}" = --bg ]; then
+  port=${3#--https=}
+  printf '%s\n' "$port" > "$TAILSCALE_STATE"
+  printf 'map %s\n' "$port" >> "$TAILSCALE_LOG"
+elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
+  port=${2#--https=}
+  printf 'off %s\n' "$port" >> "$TAILSCALE_LOG"
+  if [ -f "$TAILSCALE_STATE" ] && [ "$(cat "$TAILSCALE_STATE")" = "$port" ]; then
+    : > "$TAILSCALE_STATE"
+  fi
+else
+  exit 1
+fi
+EOF
+  chmod 700 "$fake_bin/uname" "$fake_bin/launchctl" "$fake_bin/tailscale"
+  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19443 --captain "$CAPTAIN" >/dev/null \
+    || fail "custom-port install failed"
+  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
+    || fail "install did not persist the custom serve port"
+  : > "$tailscale_log"
+  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19553 --captain "$CAPTAIN" >/dev/null \
+    || fail "custom-port replacement install failed"
+  assert_grep 'off 19443' "$tailscale_log" "port-change install did not remove the recorded previous mapping"
+  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19553) process.exit(1)' "$install_home/config/dash.json" \
+    || fail "replacement install did not persist the active serve port"
+  : > "$tailscale_log"
+  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
+  assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
+  pass "custom serve ports persist and old mappings are removed"
 }
 
 test_service_contract_docs_and_ownership() {
@@ -646,6 +703,7 @@ test_inbox_list_claim_and_archive
 test_read_only_mode_fails_safe
 test_check_shim_wakes_only_when_pending
 test_installer_plist_and_funnel_stance
+test_installer_tracks_custom_serve_port
 test_service_contract_docs_and_ownership
 
 echo "fm-dash tests passed"
