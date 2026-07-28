@@ -280,27 +280,6 @@ outcome: failed
 EOF
 }
 
-run_failed_at() {  # <branch> <epoch>
-  run_failed "$1"
-  printf 'updated_at: %s\n' "$2"
-}
-
-# Format a Unix epoch as an ISO-8601 UTC instant (trailing Z), portably.
-iso_utc() {  # <epoch>
-  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
-}
-
-run_failed_iso() {  # <branch> <iso-utc>
-  run_failed "$1"
-  printf 'updated_at: %s\n' "$2"
-}
-
-run_passed_at() {  # <branch> <epoch>
-  run_passed "$1"
-  printf 'updated_at: %s\n' "$2"
-}
-
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -694,87 +673,7 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# Trailing paused: outranks a terminal historical run-step. A failed past run is
-# not evidence the pane needs attention; without this override the watcher treats
-# absorb class as none and resurfaces the idle pane on every poll (worse than a
-# terminal done: line, which at least takes the surfaced-once path).
-test_paused_outranks_terminal_failed_run() {
-  reset_fakes
-  local d; d=$(new_case paused-over-failed)
-  make_repo_on_branch "$d/wt" fm/feat-pause-fail
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-pause-fail.meta" "window=fm:fm-feat-pause-fail" "worktree=$d/wt" "kind=ship"
-  printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-fail.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-pause-fail)"
-  FM_FAKE_RUNS_LIST='completed fm/feat-pause-fail abc1234 2000-01-01 00:00'
-  FM_FAKE_BUSY=0
-  local out; out=$(run_crew_state "$d" feat-pause-fail)
-  assert_contains "$out" "state: paused" "trailing paused outranks terminal failed run"
-  assert_contains "$out" "source: status-log" "pause-over-failed uses status-log source"
-  assert_contains "$out" "holding for provider recovery" "pause reason is preserved"
-  assert_contains "$out" "historical run failed" "detail notes the historical failed run"
-  assert_not_contains "$out" "state: failed" "must not report failed over trailing paused"
-  pass "trailing paused: outranks a terminal failed historical run-step"
-}
-
-# The pause-strictly-newer comparison parses an ISO-8601 Z run timestamp into a
-# Unix epoch and compares it against the pause file's real mtime. That parse must
-# treat the trailing Z as UTC regardless of the machine's local timezone; a
-# west-of-UTC parse that ignores Z shifts the run epoch forward by the local
-# offset and can flip a genuinely-older run into a spuriously-newer one, wrongly
-# suppressing the pause. Pin a west-of-UTC zone and place the run two hours before
-# the fresh pause file: the correct UTC parse keeps the run older (pause wins),
-# while an offset-skewed parse would push it past the pause and report failed.
-test_paused_outranks_terminal_failed_run_iso_ts_tz() {
-  reset_fakes
-  local d; d=$(new_case paused-over-failed-iso-tz)
-  make_repo_on_branch "$d/wt" fm/feat-pause-iso
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-pause-iso.meta" "window=fm:fm-feat-pause-iso" "worktree=$d/wt" "kind=ship"
-  printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-iso.status"
-  local now iso; now=$(date +%s); iso=$(iso_utc "$((now - 7200))")
-  FM_FAKE_AXI_STATUS="$(run_failed_iso fm/feat-pause-iso "$iso")"
-  FM_FAKE_BUSY=0
-  local out; out=$(TZ=America/New_York run_crew_state "$d" feat-pause-iso)
-  assert_contains "$out" "state: paused" "trailing paused outranks older ISO-Z failed run under west-of-UTC tz"
-  assert_not_contains "$out" "state: failed" "west-of-UTC Z parse must not flip an older run into a newer one"
-  pass "trailing paused: outranks an older ISO-Z terminal run regardless of local timezone"
-}
-
-test_paused_outranks_terminal_passed_run() {
-  reset_fakes
-  local d; d=$(new_case paused-over-passed)
-  make_repo_on_branch "$d/wt" fm/feat-pause-pass
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-pause-pass.meta" "window=fm:fm-feat-pause-pass" "worktree=$d/wt" "kind=ship"
-  printf 'paused: waiting on an upstream release\n' > "$d/state/feat-pause-pass.status"
-  FM_FAKE_AXI_STATUS="$(run_passed_at fm/feat-pause-pass 1)"
-  FM_FAKE_BUSY=0
-  local out; out=$(run_crew_state "$d" feat-pause-pass)
-  assert_contains "$out" "state: paused" "trailing paused outranks terminal passed run"
-  assert_contains "$out" "source: status-log" "pause-over-passed uses status-log source"
-  assert_contains "$out" "historical run done" "detail notes the historical done run"
-  assert_not_contains "$out" "state: done" "must not report done over trailing paused"
-  pass "trailing paused: outranks a terminal passed historical run-step"
-}
-
-
-test_newer_terminal_run_outranks_older_pause() {
-  reset_fakes
-  local d; d=$(new_case newer-failure-over-pause)
-  make_repo_on_branch "$d/wt" fm/feat-new-fail
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-new-fail.meta" "window=fm:fm-feat-new-fail" "worktree=$d/wt" "kind=ship"
-  printf 'paused: old provider wait\n' > "$d/state/feat-new-fail.status"
-  FM_FAKE_AXI_STATUS="$(run_failed_at fm/feat-new-fail 4102444800)"
-  local out; out=$(run_crew_state "$d" feat-new-fail)
-  assert_contains "$out" "state: failed" "newer terminal failure outranks older pause"
-  assert_contains "$out" "source: run-step" "newer failure remains run-step sourced"
-  assert_not_contains "$out" "state: paused" "older pause must not hide newer failure"
-  pass "a newer terminal run outranks an older pause declaration"
-}
-
-test_unordered_terminal_run_outranks_pause() {
+test_terminal_run_outranks_paused_status() {
   reset_fakes
   local d; d=$(new_case unordered-failure-over-pause)
   make_repo_on_branch "$d/wt" fm/feat-unordered-fail
@@ -782,14 +681,13 @@ test_unordered_terminal_run_outranks_pause() {
   fm_write_meta "$d/state/feat-unordered-fail.meta" "window=fm:fm-feat-unordered-fail" "worktree=$d/wt" "kind=ship"
   printf 'paused: provider wait with unknown ordering\n' > "$d/state/feat-unordered-fail.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unordered-fail)"
-  FM_FAKE_RUNS_LIST='completed fm/feat-unordered-fail deadbee 2000-01-01 00:00'
   local out; out=$(run_crew_state "$d" feat-unordered-fail)
-  assert_contains "$out" "state: failed" "terminal run wins when ordering is unavailable"
-  assert_not_contains "$out" "state: paused" "unproven pause must not hide failure"
-  pass "an unordered terminal run outranks a pause declaration"
+  assert_contains "$out" "state: failed" "terminal run outranks trailing pause"
+  assert_not_contains "$out" "state: paused" "trailing pause must not hide failure"
+  pass "terminal run-step outranks trailing paused: status"
 }
 
-# Live run-step still beats a trailing paused: declaration (run-step precedence).
+# Run-step precedence also applies to a live run.
 test_running_run_outranks_paused_status() {
   reset_fakes
   local d; d=$(new_case running-over-paused)
@@ -1316,11 +1214,7 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_paused_outranks_terminal_failed_run
-test_paused_outranks_terminal_failed_run_iso_ts_tz
-test_paused_outranks_terminal_passed_run
-test_newer_terminal_run_outranks_older_pause
-test_unordered_terminal_run_outranks_pause
+test_terminal_run_outranks_paused_status
 test_running_run_outranks_paused_status
 test_terminal_failed_last_line_unchanged_with_failed_run
 test_terminal_done_last_line_unchanged_with_passed_run
