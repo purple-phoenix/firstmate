@@ -13,8 +13,14 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+tasks_axi() {
+  (cd "$FM_HOME" && tasks-axi "$@")
+}
 
 usage() {
   sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
@@ -37,6 +43,7 @@ done
 if [ "$MINT" -eq 0 ]; then
   ID=${1-}
   fm_task_id_creation_check "$ID" || exit 2
+  cd "$FM_HOME"
   exec tasks-axi add "$@"
 fi
 
@@ -103,7 +110,7 @@ fi
 
 ATTEMPT=0
 while [ "$ATTEMPT" -lt 256 ]; do
-  MINT_JSON=$(tasks-axi add "${MINT_ARGS[@]}") || exit 1
+  MINT_JSON=$(tasks_axi add "${MINT_ARGS[@]}") || exit 1
   ID=$(printf '%s' "$MINT_JSON" | node -e '
     let input = "";
     process.stdin.on("data", chunk => { input += chunk; });
@@ -143,8 +150,9 @@ while [ "$ATTEMPT" -lt 256 ]; do
   fi
 
   fm_task_id_creation_check "$ID" || exit 2
-  if ! tasks-axi show "$ID" "${STORE_ARGS[@]}" >/dev/null 2>&1; then
-    exec tasks-axi add "$ID" "$TITLE" "${FORWARD[@]}"
+  if ! tasks_axi show "$ID" ${STORE_ARGS[@]+"${STORE_ARGS[@]}"} >/dev/null 2>&1; then
+    cd "$FM_HOME"
+    exec tasks-axi add "$ID" "$TITLE" ${FORWARD[@]+"${FORWARD[@]}"}
   fi
   ATTEMPT=$((ATTEMPT + 1))
 done

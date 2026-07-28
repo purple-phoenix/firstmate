@@ -65,5 +65,22 @@ test_creation_boundaries() {
   pass "creation validator accepts 64 and clearly rejects 65 before mutation"
 }
 
+test_default_home_and_empty_mint_flags() {
+  local home caller out id
+  home="$TMP_ROOT/default-home"
+  caller="$TMP_ROOT/unrelated-caller"
+  mkdir -p "$home/data" "$caller"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  out=$(cd "$caller" && FM_HOME="$home" "$ADD" "Mint without optional flags" --mint --json) \
+    || fail "mint without optional flags failed outside the active home"
+  id=$(printf '%s' "$out" | json_id) || fail "default-home mint result was not valid JSON"
+  tasks-axi show "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail "mint did not write to the active home backlog"
+  [ ! -e "$caller/data/backlog.md" ] \
+    || fail "mint wrote a backlog relative to the caller directory"
+  pass "empty mint flags and active-home backlog selection are safe"
+}
+
 test_overlong_mint_is_dispatchable
 test_creation_boundaries
+test_default_home_and_empty_mint_flags

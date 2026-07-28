@@ -6,6 +6,9 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -455,6 +458,36 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+test_overlong_captain_hold_is_non_dispatchable() {
+  local home origin key hold show out rc
+  home=$(make_home overlong-captain-hold)
+  origin=sample-review-with-a-deliberately-long-deterministic-origin
+  key=release-route-choice
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$origin" "$key" \
+    --title "Choose the sample release route" --reason "captain release route pending" --repo sample) \
+    || fail "overlong captain hold creation failed"
+  [ "${#hold}" -gt "$FM_TASK_ID_MAX_LENGTH" ] \
+    || fail "captain hold fixture was not overlong: $hold"
+  ! fm_task_id_creation_valid "$hold" \
+    || fail "overlong captain hold was accepted as a dispatchable identity"
+  show=$(tasks_in "$home" show "$hold" --full) || fail "overlong captain hold was not created"
+  assert_contains "$show" "kind: captain" "overlong exception was not kind captain"
+  assert_contains "$show" "hold_kind: captain" "overlong exception was not a captain hold"
+
+  set +e
+  out=$(PATH="$home/fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-spawn.sh" "$hold" sample 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "overlong captain hold dispatch returned $rc instead of 2: $out"
+  assert_contains "$out" "maximum is $FM_TASK_ID_MAX_LENGTH" \
+    "overlong captain hold dispatch did not fail at runtime validation"
+  pass "overlong deterministic captain hold remains typed and non-dispatchable"
+}
+
 # tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
 # those surrounding quotes before comma-boundary membership so the first and last
 # list elements match, not only middle elements.
@@ -559,4 +592,5 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_overlong_captain_hold_is_non_dispatchable
 test_resolve_matches_quoted_blocked_by_edges
