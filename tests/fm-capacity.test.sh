@@ -758,10 +758,16 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_present "$output" "capacity dashboard was not written"
   [ "$before" = "$(cksum "$home/data/backlog.md")" ] || fail "capacity run mutated the backlog"
   assert_grep '<meta name="viewport"' "$output" "dashboard lacks responsive viewport metadata"
-  assert_grep 'grid-template-columns:repeat(4,minmax(0,1fr))' "$output" "dashboard pipeline lacks shrink-safe grid tracks"
+  assert_grep 'minmax(0,1fr)' "$output" "dashboard grids lack shrink-safe tracks"
   assert_grep 'overflow-wrap:anywhere' "$output" "dashboard lacks long-token containment"
   assert_grep '@media(max-width:760px)' "$output" "dashboard lacks narrow-width safeguards"
+  assert_grep 'prefers-color-scheme: light' "$output" "dashboard lacks a light-mode theme"
   assert_grep 'class="skip" href="#main"' "$output" "dashboard lacks a keyboard skip link"
+  assert_grep '<body class="sev-' "$output" "dashboard lacks the severity-classed alarm band"
+  assert_grep 'id="needs-you"' "$output" "dashboard lacks the needs-you roll call"
+  assert_grep 'id="blocked-items"' "$output" "dashboard lacks the blocked-items roll call"
+  assert_grep 'class="meterbar"' "$output" "dashboard lacks the working-vs-waiting meter"
+  assert_grep 'Why it waits' "$output" "dashboard lacks the waiting breakdown"
   for stage in queued ready building validating_fixing pr_ci_approval blocked recently_landed; do
     assert_grep "id=\"stage-$stage\"" "$output" "dashboard is missing stage $stage"
   done
