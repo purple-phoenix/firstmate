@@ -572,7 +572,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $backlog.records[]? | select(.state == "queued" and .structured) ]) as $queued_all
     | ([ $queued_all[]
          | select(.kind == "captain" and .hold_kind == "captain" and .hold_reason != null)
-         | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
+         | . as $hold
+         | {id,key:(([($hold.body_excerpt // "" | split("\n")[])
+                       | select(startswith("Decision key: "))
+                       | ltrimstr("Decision key: ")] | first) // $hold.id),verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),

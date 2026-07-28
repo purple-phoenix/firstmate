@@ -40,7 +40,7 @@ make_fixture() {
     "records": [
       {"order":0,"state":"in_flight","structured":true,"id":"active-task","title":"Run the active rollout","repo":"alpha","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: rollout remains observable."},
       {"order":1,"state":"queued","structured":true,"id":"ready-safe","title":"Ship the gamma feature","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
-      {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout"},
+      {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout","body_excerpt":"Origin: active-task\nDecision key: rollout-policy\nState: awaiting captain decision."},
       {"order":3,"state":"queued","structured":true,"id":"blocked-child","title":"Ship after rollout choice","repo":"alpha","project_resolved":true,"kind":"ship","blocked_by":"captain-choice","body_excerpt":"Acceptance criteria: follows the selected rollout."}
     ]
   },
@@ -102,7 +102,7 @@ New crew homes should self-provision in one command.
 Send the captain a nightly fleet digest.
 EOF
   printf '# Faster onboarding pitch\n\nOne command provisions a ready home.\n' > "$home/data/ideas/pitches/IDEA-01.md"
-  cat > "$home/data/decisions/captain-choice.md" <<'EOF'
+  cat > "$home/data/decisions/rollout-policy.md" <<'EOF'
 # Choose the rollout policy
 
 Pick the alpha rollout pace before dependent work starts.
@@ -285,9 +285,12 @@ ref_for() {
 }
 
 test_refs_sidecar_and_rich_work_item_detail() {
-  local ref
+  local ref decision_ref
   assert_present "$HOME_DIR/state/dash-refs.json" "producer did not write the refs sidecar"
   assert_grep 'fm-capacity-refs.v1' "$HOME_DIR/state/dash-refs.json" "refs sidecar lacks its schema"
+  decision_ref=$(ref_for "decision/main/rollout-policy") || fail "captain hold ref did not preserve its filed decision key"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$decision_ref" "$CAPTAIN"
+  assert_contains "$RESP" 'Conservative rollout' "filed captain hold did not resolve its options document"
   ref=$(ref_for "main/ready-safe") || fail "refs sidecar does not map the main work item"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "work item detail failed (got $REQ_STATUS: $RESP)"
@@ -339,6 +342,40 @@ test_decision_detail_options_and_validated_approval() {
   pass "decision documents validate option picks and bounded custom answers"
 }
 
+test_decision_answers_are_qualified_by_owning_home() {
+  local main_ref mate_ref files records file
+  mkdir -p "$HOME_DIR/design/data/decisions"
+  printf 'home=%s\n' "$HOME_DIR/design" > "$HOME_DIR/state/design.meta"
+  cp "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/data/decisions/shared-policy.md"
+  cp "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/design/data/decisions/shared-policy.md"
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const refs = JSON.parse(fs.readFileSync(file, "utf8"));
+    refs.refs["item-90"] = { kind: "item", value: "decision/main/shared-policy" };
+    refs.refs["item-91"] = { kind: "item", value: "decision/design/shared-policy" };
+    fs.writeFileSync(file, `${JSON.stringify(refs, null, 2)}\n`);
+  ' "$HOME_DIR/state/dash-refs.json"
+  main_ref=item-90
+  mate_ref=item-91
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$main_ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "main-home decision answer failed (got $REQ_STATUS: $RESP)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$mate_ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "same-key secondmate decision was wrongly coalesced (got $REQ_STATUS: $RESP)"
+  files=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*item-9[01].json')
+  [ "$(printf '%s\n' "$files" | grep -c .)" = 2 ] || fail "owner-qualified decision answers did not produce two records"
+  records=''
+  while IFS= read -r file; do
+    records="$records$(cat "$file")"
+    rm -f "$file"
+  done <<EOF
+$files
+EOF
+  assert_contains "$records" '"decision_identity": "main/shared-policy"' "main decision record lacks durable owner identity"
+  assert_contains "$records" '"decision_identity": "design/shared-policy"' "secondmate decision record lacks durable owner identity"
+  pass "equal decision keys remain distinct across owning homes"
+}
+
 test_stale_refs_are_disabled() {
   local ref
   ref=$(ref_for "decision/main/runtime-policy") || fail "refs sidecar does not map the decision"
@@ -366,7 +403,7 @@ test_stale_refs_are_disabled() {
 }
 
 test_idea_pitch_and_verdicts() {
-  local record
+  local record prior_name
   req GET "http://127.0.0.1:$PORT/api/detail?idea=IDEA-01" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "idea pitch failed (got $REQ_STATUS: $RESP)"
   assert_contains "$RESP" 'One command provisions' "idea detail lacks the pitch file content"
@@ -377,12 +414,17 @@ test_idea_pitch_and_verdicts() {
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")
   assert_contains "$record" '"idea"' "idea record lacks its kind"
   assert_contains "$record" 'normal backlog lifecycle' "idea approval does not route creation through firstmate"
+  prior_name=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)
+  mkdir -p "$HOME_DIR/state/dash-inbox/archive"
+  cp "$prior_name" "$HOME_DIR/state/dash-inbox/archive/$(basename "$prior_name")"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-01","verdict":"deny"}'
   assert_contains "$RESP" '"replaced"' "newest contradictory idea verdict did not replace the pending verdict"
   [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | wc -l | tr -d ' ')" = 1 ] \
     || fail "verdict replacement left contradictory pending records"
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")
   assert_contains "$record" '"verdict": "deny"' "verdict replacement did not retain the newest choice"
+  [ "$(basename "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")" != "$(basename "$prior_name")" ] \
+    || fail "verdict replacement reused a claimable inbox identity"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-99","verdict":"approve"}'
   [ "$REQ_STATUS" = 404 ] || fail "an unlisted idea was not refused (got $REQ_STATUS)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":"scope it to weekdays only"}'
@@ -465,10 +507,14 @@ EOF
   chmod 700 "$stub_bin/mv"
   out=$(PATH="$stub_bin:$PATH" FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
   assert_contains "$out" 'Approve CAP-06' "claim did not deliver before attempting archive"
+  assert_contains "$out" 'delivered: 1' "failed archive did not report the delivered command"
+  assert_contains "$out" 'archived: 0' "failed archive did not report its archive count"
+  assert_contains "$out" 'idempotency checks' "failed archive omitted the replay handling reminder"
   [ -n "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' 2>/dev/null)" ] \
     || fail "failed archive silently removed the delivered command"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
-  assert_contains "$out" 'claimed: 1' "claim did not claim the pending command"
+  assert_contains "$out" 'delivered: 1' "claim did not report the delivered command"
+  assert_contains "$out" 'archived: 1' "claim did not report the archived command"
   assert_contains "$out" 'Approve CAP-06' "claim omits the command prompt"
   assert_contains "$out" 'authority limits apply' "claim omits the authority boundary reminder"
   [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
@@ -546,6 +592,7 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
   assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
   assert_grep 'data/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the decision-options format"
+  assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
   assert_grep 'secondmate-owned work item deliberately shows only a limited ownership note' "$ROOT/docs/dashboard-service.md" "service doc omits the accepted secondmate detail boundary"
   pass "the service is documented and wired into the operating contract"
 }
@@ -557,6 +604,7 @@ test_subscription_usage_panel
 test_inline_config_is_script_safe
 test_refs_sidecar_and_rich_work_item_detail
 test_decision_detail_options_and_validated_approval
+test_decision_answers_are_qualified_by_owning_home
 test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts
 test_dispatch_writes_one_durable_record

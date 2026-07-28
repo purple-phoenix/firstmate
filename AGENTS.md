@@ -101,7 +101,7 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   fm-dash.check.sh   registered dashboard-service command poll; wakes firstmate while captain dashboard commands are pending (section 7; docs/dashboard-service.md)
-  dash-inbox/        durable captain commands clicked on the served capacity dashboard; claimed exactly once with bin/fm-dash-inbox.sh under the capacity skill
+  dash-inbox/        durable captain commands clicked on the served capacity dashboard; delivered at least once with idempotency checks under the capacity skill
   dash-refs.json     producer-owned private mapping from opaque dashboard references to real identities, written by fm-capacity.mjs --refs for the authenticated dashboard service
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .wake-queue.seq    monotonic wake sequence used to distinguish a normal watcher wake handoff from a silent arm-cycle death

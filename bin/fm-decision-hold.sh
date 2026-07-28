@@ -19,7 +19,7 @@
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>]
+#     --title <title> --reason <reason> --options-file <path> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
@@ -122,6 +122,48 @@ origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
   task_show "$1" >/dev/null 2>&1
+}
+
+validate_options_file() {  # <path> <title>
+  local file=$1 title=$2 bytes document_title
+  [ -f "$file" ] || fail "options file is not a regular file: $file"
+  bytes=$(wc -c < "$file" | tr -d '[:space:]')
+  [ "$bytes" -gt 0 ] && [ "$bytes" -le 131072 ] || fail "options file must contain 1 to 131072 bytes"
+  document_title=$(sed -n 's/^# //p' "$file" | head -1)
+  [ "$document_title" = "$title" ] || fail "options file title must match --title"
+  awk '
+    /^# / && !title { title = 1; next }
+    /^## Options[[:space:]]*$/ { options = 1; next }
+    title && !options && /[^[:space:]]/ { context = 1 }
+    options && /^- (\[recommended\] )?.+[[:space:]]-[[:space:]].+/ { choices += 1 }
+    END { exit !(title && context && options && choices > 0) }
+  ' "$file" || fail "options file must include context and at least one option with its impact"
+}
+
+publish_options_file() {  # <key> <source>
+  local key=$1 source=$2 directory target tmp
+  directory="$DATA/decisions"
+  target="$directory/$key.md"
+  if [ -e "$target" ]; then
+    cmp -s "$source" "$target" || fail "decision options already exist with different content: $target"
+    return 0
+  fi
+  mkdir -p "$directory"
+  chmod 700 "$directory" 2>/dev/null || true
+  tmp=$(mktemp "$directory/.$key.XXXXXX") || fail "could not stage decision options"
+  if ! cp "$source" "$tmp" || ! chmod 600 "$tmp"; then
+    rm -f "$tmp"
+    fail "could not stage decision options: $target"
+  fi
+  if mv -n "$tmp" "$target" && [ ! -e "$tmp" ] && [ -e "$target" ]; then
+    return 0
+  fi
+  if [ -e "$target" ] && cmp -s "$source" "$target"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  fail "could not publish decision options: $target"
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -236,7 +278,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' options_file='' id show state kind existing_title body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -244,6 +286,7 @@ command_hold() {
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
+      --options-file) shift; options_file=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -252,6 +295,7 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
+  [ -z "$options_file" ] || validate_options_file "$options_file" "$title"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -263,7 +307,10 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    [ -z "$options_file" ] || publish_options_file "$key" "$options_file"
   else
+    [ -n "$options_file" ] || fail "new captain hold $id requires --options-file"
+    publish_options_file "$key" "$options_file"
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}

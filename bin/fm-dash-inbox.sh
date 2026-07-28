@@ -11,7 +11,7 @@
 #
 # Usage: fm-dash-inbox.sh [list|claim|pending-count]
 #   list           print pending commands without consuming them
-#   claim          archive and print pending commands for handling
+#   claim          print and archive pending commands for handling
 #   pending-count  print the number of pending commands
 set -u
 
@@ -89,7 +89,8 @@ case "${1:-list}" in
     fi
     mkdir -p "$ARCHIVE"
     chmod 700 "$ARCHIVE" 2>/dev/null || true
-    count=0
+    delivered=0
+    archived=0
     while IFS= read -r f; do
       dest="$ARCHIVE/$(basename "$f")"
       if [ -e "$dest" ]; then
@@ -98,18 +99,20 @@ case "${1:-list}" in
       fi
       [ -e "$f" ] || continue
       print_record "$f"
+      delivered=$((delivered + 1))
       if mv -n -- "$f" "$dest" 2>/dev/null && [ ! -e "$f" ] && [ -e "$dest" ]; then
-        count=$((count + 1))
+        archived=$((archived + 1))
       fi
     done <<EOF
 $files
 EOF
-    if [ "$count" -eq 0 ]; then
+    if [ "$delivered" -eq 0 ]; then
       echo "no pending dashboard commands"
       exit 0
     fi
-    printf 'claimed: %s captain dashboard command(s)\n' "$count"
-    echo "handle each prompt as the captain's approval of that action ID under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
+    printf 'delivered: %s captain dashboard command(s)\n' "$delivered"
+    printf 'archived: %s captain dashboard command(s)\n' "$archived"
+    echo "apply idempotency checks to every delivered prompt, then handle it as the captain's approval of that action ID under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
     prune_archive
     ;;
   *)

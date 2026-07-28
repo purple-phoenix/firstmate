@@ -35,7 +35,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import process from "node:process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -155,9 +155,14 @@ function pendingRecords() {
   for (const name of names.sort()) {
     if (!name.endsWith(".json")) continue;
     try {
-      const record = JSON.parse(fs.readFileSync(path.join(INBOX, name), "utf8"));
+      const file = path.join(INBOX, name);
+      const raw = fs.readFileSync(file, "utf8");
+      const record = JSON.parse(raw);
       if (record && typeof record.id === "string") {
-        Object.defineProperty(record, "_file", { value: path.join(INBOX, name) });
+        Object.defineProperties(record, {
+          _file: { value: file },
+          _digest: { value: createHash("sha256").update(raw).digest("hex") },
+        });
         records.push(record);
       }
     } catch {
@@ -176,11 +181,15 @@ function enqueueCommand(record) {
   return name;
 }
 
-function replaceCommand(file, record) {
-  const tmp = path.join(INBOX, `.tmp-${randomBytes(6).toString("hex")}`);
-  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmp, file);
-  return path.basename(file);
+function removePendingIfUnchanged(record) {
+  try {
+    const raw = fs.readFileSync(record._file, "utf8");
+    if (createHash("sha256").update(raw).digest("hex") !== record._digest) return false;
+    fs.unlinkSync(record._file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- read-only detail assembly -------------------------------------------
@@ -352,6 +361,8 @@ function assembleDetail(ref) {
       type: "decision",
       ref,
       id,
+      decision_home: decision.home,
+      decision_identity: `${decision.home}/${id}`,
       title: document?.title || backlogItem?.title || id,
       description: document?.context || null,
       options: document?.options || [],
@@ -1192,7 +1203,7 @@ async function handle(req, res) {
       }
       const option = hasOption ? detail.options[body.option] : null;
       const pending = pendingRecords();
-      if (pending.some((record) => record.kind === "decision" && record.decision_key === detail.id)) {
+      if (pending.some((record) => record.kind === "decision" && record.decision_identity === detail.decision_identity)) {
         sendJson(res, 200, { status: "already-queued", pending: pending.length });
         return;
       }
@@ -1201,13 +1212,15 @@ async function handle(req, res) {
         kind: "decision",
         id: body.ref,
         decision_key: detail.id,
+        decision_home: detail.decision_home,
+        decision_identity: detail.decision_identity,
         option_text: option?.text || null,
         custom_answer: option ? null : customAnswer,
         requested_by: requesterLogin(req),
         requested_at: new Date().toISOString(),
         prompt: option
-          ? `Captain approved decision ${detail.id}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
-          : `Captain answered decision ${detail.id}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
+          ? `Captain approved decision ${detail.id} in ${detail.decision_home}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
+          : `Captain answered decision ${detail.id} in ${detail.decision_home}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
       };
       const name = enqueueCommand(record);
       log(`queued decision ${detail.id} as ${name} for ${record.requested_by}`);
@@ -1254,9 +1267,10 @@ async function handle(req, res) {
         requested_at: new Date().toISOString(),
         prompt: `Captain ${verbs[verdict]} idea ${idea.id} (${idea.title}).${suggestion ? ` Captain suggestion text: ${suggestion}` : ""}${verdict === "approve" ? " Create the follow-up work item(s) through the normal backlog lifecycle." : ""}`,
       };
-      const name = priorVerdict ? replaceCommand(priorVerdict._file, record) : enqueueCommand(record);
+      const name = enqueueCommand(record);
+      if (priorVerdict) removePendingIfUnchanged(priorVerdict);
       log(`queued idea ${idea.id} ${verdict} as ${name} for ${record.requested_by}`);
-      sendJson(res, 200, { status: priorVerdict ? "replaced" : "queued", pending: pending.length + (priorVerdict ? 0 : 1) });
+      sendJson(res, 200, { status: priorVerdict ? "replaced" : "queued", pending: pendingRecords().length });
       return;
     }
 

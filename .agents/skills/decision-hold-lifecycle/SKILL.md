@@ -14,6 +14,8 @@ This skill is the single policy owner for unresolved captain decisions discovere
 
 ## Policy
 
+Before filing a new decision, author its title, context, options, and per-option impacts in the format owned by `docs/dashboard-service.md`, then pass that file to `bin/fm-decision-hold.sh hold --options-file`; legacy holds that already exist without a document remain answer-in-chat decisions.
+
 Every unresolved decision that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must become a structured captain-held work item in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 The agent performs the semantic inventory because scripts must not infer decisions from report prose, visual-review artifacts, terminal output, or chat.
 Give each distinct unresolved decision a stable privacy-safe key, register it through `bin/fm-decision-hold.sh hold`, and use the same key on retry so registration is idempotent while different decisions retain different durable identities.
@@ -29,7 +31,7 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain.
-3. For each choice, choose a stable key and use the script's `hold` command with a concise title, reason, and repository.
+3. For each choice, choose a stable key, author its options document, and use the script's `hold --options-file` command with a concise title, reason, and repository.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. After the captain decides, record dependent work with normal tasks-axi commands and block it by the hold identity.

@@ -391,6 +391,11 @@ function decisionRef(owner, id) {
   return opaqueRef("item", `decision/${owner}/${id}`);
 }
 
+function backlogDecisionKey(record) {
+  const match = String(record.body_excerpt || "").match(/(?:^|\n)Decision key:\s*([A-Za-z0-9._-]+)/);
+  return match ? match[1] : record.id;
+}
+
 function ownerRef(owner) {
   if (owner === "main" || owner === "ephemeral worker") return owner;
   return `persistent ${opaqueRef("home", String(owner).replace(/^secondmate\s+/, ""))}`;
@@ -645,7 +650,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: "main",
         task: itemRef("main", record.id),
-        key: decisionRef("main", record.id),
+        key: decisionRef("main", backlogDecisionKey(record)),
         reason: "A queued choice is held for your decision.",
       });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
