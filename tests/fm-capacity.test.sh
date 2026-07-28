@@ -939,7 +939,13 @@ test_keyless_questions_and_blocker_chains() {
       {"order":10,"state":"queued","structured":true,"id":"deep-3","title":"Deep dependency three","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-4","body_excerpt":"Acceptance criteria: continue."},
       {"order":11,"state":"queued","structured":true,"id":"deep-4","title":"Deep dependency four","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-5","body_excerpt":"Acceptance criteria: continue."},
       {"order":12,"state":"queued","structured":true,"id":"deep-5","title":"Deep dependency five","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"deep-6","body_excerpt":"Acceptance criteria: continue."},
-      {"order":13,"state":"queued","structured":true,"id":"deep-6","title":"Deep dependency six","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."}
+      {"order":13,"state":"queued","structured":true,"id":"deep-6","title":"Deep dependency six","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."},
+      {"order":14,"state":"queued","structured":true,"id":"behind-keyed-worker","title":"Publish after the API decision","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"keyed-asker","body_excerpt":"Acceptance criteria: the API decision clears."},
+      {"order":15,"state":"done","structured":true,"id":"finished-root","title":"Already finished dependency","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: finished."},
+      {"order":16,"state":"queued","structured":true,"id":"stale-dependent","title":"Reconcile a stale dependency","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"finished-root","body_excerpt":"Acceptance criteria: stale edge clears."},
+      {"order":17,"state":"queued","structured":true,"id":"branching-dependent","title":"Publish after converging branches","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"branch-a,branch-b","blocked_by_all":["branch-a","branch-b"],"body_excerpt":"Acceptance criteria: both branches clear."},
+      {"order":18,"state":"queued","structured":true,"id":"branch-a","title":"First decision branch","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."},
+      {"order":19,"state":"queued","structured":true,"id":"branch-b","title":"Second decision branch","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."}
     ]
     | .tasks = [
       {"id":"asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting reply"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision","summary":"which port should the exporter bind"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
@@ -957,7 +963,6 @@ test_keyless_questions_and_blocker_chains() {
     (.pipeline.blocked | map(select(.reason | contains("Worker question being handled in chat"))) | length) == 1
     and (.pipeline.blocked | map(select(.reason | contains("Worker question"))) | .[0].what_you_can_do | contains("firstmate is handling"))
     and ([.pipeline.blocked[] | select(.waits_on != null) | .waits_on[0]] | any(contains("waiting on your decision")))
-    and ([.pipeline.blocked[] | .what_you_can_do // ""] | any(contains("unblocks itself when")))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("blocked by") and contains("currently")))
     and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2)] | length) == 1
     and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2) | .waits_on | join(" ")] | .[0] | contains("unavailable"))
@@ -965,6 +970,16 @@ test_keyless_questions_and_blocker_chains() {
       ((.waits_on // [] | join(" ")) as $chain
        | ([$chain | scan("blocked by")] | length) >= 6
          and ($chain | contains("waiting on your decision"))))
+    and any(.pipeline.blocked[];
+      ((.waits_on // [] | join(" ")) | contains("currently blocked")
+       and contains("waiting on your decision")))
+    and any(.pipeline.blocked[];
+      ((.waits_on // [] | join(" ")) | contains("dependency edge is stale"))
+      and .what_you_can_do == "Nothing yet - firstmate reconciles this stale dependency")
+    and any(.pipeline.blocked[];
+      (.reason | contains(","))
+      and ((.waits_on // []) | length) == 1
+      and ((.waits_on | join(" ")) | contains("waiting on your decision")))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("which port")) | not)
   ' >/dev/null || fail "keyless questions or blocker chains are wrong: $json"
   html=$(cat "$output")

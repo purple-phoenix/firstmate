@@ -586,6 +586,53 @@ function classify(snapshot, environment) {
   if (registry?.available === false || registry?.complete === false) {
     markUnavailable("secondmate-registry", "main", "registry projection incomplete");
   }
+  const taskRootContext = (task, owner, dependency = false) => {
+    const open = task.hints?.open_decisions || [];
+    const state = safeState(task.current_state?.state || task.state);
+    const chatQuestion = open.some((decision) => !decision.key || decision.key === "default");
+    const keyedDecision = open.find((decision) => decision.key && decision.key !== "default");
+    if (dependency && ["done", "failed"].includes(state)) {
+      return {
+        kind: "stale",
+        wait: `it is already ${state}; the dependency edge is stale`,
+        action: "Nothing yet - firstmate reconciles this stale dependency",
+      };
+    }
+    if (chatQuestion) {
+      return {
+        kind: "chat",
+        wait: "a worker question is being handled in chat",
+        action: "Nothing - firstmate is handling the worker's question in chat.",
+      };
+    }
+    if (keyedDecision) {
+      const ref = decisionRef(owner, keyedDecision.origin || task.id, keyedDecision.key);
+      return {
+        kind: "decision",
+        wait: `waiting on your decision ${ref}`,
+        action: `Answer decision ${ref} - it is the root cause.`,
+      };
+    }
+    if (state === "paused") {
+      return {
+        kind: "paused",
+        wait: "waiting on a declared external delay expected to clear on its own",
+        action: "Nothing - this unblocks itself when the external wait clears.",
+      };
+    }
+    if (state === "unknown") {
+      return {
+        kind: "unknown",
+        wait: "its current state could not be read",
+        action: "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.",
+      };
+    }
+    return {
+      kind: "worker",
+      wait: `the worker reports state: ${state}`,
+      action: "Nothing yet - firstmate is on it and will escalate if your input is needed.",
+    };
+  };
   for (const record of mainRecords.filter((item) => item.state === "in_flight" && item.structured)) {
     const task = taskById.get(record.id);
     const repo = record.repo || task?.project || null;
@@ -629,28 +676,12 @@ function classify(snapshot, environment) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
     const approvalReady = taskApprovalReady(task);
-    const keyedOpen = open.filter((decision) => decision.key && decision.key !== "default");
     let taskWaits = null;
     let taskCanDo = null;
     if (stage === "blocked") {
-      const state = safeState(task.current_state?.state);
-      if (chatQuestionCount > 0) {
-        taskWaits = ["a worker question is being handled in chat"];
-        taskCanDo = "Nothing - firstmate is handling the worker's question in chat.";
-      } else if (keyedOpen.length > 0) {
-        const ref = decisionRef("main", task.id, keyedOpen[0].key);
-        taskWaits = [`waiting on your decision ${ref}`];
-        taskCanDo = `Answer decision ${ref} - it is the root cause.`;
-      } else if (state === "paused") {
-        taskWaits = ["waiting on a declared external delay expected to clear on its own"];
-        taskCanDo = "Nothing - this unblocks itself when the external wait clears.";
-      } else if (state === "unknown") {
-        taskWaits = ["its current state could not be read"];
-        taskCanDo = "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.";
-      } else {
-        taskWaits = [`the worker reports state: ${state}`];
-        taskCanDo = "Nothing yet - firstmate is on it and will escalate if your input is needed.";
-      }
+      const context = taskRootContext(task, "main");
+      taskWaits = [context.wait];
+      taskCanDo = context.action;
     }
     pipeline[stage].push({
       id: itemRef("main", task.id),
@@ -678,52 +709,114 @@ function classify(snapshot, environment) {
     : String(record.blocked_by || "").split(",")).map((id) => String(id).trim()).filter(Boolean);
   const describeBlockedRecord = (startRecord, owner, records, tasks = []) => {
     const recordById = new Map(records.filter((record) => record.structured !== false).map((record) => [record.id, record]));
-    const currentById = new Map(tasks.map((task) => [task.id, task.current_state?.state || task.state]));
-    const resolveBlocker = (blockerId, seen) => {
-      const blockerRef = itemRef(owner, blockerId);
-      if (seen.has(blockerId)) {
-        return [{ wait: `blocked by ${blockerRef}, whose blocker chain could not be resolved`, action: "Nothing yet - firstmate reconciles this blocker and escalates if your input is needed." }];
+    const blockerTaskById = new Map(tasks.map((task) => [task.id, task]));
+    const roots = new Map();
+    const parentById = new Map();
+    const segmentById = new Map();
+    const scheduled = new Set();
+    const stack = [];
+    const chainFor = (blockerId, suffix = null) => {
+      const segments = [];
+      let current = blockerId;
+      while (current !== null) {
+        if (segmentById.has(current)) segments.push(segmentById.get(current));
+        current = parentById.get(current) ?? null;
       }
+      segments.reverse();
+      if (suffix) segments.push(suffix);
+      return segments.join("; then ");
+    };
+    const addRoot = (key, blockerId, suffix, action) => {
+      if (!roots.has(key)) roots.set(key, { wait: chainFor(blockerId, suffix), action });
+    };
+    const isAncestor = (blockerId, candidate) => {
+      let current = blockerId;
+      while (current !== null) {
+        if (current === candidate) return true;
+        current = parentById.get(current) ?? null;
+      }
+      return false;
+    };
+    const schedule = (blockerId, parent) => {
+      if (scheduled.has(blockerId)) return;
+      scheduled.add(blockerId);
+      parentById.set(blockerId, parent);
+      stack.push(blockerId);
+    };
+    for (const blockerId of [...blockedByIds(startRecord)].reverse()) schedule(blockerId, null);
+    while (stack.length > 0) {
+      const blockerId = stack.pop();
+      const blockerRef = itemRef(owner, blockerId);
       const blockerRecord = recordById.get(blockerId) || null;
-      const currentState = currentById.get(blockerId);
-      if (!blockerRecord && !currentState) {
-        return [{ wait: `blocked by ${blockerRef}, whose current state is unavailable`, action: "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed." }];
+      const blockerTask = blockerTaskById.get(blockerId) || null;
+      const currentState = blockerTask ? safeState(blockerTask.current_state?.state || blockerTask.state) : null;
+      if (!blockerRecord && !blockerTask) {
+        segmentById.set(blockerId, `blocked by ${blockerRef}, whose current state is unavailable`);
+        addRoot(`missing:${blockerId}`, blockerId, null, "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed.");
+        continue;
+      }
+      const terminalState = ["done", "failed"].includes(currentState)
+        ? currentState
+        : (["done", "failed"].includes(blockerRecord?.state) ? blockerRecord.state : null);
+      if (terminalState) {
+        segmentById.set(blockerId, `blocked by ${blockerRef}, but it is already ${terminalState}; the dependency edge is stale`);
+        addRoot(`stale:${blockerId}`, blockerId, null, "Nothing yet - firstmate reconciles this stale dependency");
+        continue;
       }
       const prefix = currentState
         ? `blocked by ${blockerRef}, which is currently ${safeState(currentState)}`
         : `blocked by ${blockerRef}, which is ${blockerRecord.state === "in_flight" ? "under way" : "queued and not started"}`;
+      segmentById.set(blockerId, prefix);
+      const taskContext = blockerTask ? taskRootContext(blockerTask, owner, true) : null;
+      if (taskContext && ["chat", "decision", "paused", "unknown"].includes(taskContext.kind)) {
+        const rootKey = taskContext.kind === "decision"
+          ? `decision:${taskContext.wait}`
+          : `${taskContext.kind}:${blockerId}`;
+        addRoot(rootKey, blockerId, taskContext.wait, taskContext.action);
+        continue;
+      }
       if (blockerRecord?.kind === "captain" && blockerRecord.hold_kind === "captain") {
         const identity = backlogDecisionIdentity(blockerRecord);
         const ref = decisionRef(owner, identity.origin, identity.key);
-        return [{ wait: `${prefix}; then waiting on your decision ${ref}`, action: `Answer decision ${ref} - it is the root cause.` }];
+        addRoot(`decision:${ref}`, blockerId, `waiting on your decision ${ref}`, `Answer decision ${ref} - it is the root cause.`);
+        continue;
       }
       const gate = blockerRecord && futureTimeGate(blockerRecord, now);
       if (gate) {
-        return [{ wait: `${prefix}; then waiting until ${gate}`, action: `Nothing - this unblocks itself when the ${gate} time gate passes.` }];
+        addRoot(`gate:${blockerId}`, blockerId, `waiting until ${gate}`, `Nothing - this unblocks itself when the ${gate} time gate passes.`);
+        continue;
       }
       const nestedIds = blockerRecord ? blockedByIds(blockerRecord) : [];
       if (nestedIds.length > 0) {
-        const nextSeen = new Set(seen).add(blockerId);
-        return nestedIds.flatMap((id) => resolveBlocker(id, nextSeen).map((root) => ({
-          wait: `${prefix}; then ${root.wait}`,
-          action: root.action,
-        })));
+        for (const nestedId of [...nestedIds].reverse()) {
+          if (isAncestor(blockerId, nestedId)) {
+            addRoot(`cycle:${[blockerId, nestedId].sort().join(":")}`, blockerId, `blocked by ${itemRef(owner, nestedId)}, whose blocker chain contains a cycle`, "Nothing yet - firstmate reconciles this blocker and escalates if your input is needed.");
+          } else {
+            schedule(nestedId, blockerId);
+          }
+        }
+        continue;
       }
       if (blockerRecord?.hold_reason) {
-        return [{ wait: `${prefix}; then held by a structured hold`, action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." }];
+        addRoot(`hold:${blockerId}`, blockerId, "held by a structured hold", "Nothing yet - firstmate watches this hold and escalates if your input is needed.");
+        continue;
       }
-      return [{ wait: prefix, action: `Nothing - this unblocks itself when ${blockerRef} finishes.` }];
-    };
+      if (taskContext?.kind === "worker" && currentState === "blocked") {
+        addRoot(`worker:${blockerId}`, blockerId, taskContext.wait, taskContext.action);
+        continue;
+      }
+      addRoot(`finish:${blockerId}`, blockerId, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`);
+    }
     const blockerIds = blockedByIds(startRecord);
     if (blockerIds.length === 0) {
       const gate = futureTimeGate(startRecord, now);
       if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
       return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
     }
-    const roots = blockerIds.flatMap((id) => resolveBlocker(id, new Set()));
+    const resolvedRoots = [...roots.values()];
     return {
-      waits: roots.map((root) => root.wait),
-      action: [...new Set(roots.map((root) => root.action))].join(" "),
+      waits: resolvedRoots.map((root) => root.wait),
+      action: [...new Set(resolvedRoots.map((root) => root.action))].join(" "),
     };
   };
 
@@ -824,6 +917,13 @@ function classify(snapshot, environment) {
         reason: "Open decision raised by work already under way.",
       });
     }
+    const mateTaskEvidence = (mate.active_children || []).map((child) => ({
+      ...child,
+      hints: {
+        ...(child.hints || {}),
+        open_decisions: (mate.decisions_open || []).filter((decision) => decision.id === child.id),
+      },
+    }));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       heldIds.add(hold.id);
@@ -837,7 +937,7 @@ function classify(snapshot, environment) {
       }
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
-      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mate.active_children || []);
+      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
       pipeline.blocked.push(Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
         waits_on: chain.waits,
         what_you_can_do: chain.action,
@@ -893,7 +993,7 @@ function classify(snapshot, environment) {
         const reason = record.blocked_by
           ? `Blocked by ${blockedByIds(record).map((id) => itemRef(mate.id, id)).join(", ")}`
           : "Structured hold";
-        const chain = describeBlockedRecord(record, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mate.active_children || []);
+        const chain = describeBlockedRecord(record, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
         pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
           waits_on: chain.waits,
