@@ -21,9 +21,10 @@
  * Run --help for the exact inherited snapshot bounds, environment-probe budget,
  * bottleneck order, CAP-01 through CAP-10 meanings, and output replacement rules.
  *
- * The producer is read-mostly. It writes only the selected dashboard path and
- * never dispatches, merges, tears down, changes backlog/task state, or opens a
- * service. Inline dashboard JavaScript copies prompts only and cannot run actions.
+ * The producer is read-mostly. It writes only the selected dashboard path,
+ * plus the opt-in --refs identity sidecar it owns for the authenticated
+ * dashboard service, and never dispatches, merges, tears down, changes
+ * backlog/task state, or opens a service. Inline dashboard JavaScript copies prompts only and cannot run actions.
  * Live environment probes share one 30-second fleet-wide deadline and preserve
  * unavailable evidence for homes that cannot be inspected within that bound.
  */
@@ -60,7 +61,7 @@ const STAGE_LABELS = {
 
 function usage(exitCode = 0) {
   const out = exitCode === 0 ? process.stdout : process.stderr;
-  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>]
+  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>] [--refs <path>]
 
 Gather a fresh bounded fleet snapshot, classify meaningful capacity, and atomically
 replace a self-contained offline dashboard. The default destination is
@@ -70,6 +71,13 @@ must not traverse a symlink below FM_HOME or replace a symlink leaf, and is mode
 --json prints the complete model after writing the dashboard. --snapshot and
 --environment are deterministic fixture inputs for tests/offline review and must not
 be used for a normal /capacity run.
+
+--refs additionally writes the fm-capacity-refs.v1 sidecar this producer owns: the
+private mode-0600 mapping from every opaque dashboard reference (item-NN, project-NN,
+home-NN) to its real identity. The dashboard itself stays identity-opaque; the sidecar
+exists so the captain-authenticated tailnet dashboard service (bin/fm-dash-serve.mjs)
+can enrich the page and serve rich detail views without weakening the offline file.
+The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
@@ -105,7 +113,7 @@ BOTTLENECK ORDER AND STABLE ACTIONS
 }
 
 function parseArgs(argv) {
-  const opts = { json: false, output: null, snapshot: null, environment: null };
+  const opts = { json: false, output: null, snapshot: null, environment: null, refs: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--json") opts.json = true;
@@ -115,9 +123,11 @@ function parseArgs(argv) {
     else if (arg.startsWith("--snapshot=")) opts.snapshot = arg.slice(11);
     else if (arg === "--environment") opts.environment = argv[++i];
     else if (arg.startsWith("--environment=")) opts.environment = arg.slice(14);
+    else if (arg === "--refs") opts.refs = argv[++i];
+    else if (arg.startsWith("--refs=")) opts.refs = arg.slice(7);
     else if (arg === "-h" || arg === "--help") usage(0);
     else usage(2);
-    if ((arg === "--output" || arg === "--snapshot" || arg === "--environment") && !argv[i]) usage(2);
+    if ((arg === "--output" || arg === "--snapshot" || arg === "--environment" || arg === "--refs") && !argv[i]) usage(2);
   }
   return opts;
 }
@@ -377,6 +387,17 @@ function itemRef(owner, id) {
   return opaqueRef("item", `${owner}/${id}`);
 }
 
+function decisionRef(owner, origin, key) {
+  return opaqueRef("item", `decision/${owner}/${origin}/${key}`);
+}
+
+function backlogDecisionIdentity(record) {
+  const body = String(record.body_excerpt || "");
+  const origin = body.match(/(?:^|\n)Origin:\s*([A-Za-z0-9._-]+)/)?.[1] || record.id;
+  const key = body.match(/(?:^|\n)Decision key:\s*([A-Za-z0-9._-]+)/)?.[1] || record.id;
+  return { origin, key };
+}
+
 function ownerRef(owner) {
   if (owner === "main" || owner === "ephemeral worker") return owner;
   return `persistent ${opaqueRef("home", String(owner).replace(/^secondmate\s+/, ""))}`;
@@ -565,6 +586,61 @@ function classify(snapshot, environment) {
   if (registry?.available === false || registry?.complete === false) {
     markUnavailable("secondmate-registry", "main", "registry projection incomplete");
   }
+  const taskRootContexts = (task, owner, dependency = false) => {
+    const open = task.hints?.open_decisions || [];
+    const state = safeState(task.current_state?.state || task.state);
+    const chatQuestion = open.some((decision) => !decision.key || decision.key === "default");
+    const keyedDecisions = open.filter((decision) => decision.key && decision.key !== "default");
+    if (dependency && ["done", "failed"].includes(state)) {
+      return [{
+        kind: "stale",
+        key: `stale:${task.id}`,
+        wait: `it is already ${state}; the dependency edge is stale`,
+        action: "Nothing yet - firstmate reconciles this stale dependency",
+      }];
+    }
+    const contexts = [];
+    if (chatQuestion) {
+      contexts.push({
+        kind: "chat",
+        key: `chat:${task.id}`,
+        wait: "a worker question is being handled in chat",
+        action: "Nothing - firstmate is handling the worker's question in chat.",
+      });
+    }
+    for (const keyedDecision of keyedDecisions) {
+      const ref = decisionRef(owner, keyedDecision.origin || task.id, keyedDecision.key);
+      contexts.push({
+        kind: "decision",
+        key: `decision:${ref}`,
+        wait: `waiting on your decision ${ref}`,
+        action: `Answer decision ${ref} - it is the root cause.`,
+      });
+    }
+    if (contexts.length > 0) return [...new Map(contexts.map((context) => [context.key, context])).values()];
+    if (state === "paused") {
+      return [{
+        kind: "paused",
+        key: `paused:${task.id}`,
+        wait: "waiting on a declared external delay expected to clear on its own",
+        action: "Nothing - this unblocks itself when the external wait clears.",
+      }];
+    }
+    if (state === "unknown") {
+      return [{
+        kind: "unknown",
+        key: `unknown:${task.id}`,
+        wait: "its current state could not be read",
+        action: "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.",
+      }];
+    }
+    return [{
+      kind: "worker",
+      key: `worker:${task.id}`,
+      wait: `the worker reports state: ${state}`,
+      action: "Nothing yet - firstmate is on it and will escalate if your input is needed.",
+    }];
+  };
   for (const record of mainRecords.filter((item) => item.state === "in_flight" && item.structured)) {
     const task = taskById.get(record.id);
     const repo = record.repo || task?.project || null;
@@ -586,11 +662,18 @@ function classify(snapshot, environment) {
       markUnavailable(itemRef("main", task.id), "main", "in-flight work lacks project provenance");
     }
     const open = task.hints?.open_decisions || [];
+    // A keyless fold entry (key "default") is a worker question firstmate is
+    // handling in chat, never a fabricated captain decision: it gets no
+    // decision identity, no Decide row, and no dead-end detail view. Event
+    // summaries stay out of this privacy-bounded artifact; the authenticated
+    // dashboard service surfaces the concrete text in its detail views.
+    const chatQuestionCount = open.filter((decision) => !decision.key || decision.key === "default").length;
     for (const decision of open) {
+      if (!decision.key || decision.key === "default") continue;
       decisions.push({
         owner: "main",
         task: itemRef("main", task.id),
-        key: itemRef("decision", decision.key || task.id),
+        key: decisionRef("main", task.id, decision.key),
         reason: "Open decision raised by work already under way.",
       });
     }
@@ -601,6 +684,13 @@ function classify(snapshot, environment) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
     const approvalReady = taskApprovalReady(task);
+    let taskWaits = null;
+    let taskCanDo = null;
+    if (stage === "blocked") {
+      const contexts = taskRootContexts(task, "main");
+      taskWaits = contexts.map((context) => context.wait);
+      taskCanDo = [...new Set(contexts.map((context) => context.action))].join(" ");
+    }
     pipeline[stage].push({
       id: itemRef("main", task.id),
       title: `${STAGE_LABELS[stage]} work item`,
@@ -608,15 +698,130 @@ function classify(snapshot, environment) {
       repo: projectRef(taskRepo),
       kind: ["ship", "scout"].includes(task.kind) ? task.kind : null,
       stage,
-      reason: `Authoritative current state: ${safeState(task.current_state?.state)}`,
+      reason: chatQuestionCount > 0
+        ? "Worker question being handled in chat"
+        : `Authoritative current state: ${safeState(task.current_state?.state)}`,
       artifact: null,
       provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
       approval_ready: approvalReady,
       approval_authority: approvalReady ? (task.yolo === "on" ? "firstmate" : "captain") : null,
       captain_approval_required: approvalReady && task.yolo !== "on",
+      waits_on: taskWaits,
+      what_you_can_do: taskCanDo,
     });
   }
+
+  const blockedByIds = (record) => (Array.isArray(record.blocked_by_all)
+    ? record.blocked_by_all
+    : String(record.blocked_by || "").split(",")).map((id) => String(id).trim()).filter(Boolean);
+  const describeBlockedRecord = (startRecord, owner, records, tasks = []) => {
+    const recordById = new Map(records.filter((record) => record.structured !== false).map((record) => [record.id, record]));
+    const blockerTaskById = new Map(tasks.map((task) => [task.id, task]));
+    const roots = new Map();
+    const expandedEdges = new Set();
+    const stack = [];
+    const addRoot = (key, segments, suffix, action) => {
+      if (roots.has(key)) return;
+      roots.set(key, {
+        wait: [...segments, ...(suffix ? [suffix] : [])].join("; then "),
+        action,
+      });
+    };
+    const blockerIds = blockedByIds(startRecord);
+    const startTask = blockerTaskById.get(startRecord.id);
+    if (blockerIds.length === 0 && startTask) {
+      const contexts = taskRootContexts(startTask, owner, true);
+      return {
+        waits: contexts.map((context) => context.wait),
+        action: [...new Set(contexts.map((context) => context.action))].join(" "),
+      };
+    }
+    for (const blockerId of [...blockerIds].reverse()) {
+      stack.push({ blockerId, segments: [], ancestors: new Set() });
+    }
+    while (stack.length > 0) {
+      const { blockerId, segments, ancestors } = stack.pop();
+      const blockerRef = itemRef(owner, blockerId);
+      const blockerRecord = recordById.get(blockerId) || null;
+      const blockerTask = blockerTaskById.get(blockerId) || null;
+      const currentState = blockerTask ? safeState(blockerTask.current_state?.state || blockerTask.state) : null;
+      if (!blockerRecord && !blockerTask) {
+        addRoot(`missing:${blockerId}`, [...segments, `blocked by ${blockerRef}, whose current state is unavailable`], null, "Nothing yet - firstmate reconciles that unavailable blocker and escalates if your input is needed.");
+        continue;
+      }
+      const terminalState = ["done", "failed"].includes(currentState)
+        ? currentState
+        : (["done", "failed"].includes(blockerRecord?.state) ? blockerRecord.state : null);
+      if (terminalState) {
+        addRoot(`stale:${blockerId}`, [...segments, `blocked by ${blockerRef}, but it is already ${terminalState}; the dependency edge is stale`], null, "Nothing yet - firstmate reconciles this stale dependency");
+        continue;
+      }
+      const prefix = currentState
+        ? `blocked by ${blockerRef}, which is currently ${safeState(currentState)}`
+        : `blocked by ${blockerRef}, which is ${blockerRecord.state === "in_flight" ? "under way" : "queued and not started"}`;
+      const nextSegments = [...segments, prefix];
+      const taskContexts = blockerTask ? taskRootContexts(blockerTask, owner, true) : [];
+      const applicableContexts = taskContexts.filter((context) => ["chat", "decision", "paused", "unknown"].includes(context.kind));
+      if (applicableContexts.length > 0) {
+        for (const context of applicableContexts) addRoot(context.key, nextSegments, context.wait, context.action);
+        continue;
+      }
+      if (blockerRecord?.kind === "captain" && blockerRecord.hold_kind === "captain") {
+        const identity = backlogDecisionIdentity(blockerRecord);
+        const ref = decisionRef(owner, identity.origin, identity.key);
+        addRoot(`decision:${ref}`, nextSegments, `waiting on your decision ${ref}`, `Answer decision ${ref} - it is the root cause.`);
+        continue;
+      }
+      const gate = blockerRecord && futureTimeGate(blockerRecord, now);
+      if (gate) {
+        addRoot(`gate:${blockerId}`, nextSegments, `waiting until ${gate}`, `Nothing - this unblocks itself when the ${gate} time gate passes.`);
+        continue;
+      }
+      const nestedIds = blockerRecord ? blockedByIds(blockerRecord) : [];
+      if (nestedIds.length > 0) {
+        const nextAncestors = new Set(ancestors).add(blockerId);
+        for (const nestedId of [...nestedIds].reverse()) {
+          if (nextAncestors.has(nestedId)) {
+            addRoot(`cycle:${[...nextAncestors, nestedId].sort().join(":")}`, nextSegments, `circular dependency through ${itemRef(owner, nestedId)}`, "Nothing yet - firstmate reconciles this circular dependency.");
+          } else {
+            const edgeKey = `${blockerId}\0${nestedId}`;
+            if (!expandedEdges.has(edgeKey)) {
+              expandedEdges.add(edgeKey);
+              stack.push({ blockerId: nestedId, segments: nextSegments, ancestors: nextAncestors });
+            }
+          }
+        }
+        continue;
+      }
+      if (blockerRecord?.hold_reason) {
+        addRoot(`hold:${blockerId}`, nextSegments, "held by a structured hold", "Nothing yet - firstmate watches this hold and escalates if your input is needed.");
+        continue;
+      }
+      const workerContext = taskContexts.find((context) => context.kind === "worker");
+      if (workerContext && currentState === "blocked") {
+        addRoot(workerContext.key, nextSegments, workerContext.wait, workerContext.action);
+        continue;
+      }
+      addRoot(`finish:${blockerId}`, nextSegments, null, `Nothing - this unblocks itself when ${blockerRef} finishes.`);
+    }
+    if (blockerIds.length === 0) {
+      const gate = futureTimeGate(startRecord, now);
+      if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.` };
+      return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed." };
+    }
+    const resolvedRoots = [...roots.values()];
+    if (resolvedRoots.length === 0) {
+      return {
+        waits: ["circular dependency could not be resolved from the blocker graph"],
+        action: "Nothing yet - firstmate reconciles this circular dependency.",
+      };
+    }
+    return {
+      waits: resolvedRoots.map((root) => root.wait),
+      action: [...new Set(resolvedRoots.map((root) => root.action))].join(" "),
+    };
+  };
 
   const queue = mainRecords.filter((record) => record.state === "queued");
   const candidates = [];
@@ -628,26 +833,41 @@ function classify(snapshot, environment) {
     }
     if (isSuperseded(record)) continue;
     if (record.kind === "captain" && record.hold_kind === "captain") {
+      const decision = backlogDecisionIdentity(record);
+      const holdRef = decisionRef("main", decision.origin, decision.key);
       decisions.push({
         owner: "main",
         task: itemRef("main", record.id),
-        key: itemRef("decision", record.id),
+        key: holdRef,
         reason: "A queued choice is held for your decision.",
       });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Captain hold"));
+      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", "Captain hold"), {
+        waits_on: [`waiting on your decision ${holdRef}`],
+        what_you_can_do: `Answer decision ${holdRef} - it is the root cause.`,
+      }));
       continue;
     }
     if (record.blocked_by || record.hold_reason) {
-      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "dependency or structured hold" });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Dependency or structured hold"));
+      const reason = record.blocked_by
+        ? `Blocked by ${blockedByIds(record).map((id) => itemRef("main", id)).join(", ")}`
+        : "Structured hold";
+      const chain = describeBlockedRecord(record, "main", mainRecords, snapshot.tasks || []);
+      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
+      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
+        waits_on: chain.waits,
+        what_you_can_do: chain.action,
+      }));
       continue;
     }
     const timeGate = futureTimeGate(record, now);
     if (timeGate) {
       const reason = `time gate until ${timeGate}`;
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", reason));
+      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
+        waits_on: [`waiting until ${timeGate}`],
+        what_you_can_do: `Nothing - this unblocks itself when the ${timeGate} time gate passes.`,
+      }));
       continue;
     }
     const gaps = definitionGaps(record);
@@ -692,13 +912,22 @@ function classify(snapshot, environment) {
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
+      if (!decision.key || decision.key === "default") continue;
       decisions.push({
         owner: ownerRef(mate.id),
         task: itemRef(mate.id, decision.id || mate.id),
-        key: itemRef("decision", decision.key || decision.id || mate.id),
+        key: decisionRef(mate.id, decision.origin || decision.id || mate.id, decision.key || decision.id || mate.id),
         reason: "Open decision raised by work already under way.",
       });
     }
+    const mateTaskEvidence = [...(mate.active_children || []), ...(mate.holds || []).filter((hold) => hold.source === "child-state" && hold.state)]
+      .map((child) => ({
+        ...child,
+        hints: {
+          ...(child.hints || {}),
+          open_decisions: (mate.decisions_open || []).filter((decision) => decision.id === child.id),
+        },
+      }));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       heldIds.add(hold.id);
@@ -712,7 +941,11 @@ function classify(snapshot, environment) {
       }
       const ageDays = dateAgeDays(hold.since, now);
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
-      pipeline.blocked.push(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"));
+      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
+      pipeline.blocked.push(Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
+        waits_on: chain.waits,
+        what_you_can_do: chain.action,
+      }));
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
       }
@@ -751,20 +984,35 @@ function classify(snapshot, environment) {
       if (isSuperseded(record) || heldIds.has(record.id)) continue;
       secondmateQueuedConsidered += 1;
       if (record.kind === "captain" && record.hold_kind === "captain") {
+        const identity = backlogDecisionIdentity(record);
+        const ref = decisionRef(mate.id, identity.origin, identity.key);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Captain hold"));
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", "Captain hold"), {
+          waits_on: [`waiting on your decision ${ref}`],
+          what_you_can_do: `Answer decision ${ref} - it is the root cause.`,
+        }));
         continue;
       }
       if (record.blocked_by || record.hold_reason) {
-        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "dependency or structured hold" });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Dependency or structured hold"));
+        const reason = record.blocked_by
+          ? `Blocked by ${blockedByIds(record).map((id) => itemRef(mate.id, id)).join(", ")}`
+          : "Structured hold";
+        const chain = describeBlockedRecord(record, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
+        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+          waits_on: chain.waits,
+          what_you_can_do: chain.action,
+        }));
         continue;
       }
       const timeGate = futureTimeGate(record, now);
       if (timeGate) {
         const reason = `time gate until ${timeGate}`;
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
+        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", reason), {
+          waits_on: [`waiting until ${timeGate}`],
+          what_you_can_do: `Nothing - this unblocks itself when the ${timeGate} time gate passes.`,
+        }));
         continue;
       }
       const gaps = definitionGaps(record, true);
@@ -1212,12 +1460,21 @@ function artifact(value) {
   return `<a href="${h(safe)}">${h(safe)}</a>`;
 }
 
+// Plain-language blocker context: the recursive chain plus the explicit
+// captain action (or explicit nothing-to-do), rendered under a blocked row.
+function blockedContext(card) {
+  if (!card.waits_on || card.waits_on.length === 0) return "";
+  const chain = card.waits_on.map((wait) => h(wait)).join("; ");
+  const action = card.what_you_can_do ? `<small class="cando">What you can do: ${h(card.what_you_can_do)}</small>` : "";
+  return `<small class="chain">${chain}.</small>${action}`;
+}
+
 function manifestRow(card) {
   const meta = [card.kind, card.age_days !== null && card.age_days !== undefined ? `${card.age_days}d` : null]
     .filter(Boolean).map((part) => h(part)).join(" · ");
   return `<li class="mrow">
     <span class="mid"><span class="item-id">${h(card.id)}</span><span class="mowner">${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span></span>
-    <span class="mreason">${h(card.reason || "No additional gate detail.")}${card.artifact ? ` ${artifact(card.artifact)}` : ""}</span>
+    <span class="mreason">${h(card.reason || "No additional gate detail.")}${card.artifact ? ` ${artifact(card.artifact)}` : ""}${blockedContext(card)}</span>
     <span class="mmeta">${meta}</span>
   </li>`;
 }
@@ -1255,7 +1512,7 @@ function renderHtml(model, captainActions) {
     ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
     ...captainActions.map((action) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
-  const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}</span></li>`).join("");
+  const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
 
   const blockedReasonCounts = new Map();
   for (const card of otherBlockedCards) {
@@ -1343,10 +1600,13 @@ function renderHtml(model, captainActions) {
     .needs-you h2{color:var(--serious)}.blocked-items h2{color:var(--crit)}
     .rollcall ul{margin-top:.6rem}
     .rollcall li{display:grid;grid-template-columns:5.2rem minmax(0,.45fr) minmax(0,1fr);gap:.4rem 1.1rem;align-items:baseline;border-top:1px solid color-mix(in srgb,var(--sev) 30%,var(--hair));padding:.55rem 0;font-size:1.02rem;min-width:0}
+    .rollcall li.empty{display:block}
     .verb{font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem}
     .verb-approve{color:var(--blue)}.verb-decide{color:var(--serious)}.verb-blocked{color:var(--crit)}
     .who{font-weight:650;min-width:0}.who .item-id{margin-right:.35rem}
     .why{color:var(--ink2);font-size:.92rem;min-width:0}
+    .chain{display:block;color:var(--muted);font-size:.8rem;margin-top:.25rem}
+    .cando{display:block;color:var(--ink);font-size:.8rem;font-weight:650;margin-top:.15rem}
     .item-id{font:700 .82rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
     .next{margin-top:2rem;font-size:clamp(1.05rem,1.8vw,1.25rem)}
     .prompt{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin-top:.9rem;border:1px solid var(--line);padding:.65rem .8rem;background:color-mix(in srgb,var(--bg) 55%,transparent)}
@@ -1474,6 +1734,23 @@ function main() {
   }
   const { model, captainActions } = classify(snapshot, environment);
   writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
+  if (opts.refs) {
+    const allowedState = path.resolve(snapshot.roots?.state || path.join(snapshot.fm_home || ROOT, "state"));
+    const refsPath = path.resolve(opts.refs);
+    const insideOf = (root) => {
+      const relative = path.relative(root, refsPath);
+      return relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    };
+    if (!insideOf(allowedState) && !insideOf(allowedData)) {
+      throw new Error("refs sidecar path must stay inside the effective state or data directory");
+    }
+    const refs = {};
+    for (const [key, ref] of opaqueRefs.entries()) {
+      const separator = key.indexOf("\0");
+      refs[ref] = { kind: key.slice(0, separator), value: key.slice(separator + 1) };
+    }
+    writePrivateAtomic(refsPath, `${JSON.stringify({ schema: "fm-capacity-refs.v1", generated: model.generated, refs }, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {

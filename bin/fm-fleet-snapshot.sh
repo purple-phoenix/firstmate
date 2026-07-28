@@ -18,6 +18,8 @@
 #     Structured records with a repo include its resolved delivery_mode and
 #     project_resolved provenance from data/projects.md; unresolved projects
 #     retain the fail-safe no-mistakes mode while project_resolved stays false.
+#     blocked_by is the comma-compatible dependency string and blocked_by_all
+#     preserves every normalized dependency edge in source order.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
@@ -294,6 +296,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | if $reason == null then null
         else ($reason | clean_title | if . == "" then null else . end)
         end;
+    def blocked_by_all($rest):
+      [$rest
+       | scan("blocked-by:[[:space:]]*[^[:space:])]+")
+       | sub("^blocked-by:[[:space:]]*"; "")
+       | split(",")[]
+       | trim
+       | select(length > 0)];
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def completion($rest):
@@ -317,6 +326,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           {order:$order,state:$section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}
         else
           ($m.rest) as $rest
+          | (blocked_by_all($rest)) as $blocked_by_all
           | {order:$order,
              state:$section,
              structured:true,
@@ -328,7 +338,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              priority:metadata($rest; "priority"),
              hold_reason:metadata($rest; "hold"),
              hold_kind:metadata($rest; "hold-kind"),
-             blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
+             blocked_by:($blocked_by_all | if length == 0 then null else join(",") end),
+             blocked_by_all:$blocked_by_all,
              blocked_reason:blocked_reason($rest),
              since:metadata_word($rest; "since"),
              merged:metadata_word($rest; "merged"),
@@ -572,7 +583,13 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $backlog.records[]? | select(.state == "queued" and .structured) ]) as $queued_all
     | ([ $queued_all[]
          | select(.kind == "captain" and .hold_kind == "captain" and .hold_reason != null)
-         | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
+         | . as $hold
+         | {id,origin:(([($hold.body_excerpt // "" | split("\n")[])
+                          | select(startswith("Origin: "))
+                          | ltrimstr("Origin: ")] | first) // $hold.id),
+            key:(([($hold.body_excerpt // "" | split("\n")[])
+                       | select(startswith("Decision key: "))
+                       | ltrimstr("Decision key: ")] | first) // $hold.id),verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -611,7 +628,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             repo:((.repo // null) | if . == null then null else trunc(120) end),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
             since:((.since // null) | if . == null then null else trunc(20) end),
-            blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+            blocked_by:(.blocked_by | trunc(120)),
+            blocked_by_all:((.blocked_by_all // []) | map(trunc(120))),
+            reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -621,7 +640,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
               delivery_mode:(($work.delivery_mode // null) | if . == null then null else trunc(40) end),
               project_resolved:($work.project_resolved == true),
               since:(($work.since // null) | if . == null then null else trunc(20) end),
-              blocked_by:null,
+              state:.current_state.state,
+              blocked_by:null,blocked_by_all:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
@@ -657,6 +677,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
+          blocked_by_all:((.blocked_by_all // []) | map(trunc(120))),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
@@ -989,7 +1010,10 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
                "active_children")
          elif $e.verb == "paused" then
            ([ $summary.holds[]
-              | select(if ($e.key | keyed) then .id == $e.key or .blocked_by == $e.key else true end)
+              | select(if ($e.key | keyed)
+                       then .id == $e.key
+                            or (((.blocked_by_all // ((.blocked_by // "") | split(","))) | index($e.key)) != null)
+                       else true end)
               | {surface:"holds",id,key:(.blocked_by // null),verb:"paused"}]) as $matches
            | result($e; $matches;
                $summary.counts.holds == ($summary.holds | length);
@@ -1012,7 +1036,10 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
                 | select(if ($e.key | keyed) then .key == $e.key or .id == $e.key else true end)
                 | {surface:"decisions_open",id,key,verb}]
               + [ $summary.holds[]
-                  | select(if ($e.key | keyed) then .id == $e.key or .blocked_by == $e.key else true end)
+                  | select(if ($e.key | keyed)
+                           then .id == $e.key
+                                or (((.blocked_by_all // ((.blocked_by // "") | split(","))) | index($e.key)) != null)
+                           else true end)
                   | {surface:"holds",id,key:(.blocked_by // null),verb:"blocked"}]) as $matches
              | result($e; $matches;
                  ($summary.counts.decisions_open == ($summary.decisions_open | length)

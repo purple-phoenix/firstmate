@@ -121,6 +121,22 @@ write_origin_meta() {  # <home> <id> [kind]
     "mode=$kind"
 }
 
+write_options() {  # <home> <key> <title>
+  local home=$1 key=$2 title=$3 file
+  file="$home/options-$key.md"
+  cat > "$file" <<EOF
+# $title
+
+Choose the bounded synthetic route for this decision.
+
+## Options
+
+- [recommended] Conservative route - Keeps the synthetic change narrow.
+- Fast route - Delivers sooner with a wider synthetic risk.
+EOF
+  printf '%s\n' "$file"
+}
+
 test_structured_holds_survive_teardown_and_route_resolution() {
   local home id route_hold access_hold before after json open show
   home=$(make_home durable-lifecycle)
@@ -147,8 +163,17 @@ EOF
   assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
     "failed completion recorded a false completion attestation"
 
+  if run_decisions "$home" hold "$id" undocumented \
+    --title "Choose an undocumented route" --reason "captain undocumented choice pending" --repo sample \
+    > "$home/undocumented.out" 2> "$home/undocumented.err"; then
+    fail "new hold succeeded without a structured options document"
+  fi
+  assert_grep "requires --options-file" "$home/undocumented.err" "missing options refusal was not explicit"
+  assert_no_grep "$id-decision-undocumented" "$home/data/backlog.md" "refused undocumented hold mutated the backlog"
+
   route_hold=$(run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --options-file "$(write_options "$home" route "Choose the sample route")" --repo sample) \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
   run_decisions "$home" hold "$id" route \
@@ -158,13 +183,16 @@ EOF
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
   access_hold=$(run_decisions "$home" hold "$id" access \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
+    --title "Choose the sample access level" --reason "captain access choice pending" \
+    --options-file "$(write_options "$home" access "Choose the sample access level")" --repo sample) \
     || fail "could not register access hold"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
   [ "$(grep -cE "^- \[ \] $route_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "idempotent retry duplicated the route hold"
   [ "$(grep -cE "^- \[ \] $access_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "second decision did not retain one distinct backlog identity"
+  assert_grep "Conservative route" "$home/data/$id/decisions/route.md" "route options were not published with the hold"
+  assert_grep "Fast route" "$home/data/$id/decisions/access.md" "access options were not published with the hold"
 
   run_decisions "$home" complete "$id" route access >/dev/null \
     || fail "shared investigation completion gate failed"
@@ -344,7 +372,8 @@ test_visual_review_uses_shared_completion_owner() {
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   hold=$(run_decisions "$home" hold "$id" layout \
-    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    --title "Choose the sample layout" --reason "captain layout choice pending" \
+    --options-file "$(write_options "$home" layout "Choose the sample layout")" --repo sample) \
     || fail "post-teardown visual review could not use the shared hold owner"
   run_decisions "$home" complete "$id" layout >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
@@ -437,7 +466,8 @@ EOF
   printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
   hold=$(run_decisions "$mate" hold "$origin" release \
-    --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
+    --title "Choose the sample release" --reason "captain release choice pending" \
+    --options-file "$(write_options "$mate" release "Choose the sample release")" --repo sample) \
     || fail "secondmate-owned hold creation failed"
   run_decisions "$mate" complete "$origin" release >/dev/null \
     || fail "secondmate-owned completion failed"
@@ -451,11 +481,41 @@ EOF
     "firstmate:fm-sample-mate" sample
   json=$(run_bearings "$parent") || fail "parent Bearings could not read secondmate hold"
   printf '%s' "$json" | jq -e --arg hold "$hold" '
-    .decisions_open | any(.owner == "sample-mate" and .verb == "captain-hold" and (.id | endswith($hold)))
+    .decisions_open | any(.owner == "sample-mate" and .key == "release" and .verb == "captain-hold" and (.id | endswith($hold)))
   ' >/dev/null || fail "secondmate captain hold did not surface with authoritative owner: $json"
   assert_no_grep "$hold" "$parent/data/backlog.md" "secondmate hold leaked into the main backlog"
   assert_grep "$hold" "$mate/data/backlog.md" "secondmate hold left its authoritative backlog"
+  assert_grep "Conservative route" "$mate/data/$origin/decisions/release.md" "secondmate options were not published in the owning home"
   pass "main-home and secondmate-home captain holds remain correctly routed"
+}
+
+test_same_home_same_key_decisions_are_origin_qualified() {
+  local home first second first_hold second_hold
+  home=$(make_home same-home-same-key)
+  first=sample-alpha-review
+  second=sample-beta-review
+  mkdir -p "$home/data/$first" "$home/data/$second"
+  tasks_in "$home" add "$first" "Review sample alpha" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create first same-key origin"
+  tasks_in "$home" add "$second" "Review sample beta" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create second same-key origin"
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+  first_hold=$(run_decisions "$home" hold "$first" route \
+    --title "Choose the alpha route" --reason "captain alpha route pending" \
+    --options-file "$(write_options "$home" route "Choose the alpha route")" --repo sample) \
+    || fail "first same-key decision was not filed"
+  second_hold=$(run_decisions "$home" hold "$second" route \
+    --title "Choose the beta route" --reason "captain beta route pending" \
+    --options-file "$(write_options "$home" route "Choose the beta route")" --repo sample) \
+    || fail "second same-key decision collided with the first"
+  [ "$first_hold" = "$first-decision-route" ] || fail "first same-key hold lost its origin identity"
+  [ "$second_hold" = "$second-decision-route" ] || fail "second same-key hold lost its origin identity"
+  assert_grep "Choose the alpha route" "$home/data/$first/decisions/route.md" "first origin options were not retained"
+  assert_grep "Choose the beta route" "$home/data/$second/decisions/route.md" "second origin options were not retained"
+  cmp -s "$home/data/$first/decisions/route.md" "$home/data/$second/decisions/route.md" \
+    && fail "distinct same-key options collapsed to one document"
+  pass "same-home same-key decisions retain distinct origin-qualified documents"
 }
 
 test_overlong_captain_hold_is_non_dispatchable() {
@@ -466,7 +526,8 @@ test_overlong_captain_hold_is_non_dispatchable() {
   mkdir -p "$home/data/$origin"
   write_origin_meta "$home" "$origin"
   hold=$(run_decisions "$home" hold "$origin" "$key" \
-    --title "Choose the sample release route" --reason "captain release route pending" --repo sample) \
+    --title "Choose the sample release route" --reason "captain release route pending" \
+    --options-file "$(write_options "$home" "$key" "Choose the sample release route")" --repo sample) \
     || fail "overlong captain hold creation failed"
   [ "${#hold}" -gt "$FM_TASK_ID_MAX_LENGTH" ] \
     || fail "captain hold fixture was not overlong: $hold"
@@ -503,16 +564,20 @@ test_resolve_matches_quoted_blocked_by_edges() {
   printf '# Quote edge review\n\nThree edge decisions and one absent control.\n' > "$home/data/$origin/report.md"
 
   hold_first=$(run_decisions "$home" hold "$origin" edge-first \
-    --title "First edge decision" --reason "captain first pending" --repo sample) \
+    --title "First edge decision" --reason "captain first pending" \
+    --options-file "$(write_options "$home" edge-first "First edge decision")" --repo sample) \
     || fail "could not register first-edge hold"
   hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
-    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    --title "Middle edge decision" --reason "captain mid pending" \
+    --options-file "$(write_options "$home" edge-mid "Middle edge decision")" --repo sample) \
     || fail "could not register mid-edge hold"
   hold_last=$(run_decisions "$home" hold "$origin" edge-last \
-    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    --title "Last edge decision" --reason "captain last pending" \
+    --options-file "$(write_options "$home" edge-last "Last edge decision")" --repo sample) \
     || fail "could not register last-edge hold"
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
-    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    --title "Absent edge decision" --reason "captain absent pending" \
+    --options-file "$(write_options "$home" edge-absent "Absent edge decision")" --repo sample) \
     || fail "could not register absent-edge hold"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
@@ -592,5 +657,6 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_same_home_same_key_decisions_are_origin_qualified
 test_overlong_captain_hold_is_non_dispatchable
 test_resolve_matches_quoted_blocked_by_edges

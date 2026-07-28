@@ -71,6 +71,7 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/dash.json     optional capacity dashboard service settings (loopback port, authorized captain tailnet logins); LOCAL, gitignored; written by bin/fm-dash-install.sh (docs/dashboard-service.md)
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
@@ -99,6 +100,9 @@ state/               volatile runtime signals; gitignored
   x-context/         generated X-mode durable per-request reply context (platform/budget), keyed by request_id; survives inbox cleanup so a delayed follow-up recovers the original platform (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
+  fm-dash.check.sh   registered dashboard-service command poll; wakes firstmate while captain dashboard commands are pending (section 7; docs/dashboard-service.md)
+  dash-inbox/        durable captain commands clicked on the served capacity dashboard; delivered at least once with idempotency checks under the capacity skill
+  dash-refs.json     producer-owned private mapping from opaque dashboard references to real identities, written by fm-capacity.mjs --refs for the authenticated dashboard service
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .wake-queue.seq    monotonic wake sequence used to distinguish a normal watcher wake handoff from a silent arm-cycle death
   .watcher-arm-dead  durable alarm from an arm cycle that ended without a wake handoff or healthy successor while tasks remain; cleared by a confirmed healthy arm or normal handoff
@@ -313,6 +317,7 @@ When the captain invokes `/user-journey-audit` or explicitly asks for a user-jou
 That invocation narrowly authorizes confirmed ordinary reversible bug implementation, never feature implementation or merge, and the skill owns the conditional procedure.
 
 When the captain invokes `/capacity` or asks about capacity, bottlenecks, pipeline utilization, work supply, idle lanes, or maximizing fleet throughput, load `capacity`.
+Also load `capacity` on a `check:` wake naming `fm-dash.check.sh`: it delivers captain-clicked dashboard commands, and the skill owns their claim and handling.
 That read-mostly skill owns the conditional procedure and must never invent work, dispatch for utilization, or weaken lifecycle safety.
 
 ## 8. Supervision protocol
@@ -320,7 +325,7 @@ That read-mostly skill owns the conditional procedure and must never invent work
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
-X mode may require that same live cycle with no fleet work.
+X mode or an installed dashboard command service may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 After every actionable wake, resume the emitted protocol as the final action before ending the turn.
 No turn ends blind while work is under way, including turns described as holding or waiting.

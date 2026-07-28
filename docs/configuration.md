@@ -102,6 +102,13 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Capacity dashboard service (config/dash.json)
+
+The optional persistent dashboard service publishes `data/capacity-dashboard.html` tailnet-only at one stable HTTPS URL, adds one-click `CAP-NN` dispatch, clickable de-anonymized work-item and decision detail views, idea verdicts over `data/ideas/`, and a server-side refresh, and delivers clicked commands to the running Firstmate through durable `state/dash-inbox/` records surfaced by the registered `fm-dash` watcher check.
+`config/dash.json` (local, gitignored, written by `bin/fm-dash-install.sh`) holds `port` (loopback service port, default 8847), `serve_port` (active tailnet HTTPS port, default 8443), `captain_logins` (the tailnet logins allowed to reach the service), `read_only` (serve, refresh, and auto-render without command dispatch), and `auto_refresh_seconds` (producer rerun interval, default 900, 0 disables); the service fails closed without a matching `Tailscale-User-Login` identity.
+The service reads the producer's opt-in `state/dash-refs.json` identity sidecar (`fm-capacity.mjs --refs`) to enrich the served page; the on-disk dashboard itself stays identity-opaque.
+`bin/fm-dash-serve.mjs --help` owns routes and the one-click allowlist, `bin/fm-dash-install.sh --help` owns launchd persistence and the never-Funnel tailscale serve wiring, `bin/fm-dash-inbox.sh --help` owns command consumption, and [`dashboard-service.md`](dashboard-service.md) owns the architecture and trust design.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
