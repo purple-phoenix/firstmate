@@ -664,7 +664,7 @@ EOF
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "captain_decision"
       and .active_children == []
-      and (.holds | any(.id == "parked" and .source == "child-state"))
+      and (.holds | any(.id == "parked" and .source == "child-state" and .state == "parked"))
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight

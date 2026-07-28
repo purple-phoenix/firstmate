@@ -542,6 +542,7 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .tasks[0].hints.open_decisions = [
+      {"key":"default"},
       {"key":"build-choice-one"},
       {"key":"build-choice-two"}
     ]
@@ -551,24 +552,27 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
     | .secondmate_current.records[0].holds = [
-      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","source":"child-state"}
+      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"}
     ]
     | .secondmate_current.records[0].queued += [
       {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"},
       {"id":"mate-structured","title":"Wait on a structured hold","repo":"delta","project_resolved":true,"kind":"ship","hold_reason":"Sensitive reason"},
-      {"id":"mate-time","title":"Resume after 2026-08-15","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: resume safely."}
+      {"id":"mate-time","title":"Resume after 2026-08-15","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: resume safely."},
+      {"id":"after-mate-held","title":"Continue after held work","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"mate-held","body_excerpt":"Acceptance criteria: held work clears."}
     ]
-    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":1,"queued":4}
+    | .secondmate_current.records[0].decisions_open[0].id = "mate-held"
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":1,"queued":5}
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 8
+    (.pipeline.blocked | length) == 9
     and .measures.open_captain_actions == 4
     and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
-    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 4
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 5
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .what_you_can_do] | all(type == "string" and length > 0))
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .waits_on // [] | join(" ")] | map(select(contains("worker question"))) | length) == 2
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
   [ "$(grep -o 'class="verb verb-decide"' "$output" | wc -l | tr -d ' ')" = 4 ] ||
     fail "captain decisions were collapsed or duplicated in the needs-you roll call"
@@ -945,11 +949,17 @@ test_keyless_questions_and_blocker_chains() {
       {"order":16,"state":"queued","structured":true,"id":"stale-dependent","title":"Reconcile a stale dependency","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"finished-root","body_excerpt":"Acceptance criteria: stale edge clears."},
       {"order":17,"state":"queued","structured":true,"id":"branching-dependent","title":"Publish after converging branches","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"branch-a,branch-b","blocked_by_all":["branch-a","branch-b"],"body_excerpt":"Acceptance criteria: both branches clear."},
       {"order":18,"state":"queued","structured":true,"id":"branch-a","title":"First decision branch","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."},
-      {"order":19,"state":"queued","structured":true,"id":"branch-b","title":"Second decision branch","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."}
+      {"order":19,"state":"queued","structured":true,"id":"branch-b","title":"Second decision branch","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: choose policy."},
+      {"order":20,"state":"in_flight","structured":true,"id":"mixed-asker","title":"Resolve several worker questions","repo":"alpha","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: all questions resolve."},
+      {"order":21,"state":"queued","structured":true,"id":"behind-mixed-worker","title":"Publish after every worker question","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"mixed-asker","body_excerpt":"Acceptance criteria: all roots clear."},
+      {"order":22,"state":"queued","structured":true,"id":"cycle-dependent","title":"Reconcile sibling cycle","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"cycle-a,cycle-b","blocked_by_all":["cycle-a","cycle-b"],"body_excerpt":"Acceptance criteria: cycle clears."},
+      {"order":23,"state":"queued","structured":true,"id":"cycle-a","title":"Cycle side A","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"cycle-b","body_excerpt":"Acceptance criteria: cycle clears."},
+      {"order":24,"state":"queued","structured":true,"id":"cycle-b","title":"Cycle side B","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"cycle-a","body_excerpt":"Acceptance criteria: cycle clears."}
     ]
     | .tasks = [
       {"id":"asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting reply"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision","summary":"which port should the exporter bind"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
-      {"id":"keyed-asker","kind":"ship","project":"beta","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"api-shape","verb":"needs-decision","summary":"choose v1 or v2 response shape"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"keyed-asker","title":"Build the API","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
+      {"id":"keyed-asker","kind":"ship","project":"beta","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"api-shape","verb":"needs-decision","summary":"choose v1 or v2 response shape"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"keyed-asker","title":"Build the API","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
+      {"id":"mixed-asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting several answers"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision"},{"key":"route-one","verb":"needs-decision"},{"key":"route-two","verb":"needs-decision"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"mixed-asker","title":"Resolve several worker questions","repo":"alpha","project_resolved":true,"kind":"ship"}}
     ]
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
@@ -960,12 +970,14 @@ test_keyless_questions_and_blocker_chains() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "keyless-question capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | map(select(.reason | contains("Worker question being handled in chat"))) | length) == 1
+    (.pipeline.blocked | map(select(.reason | contains("Worker question being handled in chat"))) | length) == 2
     and (.pipeline.blocked | map(select(.reason | contains("Worker question"))) | .[0].what_you_can_do | contains("firstmate is handling"))
     and ([.pipeline.blocked[] | select(.waits_on != null) | .waits_on[0]] | any(contains("waiting on your decision")))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("blocked by") and contains("currently")))
-    and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2)] | length) == 1
-    and ([.pipeline.blocked[] | select((.waits_on // []) | length == 2) | .waits_on | join(" ")] | .[0] | contains("unavailable"))
+    and any(.pipeline.blocked[];
+      ((.waits_on // []) | length) == 2
+      and ((.waits_on | join(" ")) | contains("worker question"))
+      and ((.waits_on | join(" ")) | contains("unavailable")))
     and any(.pipeline.blocked[];
       ((.waits_on // [] | join(" ")) as $chain
        | ([$chain | scan("blocked by")] | length) >= 6
@@ -980,6 +992,13 @@ test_keyless_questions_and_blocker_chains() {
       (.reason | contains(","))
       and ((.waits_on // []) | length) == 1
       and ((.waits_on | join(" ")) | contains("waiting on your decision")))
+    and any(.pipeline.blocked[];
+      ((.waits_on // []) | length) == 3
+      and ((.waits_on | join(" ")) | contains("worker question"))
+      and (([.waits_on[] | select(contains("waiting on your decision"))] | length) == 2))
+    and any(.pipeline.blocked[];
+      ((.waits_on // [] | join(" ")) | contains("circular dependency"))
+      and (.what_you_can_do | contains("firstmate reconciles this circular dependency")))
     and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("which port")) | not)
   ' >/dev/null || fail "keyless questions or blocker chains are wrong: $json"
   html=$(cat "$output")
