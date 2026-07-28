@@ -541,6 +541,11 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
   local home="$TMP_ROOT/captain-hold-home" snapshot="$TMP_ROOT/captain-hold-snapshot.json" environment="$TMP_ROOT/captain-hold-environment.json" output="$TMP_ROOT/captain-hold-home/data/captain-hold.html" json
   make_fixture "$home" "$snapshot" "$environment"
   jq '
+    .tasks[0].hints.open_decisions = [
+      {"key":"build-choice-one"},
+      {"key":"build-choice-two"}
+    ]
+    |
     .secondmate_current.records[0].decisions_open = [
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
@@ -553,11 +558,18 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 4
-    and .measures.open_captain_actions == 2
-    and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("2 structured captain"))
+    (.pipeline.blocked | length) == 5
+    and .measures.open_captain_actions == 4
+    and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
-  pass "secondmate captain holds appear once in decisions and pipeline waiting work"
+  [ "$(grep -o 'class="verb verb-decide"' "$output" | wc -l | tr -d ' ')" = 4 ] ||
+    fail "captain decisions were collapsed or duplicated in the needs-you roll call"
+  [ "$(grep -o '<span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">item-' "$output" | wc -l | tr -d ' ')" = 4 ] ||
+    fail "captain decision rows do not each expose an opaque item ID"
+  assert_grep 'Open decision raised by work already under way.' "$output" "open captain decisions lack a privacy-safe reason"
+  assert_grep 'A queued choice is held for your decision.' "$output" "queued captain hold lacks a privacy-safe reason"
+  assert_no_grep '>4 more<' "$output" "captain decisions were replaced by an anonymous aggregate"
+  pass "captain actions retain item-level identity and privacy-safe reasons"
 }
 
 test_approval_signal_and_max_effort_survive_safe_normalization() {
@@ -758,10 +770,17 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_present "$output" "capacity dashboard was not written"
   [ "$before" = "$(cksum "$home/data/backlog.md")" ] || fail "capacity run mutated the backlog"
   assert_grep '<meta name="viewport"' "$output" "dashboard lacks responsive viewport metadata"
-  assert_grep 'grid-template-columns:repeat(4,minmax(0,1fr))' "$output" "dashboard pipeline lacks shrink-safe grid tracks"
+  assert_grep 'minmax(0,1fr)' "$output" "dashboard grids lack shrink-safe tracks"
   assert_grep 'overflow-wrap:anywhere' "$output" "dashboard lacks long-token containment"
   assert_grep '@media(max-width:760px)' "$output" "dashboard lacks narrow-width safeguards"
+  assert_grep 'prefers-color-scheme: light' "$output" "dashboard lacks a light-mode theme"
+  assert_grep '--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087708;--warn:#8a6200;--serious:#a54824;--crit:#ae2525' "$output" "light-mode text status tokens are not contrast-safe"
   assert_grep 'class="skip" href="#main"' "$output" "dashboard lacks a keyboard skip link"
+  assert_grep '<body class="sev-' "$output" "dashboard lacks the severity-classed alarm band"
+  assert_grep 'id="needs-you"' "$output" "dashboard lacks the needs-you roll call"
+  assert_grep 'id="blocked-items"' "$output" "dashboard lacks the blocked-items roll call"
+  assert_grep 'class="meterbar"' "$output" "dashboard lacks the working-vs-waiting meter"
+  assert_grep 'Why it waits' "$output" "dashboard lacks the waiting breakdown"
   for stage in queued ready building validating_fixing pr_ci_approval blocked recently_landed; do
     assert_grep "id=\"stage-$stage\"" "$output" "dashboard is missing stage $stage"
   done

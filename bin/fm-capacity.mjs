@@ -586,7 +586,14 @@ function classify(snapshot, environment) {
       markUnavailable(itemRef("main", task.id), "main", "in-flight work lacks project provenance");
     }
     const open = task.hints?.open_decisions || [];
-    for (const decision of open) decisions.push({ owner: "main", task: itemRef("main", task.id), key: itemRef("decision", decision.key || task.id) });
+    for (const decision of open) {
+      decisions.push({
+        owner: "main",
+        task: itemRef("main", task.id),
+        key: itemRef("decision", decision.key || task.id),
+        reason: "Open decision raised by work already under way.",
+      });
+    }
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
     }
@@ -621,7 +628,12 @@ function classify(snapshot, environment) {
     }
     if (isSuperseded(record)) continue;
     if (record.kind === "captain" && record.hold_kind === "captain") {
-      decisions.push({ owner: "main", task: itemRef("main", record.id), key: itemRef("decision", record.id) });
+      decisions.push({
+        owner: "main",
+        task: itemRef("main", record.id),
+        key: itemRef("decision", record.id),
+        reason: "A queued choice is held for your decision.",
+      });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
       pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Captain hold"));
       continue;
@@ -680,7 +692,12 @@ function classify(snapshot, environment) {
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
-      decisions.push({ owner: ownerRef(mate.id), task: itemRef(mate.id, decision.id || mate.id), key: itemRef("decision", decision.key || decision.id || mate.id) });
+      decisions.push({
+        owner: ownerRef(mate.id),
+        task: itemRef(mate.id, decision.id || mate.id),
+        key: itemRef("decision", decision.key || decision.id || mate.id),
+        reason: "Open decision raised by work already under way.",
+      });
     }
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
@@ -1101,7 +1118,10 @@ function classify(snapshot, environment) {
       ...(recentLandingsComplete ? [] : [recentLandingsProvenance]),
     ],
   };
-  return sanitizeDeep(model);
+  return {
+    model: sanitizeDeep(model),
+    captainActions: sanitizeDeep(decisions),
+  };
 }
 
 function redact(value) {
@@ -1192,60 +1212,103 @@ function artifact(value) {
   return `<a href="${h(safe)}">${h(safe)}</a>`;
 }
 
-function pipelineCard(card) {
-  return `<article class="work-card">
-    <div class="card-top"><span class="item-id">${h(card.id)}</span><span class="owner">${h(card.owner)}</span></div>
-    <h3>${h(card.title)}</h3>
-    <p>${h(card.reason || "No additional gate detail.")}</p>
-    <dl><div><dt>Evidence</dt><dd>${h(card.provenance)}</dd></div>${card.repo ? `<div><dt>Project</dt><dd>${h(card.repo)}</dd></div>` : ""}${card.age_days !== null && card.age_days !== undefined ? `<div><dt>Age</dt><dd>${h(card.age_days)} ${card.age_days === 1 ? "day" : "days"}</dd></div>` : ""}</dl>
-    ${card.artifact ? `<div class="artifact">${artifact(card.artifact)}</div>` : ""}
-  </article>`;
+function manifestRow(card) {
+  const meta = [card.kind, card.age_days !== null && card.age_days !== undefined ? `${card.age_days}d` : null]
+    .filter(Boolean).map((part) => h(part)).join(" · ");
+  return `<li class="mrow">
+    <span class="mid"><span class="item-id">${h(card.id)}</span><span class="mowner">${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span></span>
+    <span class="mreason">${h(card.reason || "No additional gate detail.")}${card.artifact ? ` ${artifact(card.artifact)}` : ""}</span>
+    <span class="mmeta">${meta}</span>
+  </li>`;
 }
 
-function renderHtml(model) {
-  const measureCards = [
-    ["Useful ready supply", model.measures.useful_ready_work, "Grounded and independently startable"],
-    ["Active flow", model.measures.active_independent_work, "Ephemeral and secondmate child work"],
-    ["Waiting work", model.measures.waiting_work, "Queued, gated, or at delivery gates"],
-    ["Captain actions", model.measures.open_captain_actions, "Structured decisions and ready approvals"],
-    ["Primary bottleneck", model.primary_bottleneck.classification, model.primary_bottleneck.id || "No action ID"],
-  ].map(([label, value, note]) => `<article class="metric"><span>${h(label)}</span><strong>${h(value)}</strong><small>${h(note)}</small></article>`).join("");
+function severityFor(model) {
+  if (!model.primary_bottleneck.id) return "good";
+  const priority = model.recommendations.find((rec) => rec.id === model.primary_bottleneck.id)?.priority;
+  if (priority === undefined) return "info";
+  if (priority <= 20) return "critical";
+  if (priority <= 40) return "serious";
+  if (priority <= 70) return "info";
+  return "neutral";
+}
 
-  const stageHtml = STAGES.map((stage) => `<section class="stage" aria-labelledby="stage-${stage}">
-    <header><h2 id="stage-${stage}">${h(STAGE_LABELS[stage])}</h2><span>${model.pipeline[stage].length}</span></header>
-    <div class="stage-cards">${model.pipeline[stage].length ? model.pipeline[stage].map(pipelineCard).join("") : `<p class="empty">No current items.</p>`}</div>
+function copyPrompt(rec) {
+  return `<div class="prompt"><code>${h(rec.prompt)}</code><button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button></div>`;
+}
+
+function renderHtml(model, captainActions) {
+  const severity = severityFor(model);
+  const primaryRec = model.recommendations.find((rec) => rec.id === model.primary_bottleneck.id) || null;
+  const working = model.pipeline.building.length + model.pipeline.validating_fixing.length;
+  const gatesCount = model.pipeline.pr_ci_approval.length;
+  const readyCount = model.pipeline.ready.length;
+  const queuedCount = model.pipeline.queued.length;
+  const blockedCount = model.pipeline.blocked.length;
+  const waiting = queuedCount + readyCount + gatesCount + blockedCount;
+  const total = working + waiting;
+
+  const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
+  const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
+  const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold");
+  const needsYouCount = model.measures.open_captain_actions;
+  const needsYouRows = [
+    ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
+    ...captainActions.map((action) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
+  ].join("");
+  const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}</span></li>`).join("");
+
+  const blockedReasonCounts = new Map();
+  for (const card of otherBlockedCards) {
+    const reason = (card.reason || "unspecified gate").toLowerCase();
+    blockedReasonCounts.set(reason, (blockedReasonCounts.get(reason) || 0) + 1);
+  }
+  const captainHeldWaiting = captainDecisionCards.length;
+  const approvalReadyCount = model.pipeline.pr_ci_approval.filter((card) => card.approval_ready === true).length;
+  const whys = [
+    ...(captainHeldWaiting ? [{ tone: "decide", count: captainHeldWaiting, label: "held for your decision", detail: "" }] : []),
+    { tone: "blocked", count: otherBlockedCards.length, label: "blocked", detail: [...blockedReasonCounts.entries()].map(([reason, count]) => `${count} ${reason}`).join(" · ") },
+    { tone: "gates", count: gatesCount, label: "at delivery gates", detail: approvalReadyCount ? `${approvalReadyCount} ready for approval` : "validation or CI under way" },
+    { tone: "ready", count: readyCount, label: "ready, not yet started", detail: "waiting on dispatch" },
+    { tone: "queued", count: queuedCount, label: "not ready", detail: [model.readiness.definition_gaps.length ? `${model.readiness.definition_gaps.length} definition gap${model.readiness.definition_gaps.length === 1 ? "" : "s"}` : "", model.readiness.conservative_overlap_gates.length ? `${model.readiness.conservative_overlap_gates.length} serialized for overlap` : ""].filter(Boolean).join(" · ") },
+  ].filter((why) => why.count > 0);
+  const whyHtml = whys.length
+    ? `<div class="whys"><h3>Why it waits</h3><ul>${whys.map((why) => `<li><span class="why-n why-${why.tone}">${h(why.count)}</span><span class="why-l">${h(why.label)}${why.detail ? `<small>${h(why.detail)}</small>` : ""}</span></li>`).join("")}</ul></div>`
+    : "";
+  const meterBar = total === 0
+    ? `<p class="empty">No current work items are in the pipeline.</p>`
+    : `<div class="meterbar" role="img" aria-label="${h(`${working} working and ${waiting} waiting of ${total} current items`)}">${working ? `<span class="m-working" style="flex-grow:${working}"></span>` : ""}${waiting ? `<span class="m-waiting" style="flex-grow:${waiting}"></span>` : ""}</div>`;
+
+  const manifest = STAGES.map((stage) => `<section class="stage-group" aria-labelledby="stage-${stage}">
+    <h3 id="stage-${stage}" class="stage-h"><span class="stage-n${stage === "blocked" && model.pipeline.blocked.length ? " stage-n-alarm" : ""}">${model.pipeline[stage].length}</span>${h(STAGE_LABELS[stage])}</h3>
+    ${model.pipeline[stage].length ? `<ul class="mlist">${model.pipeline[stage].map(manifestRow).join("")}</ul>` : `<p class="empty">None.</p>`}
   </section>`).join("");
 
-  const mateRows = model.lanes.persistent_secondmates.map((mate) => `<article class="lane-card">
-    <div class="card-top"><span class="item-id">${h(mate.id)}</span><span class="status ${mate.utilization.startsWith("healthy") ? "healthy" : ""}">${h(mate.current)}</span></div>
-    <h3>${h(mate.utilization)}</h3>
-    <p><strong>Scope:</strong> ${h(mate.scope)}</p>
-    <p><strong>Projects:</strong> ${h((mate.projects || []).join(", ") || "None recorded")}</p>
-    <p>${h(mate.active_children)} active child item(s), ${h(mate.grounded_ready_in_scope)} grounded in-scope item(s), ${h(mate.ready_in_scope)} executable now.</p>
-    <p><strong>Home lane:</strong> backend ${h(mate.runtime.backend.name)} ${mate.runtime.backend.available ? "available" : "unavailable"}; auth ${h(mate.runtime.github_auth.status)}; ${h((mate.runtime.dispatch.lanes || []).filter((lane) => lane.available).length)} executable dispatch lane(s).</p>
-    <small>${h(mate.provenance)}</small>
-  </article>`).join("") || `<p class="empty">No persistent secondmates are registered.</p>`;
+  const mateRows = model.lanes.persistent_secondmates.map((mate) => {
+    const laneCount = (mate.runtime.dispatch.lanes || []).filter((lane) => lane.available).length;
+    const tone = mate.utilization.startsWith("healthy") || mate.utilization.startsWith("active on") ? "ok"
+      : mate.utilization.includes("unavailable") ? "bad" : "warn";
+    return `<li class="lane-row"><span class="dot dot-${tone}" aria-hidden="true"></span><span><strong>${h(mate.id)}</strong> · ${h(mate.utilization)} · ${h(mate.active_children)} active, ${h(mate.ready_in_scope)} startable now · backend ${h(mate.runtime.backend.name)} ${mate.runtime.backend.available ? "up" : "down"}, auth ${h(mate.runtime.github_auth.status)}, ${h(laneCount)} lane${laneCount === 1 ? "" : "s"} · ${h(mate.scope)}</span></li>`;
+  }).join("") || `<li class="empty">No persistent secondmates are registered.</li>`;
 
-  const dispatchRows = (model.lanes.ephemeral_workers.configured_dispatch.lanes || []).map((lane) => `<article class="lane-card">
-    <div class="card-top"><span class="item-id">${h(lane.harness)}${lane.model ? ` / ${h(lane.model)}` : ""}</span><span class="status ${lane.available ? "healthy" : "warning"}">${lane.available ? "available" : "unavailable"}</span></div>
-    <h3>${h(lane.when)}</h3>
-    <p>${h(lane.availability_evidence)}</p>
-    <small>${h(lane.quota)}</small>
-  </article>`).join("") || `<p class="empty">No usable dispatch lanes were resolved.</p>`;
+  const dispatchRows = (model.lanes.ephemeral_workers.configured_dispatch.lanes || []).map((lane) => `<li class="lane-row"><span class="dot dot-${lane.available ? "ok" : "bad"}" aria-hidden="true"></span><span><strong>${h(lane.harness)}${lane.model ? ` / ${h(lane.model)}` : ""}${lane.effort ? ` (${h(lane.effort)})` : ""}</strong> · ${lane.available ? "available" : "unavailable"} · ${h(lane.when)} · ${h(lane.availability_evidence)}</span></li>`).join("") || `<li class="empty">No usable dispatch lanes were resolved.</li>`;
 
-  const recs = model.recommendations.map((rec) => `<article class="recommendation" id="${h(rec.id)}">
-    <div class="rec-head"><span class="action-id">${h(rec.id)}</span><h3>${h(rec.classification)}</h3></div>
-    <dl>
-      <div><dt>Evidence</dt><dd>${h(rec.evidence)}</dd></div>
-      <div><dt>Throughput consequence</dt><dd>${h(rec.expected_throughput_consequence)}</dd></div>
-      <div><dt>Safety and authority</dt><dd>${h(rec.safety_authority_boundary)}</dd></div>
-      <div><dt>Next action</dt><dd>${h(rec.recommended_next_action)}</dd></div>
-    </dl>
-    <div class="prompt"><code>${h(rec.prompt)}</code><button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button></div>
-  </article>`).join("") || `<p class="empty">No capacity action is currently recommended. Healthy idle is acceptable.</p>`;
+  const secondaryRecs = model.recommendations.filter((rec) => rec.id !== model.primary_bottleneck.id);
+  const recs = secondaryRecs.map((rec) => `<article class="rec" id="${h(rec.id)}">
+    <p class="rec-line"><span class="action-id">${h(rec.id)}</span><strong>${h(rec.classification)}</strong></p>
+    <p class="rec-evidence">${h(rec.evidence)}</p>
+    <p class="rec-next">&rarr; ${h(rec.recommended_next_action)}</p>
+    <p class="rec-fine">${h(rec.expected_throughput_consequence)} ${h(rec.safety_authority_boundary)}</p>
+    ${copyPrompt(rec)}
+  </article>`).join("") || `<p class="empty">No further capacity action is recommended. Healthy idle is acceptable.</p>`;
 
   const gaps = model.readiness.definition_gaps.map((row) => `<li><strong>${h(`${row.owner}/${row.id}`)}</strong><span>${h(row.gaps.join("; "))}</span></li>`).join("") || `<li><strong>None</strong><span>No definition gaps detected in the bounded queue.</span></li>`;
-  const landed = model.pipeline.recently_landed.map((card) => `<li><strong>${h(`${card.owner}/${card.id}`)}</strong><span>${h(card.title)}</span>${card.artifact ? artifact(card.artifact) : ""}</li>`).join("") || `<li><strong>None</strong><span>No recent completions are in the bounded baseline.</span></li>`;
+  const landed = model.pipeline.recently_landed.map((card) => `<li><strong>${h(`${card.owner}/${card.id}`)}</strong><span>${h(card.reason)}</span>${card.artifact ? artifact(card.artifact) : ""}</li>`).join("") || `<li><strong>None</strong><span>No recent completions are in the bounded baseline.</span></li>`;
+
+  const alarmTail = primaryRec
+    ? `<p class="next">&rarr; <strong>Next:</strong> ${h(primaryRec.recommended_next_action)}</p>
+      ${copyPrompt(primaryRec)}
+      <p class="fine">${h(primaryRec.expected_throughput_consequence)} ${h(primaryRec.safety_authority_boundary)}</p>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -1255,40 +1318,139 @@ function renderHtml(model) {
   <meta name="color-scheme" content="dark light">
   <title>Firstmate capacity dashboard</title>
   <style>
-    :root{--ink:#e9eef8;--muted:#9cabbe;--panel:#111923;--panel2:#172231;--line:#2b3b50;--accent:#61d7c2;--accent2:#f1bd66;--danger:#ff8f8f;--bg:#081019;--shadow:0 16px 40px rgba(0,0,0,.24);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark}
-    *{box-sizing:border-box}html{background:var(--bg);scroll-behavior:smooth}body{margin:0;color:var(--ink);background:radial-gradient(circle at 15% 0%,#12303d 0,transparent 34rem),var(--bg);line-height:1.5;overflow-wrap:anywhere}a{color:#8ae6d6;text-underline-offset:.18em}button,a{outline-offset:3px}button:focus-visible,a:focus-visible{outline:3px solid var(--accent2)}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;z-index:10;background:#fff;color:#000;padding:.7rem 1rem;border-radius:.5rem}.shell{width:min(1560px,100%);margin:auto;padding:clamp(1rem,3vw,3rem)}.hero{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(18rem,.7fr);gap:1.5rem;align-items:end;padding:clamp(1.5rem,4vw,3.5rem) 0 2rem}.eyebrow{margin:0 0 .5rem;color:var(--accent);font-weight:800;letter-spacing:.12em;text-transform:uppercase;font-size:.78rem}.hero h1{font-size:clamp(2.2rem,6vw,5.4rem);line-height:.95;letter-spacing:-.055em;margin:0;max-width:12ch}.hero p{color:var(--muted);max-width:70ch}.freshness{border:1px solid var(--line);background:rgba(17,25,35,.82);padding:1rem;border-radius:1rem;box-shadow:var(--shadow)}.freshness strong,.freshness span{display:block}.freshness span{color:var(--muted);font-size:.9rem;margin-top:.35rem}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.85rem;margin:1rem 0 2.5rem}.metric{min-width:0;background:linear-gradient(145deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:1rem;padding:1rem}.metric span,.metric small{display:block;color:var(--muted)}.metric strong{display:block;font-size:clamp(1.4rem,2.6vw,2.4rem);line-height:1.1;margin:.4rem 0}.section-title{display:flex;justify-content:space-between;gap:1rem;align-items:end;margin:3.5rem 0 1rem}.section-title h2{font-size:clamp(1.6rem,3vw,2.5rem);margin:0}.section-title p{color:var(--muted);max-width:65ch;margin:0}.pipeline{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem;align-items:start}.stage{min-width:0;border:1px solid var(--line);background:rgba(12,20,29,.78);border-radius:1rem;padding:.85rem}.stage>header{display:flex;align-items:center;justify-content:space-between;gap:.75rem;border-bottom:1px solid var(--line);padding:.25rem .2rem .75rem}.stage>header h2{font-size:1rem;margin:0}.stage>header span,.action-id{background:#21443f;color:#a9f7e8;border-radius:999px;padding:.16rem .58rem;font-weight:800;font-size:.78rem}.stage-cards{display:grid;gap:.7rem;margin-top:.7rem}.work-card,.lane-card,.recommendation{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:.8rem;padding:.85rem}.work-card h3,.lane-card h3,.recommendation h3{font-size:1rem;margin:.55rem 0}.work-card p,.lane-card p{font-size:.88rem;color:var(--muted);margin:.4rem 0}.card-top,.rec-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem}.item-id{font:700 .76rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent)}.owner,.status{font-size:.72rem;color:var(--muted);text-align:right}.status{border:1px solid var(--line);padding:.14rem .45rem;border-radius:999px}.status.healthy{color:var(--accent);border-color:#2c675d}.status.warning{color:var(--danger);border-color:#70414a}.work-card dl,.recommendation dl{margin:.6rem 0 0}.work-card dl div,.recommendation dl div{margin-top:.45rem}.work-card dt,.recommendation dt{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.work-card dd,.recommendation dd{margin:0;font-size:.86rem}.artifact,.path{font:500 .75rem ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:.65rem;max-width:100%;overflow-wrap:anywhere}.empty{color:var(--muted);font-style:italic}.lanes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.lane-group{min-width:0;border:1px solid var(--line);border-radius:1rem;background:rgba(12,20,29,.75);padding:1rem}.lane-group>h3{margin:.2rem 0 1rem}.lane-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem}.recommendations{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.recommendation{border-left:4px solid var(--accent2);padding:1.1rem}.rec-head{justify-content:flex-start}.rec-head h3{font-size:1.2rem}.recommendation dl div{display:grid;grid-template-columns:minmax(9rem,.34fr) minmax(0,1fr);gap:1rem;border-top:1px solid var(--line);padding-top:.65rem}.prompt{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.6rem;align-items:center;margin-top:1rem;background:#09121b;border:1px solid var(--line);border-radius:.65rem;padding:.65rem}.prompt code{font-size:.78rem;white-space:normal}.prompt button{border:0;border-radius:.5rem;background:var(--accent);color:#06241f;font-weight:800;padding:.55rem .75rem;cursor:pointer}.health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.list-panel{background:var(--panel);border:1px solid var(--line);border-radius:1rem;padding:1rem;min-width:0}.list-panel h3{margin-top:0}.clean-list{list-style:none;margin:0;padding:0;display:grid;gap:.7rem}.clean-list li{display:grid;grid-template-columns:minmax(8rem,.35fr) minmax(0,1fr);gap:.75rem;border-top:1px solid var(--line);padding-top:.65rem;min-width:0}.clean-list li>*{min-width:0}.clean-list span{color:var(--muted)}footer{margin-top:4rem;padding:1.5rem 0;color:var(--muted);border-top:1px solid var(--line);font-size:.85rem}
-    @media(max-width:1100px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.pipeline{grid-template-columns:repeat(2,minmax(0,1fr))}.recommendations{grid-template-columns:1fr}}
-    @media(max-width:760px){.shell{padding:1rem}.hero{grid-template-columns:1fr}.metrics,.pipeline,.lanes,.health-grid,.lane-grid{grid-template-columns:1fr}.section-title{display:block}.section-title p{margin-top:.4rem}.recommendation dl div,.clean-list li{grid-template-columns:1fr;gap:.15rem}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.hero h1{font-size:clamp(2.4rem,15vw,4rem)}}
-    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-    @media print{body{background:#fff;color:#111}.shell{width:100%;padding:0}.work-card,.lane-card,.recommendation,.stage,.lane-group,.list-panel,.metric,.freshness{box-shadow:none;background:#fff;color:#111;border-color:#bbb}.pipeline{grid-template-columns:repeat(2,minmax(0,1fr))}.prompt button{display:none}a{color:#0645ad}}
+    :root{color-scheme:dark;--bg:#0d0d0d;--ink:#ffffff;--ink2:#c3c2b7;--muted:#898781;--hair:#2c2c2a;--line:rgba(255,255,255,.10);--blue:#3987e5;--good:#0ca30c;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--gray:#52514e;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+    @media(prefers-color-scheme: light){:root{color-scheme:light;--bg:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087708;--warn:#8a6200;--serious:#a54824;--crit:#ae2525;--gray:#c3c2b7}}
+    .sev-critical{--sev:var(--crit)}.sev-serious{--sev:var(--serious)}.sev-info{--sev:var(--blue)}.sev-neutral{--sev:var(--muted)}.sev-good{--sev:var(--good)}
+    *{box-sizing:border-box}html{background:var(--bg)}
+    body{margin:0;color:var(--ink);background:var(--bg);line-height:1.45;overflow-wrap:anywhere}
+    a{color:var(--blue);text-underline-offset:.18em}button,a{outline-offset:3px}button:focus-visible,a:focus-visible{outline:3px solid var(--blue)}
+    .skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;z-index:10;background:var(--ink);color:var(--bg);padding:.7rem 1rem}
+    h1,h2,h3,p,ul{margin:0}ul{padding:0;list-style:none}
+    .sevbar{height:.7rem;background:var(--sev)}
+    .band{padding:clamp(1.5rem,4vw,3.25rem) clamp(1rem,6vw,5rem)}
+    .wrap{max-width:70rem;margin-left:auto;margin-right:auto}
+    .band-alarm{background:color-mix(in srgb,var(--sev) 13%,var(--bg));border-bottom:1px solid var(--line)}
+    .kicker{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;color:var(--sev);font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:.76rem}
+    .kicker .stamp{color:var(--muted);letter-spacing:.02em;text-transform:none;font-weight:400;font-size:.76rem;text-align:right}
+    .band .kicker{margin-bottom:.6rem}
+    .headline{font-size:clamp(2.4rem,7vw,4.6rem);font-weight:800;letter-spacing:-.03em;line-height:.98}
+    .headline::first-letter{text-transform:uppercase}
+    .evidence{font-size:clamp(1.02rem,2vw,1.3rem);color:var(--ink2);max-width:75ch;margin-top:1rem}
+    .action-id{border:1px solid var(--sev,var(--muted));color:var(--sev,var(--ink));padding:.1rem .55rem;font:700 .72rem ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;vertical-align:middle;margin-left:.5rem}
+    .rollcall{margin-top:2.25rem}
+    .rollcall h2{font-size:.76rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;display:flex;align-items:baseline;gap:.6rem}
+    .rollcall h2 .n{font-size:2.1rem;letter-spacing:0;line-height:1}
+    .needs-you h2{color:var(--serious)}.blocked-items h2{color:var(--crit)}
+    .rollcall ul{margin-top:.6rem}
+    .rollcall li{display:grid;grid-template-columns:5.2rem minmax(0,.45fr) minmax(0,1fr);gap:.4rem 1.1rem;align-items:baseline;border-top:1px solid color-mix(in srgb,var(--sev) 30%,var(--hair));padding:.55rem 0;font-size:1.02rem;min-width:0}
+    .verb{font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem}
+    .verb-approve{color:var(--blue)}.verb-decide{color:var(--serious)}.verb-blocked{color:var(--crit)}
+    .who{font-weight:650;min-width:0}.who .item-id{margin-right:.35rem}
+    .why{color:var(--ink2);font-size:.92rem;min-width:0}
+    .item-id{font:700 .82rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
+    .next{margin-top:2rem;font-size:clamp(1.05rem,1.8vw,1.25rem)}
+    .prompt{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin-top:.9rem;border:1px solid var(--line);padding:.65rem .8rem;background:color-mix(in srgb,var(--bg) 55%,transparent)}
+    .prompt code{font-size:.78rem;white-space:normal;color:var(--ink2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .prompt button{border:1px solid var(--ink);background:var(--ink);color:var(--bg);font-weight:700;padding:.5rem .9rem;cursor:pointer;font-size:.82rem}
+    .fine{color:var(--muted);font-size:.76rem;margin-top:.8rem;max-width:100ch}
+    .band-meter .kicker{color:var(--muted)}
+    .split{display:flex;align-items:baseline;gap:1rem 2.75rem;flex-wrap:wrap;margin-top:.5rem}
+    .split .pair{display:flex;align-items:baseline;gap:.75rem}
+    .split .num{font-size:clamp(3rem,8vw,5.5rem);font-weight:850;line-height:1;letter-spacing:-.03em}
+    .num-working{color:var(--good)}
+    .split .lbl{font-size:1rem;color:var(--ink2);text-transform:uppercase;letter-spacing:.14em;font-weight:700}
+    .split .of{color:var(--muted);font-size:.9rem}
+    .meterbar{display:flex;gap:3px;height:2.9rem;margin-top:1.4rem}
+    .m-working{background:var(--good)}.m-waiting{background:var(--gray)}
+    .whys{margin-top:1.6rem}
+    .whys h3{font-size:.76rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+    .whys ul{display:flex;flex-wrap:wrap;gap:1.1rem 2.75rem;margin-top:.8rem}
+    .whys li{display:flex;align-items:baseline;gap:.65rem;min-width:0}
+    .why-n{font-size:1.9rem;font-weight:800;line-height:1}
+    .why-decide{color:var(--serious)}.why-blocked{color:var(--crit)}.why-gates{color:var(--warn)}.why-ready{color:var(--blue)}.why-queued{color:var(--muted)}
+    .why-l{font-size:.92rem;color:var(--ink2)}.why-l small{display:block;color:var(--muted);font-size:.76rem}
+    .band-quiet{border-top:1px solid var(--line);font-size:.88rem}
+    .qhead{font-size:.76rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--hair);padding-bottom:.45rem;margin-top:2.4rem}
+    .band-quiet>.qhead:first-child{margin-top:0}
+    .rec{border-bottom:1px solid var(--hair);padding:1rem 0;max-width:70rem}
+    .rec-line strong{font-size:1rem}.rec-line strong::first-letter{text-transform:uppercase}
+    .rec-line .action-id{margin-left:0;margin-right:.6rem;--sev:var(--muted)}
+    .rec-evidence{color:var(--ink2);margin-top:.35rem;max-width:90ch}
+    .rec-next{margin-top:.35rem;font-weight:650}
+    .rec-fine{color:var(--muted);font-size:.76rem;margin-top:.4rem;max-width:100ch}
+    .stage-group{margin-top:1.4rem}
+    .stage-h{display:flex;align-items:baseline;gap:.6rem;font-size:.74rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+    .stage-n{font-size:1.35rem;letter-spacing:0;color:var(--ink)}
+    .stage-n-alarm{color:var(--crit)}
+    .mlist{margin-top:.4rem}
+    .mrow{display:grid;grid-template-columns:minmax(11rem,.4fr) minmax(0,1fr) auto;gap:.3rem 1.25rem;border-top:1px solid var(--hair);padding:.45rem 0;align-items:baseline;min-width:0}
+    .mid{min-width:0}.mowner{color:var(--muted);font-size:.78rem;margin-left:.5rem}
+    .mreason{color:var(--ink2);min-width:0}
+    .mmeta{color:var(--muted);font-size:.76rem;text-align:right}
+    .lanes-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 3rem}
+    .lanes-grid h3{font-size:.8rem;color:var(--ink2);margin-top:1.1rem;text-transform:uppercase;letter-spacing:.1em}
+    .lane-row{display:flex;gap:.6rem;align-items:baseline;border-top:1px solid var(--hair);padding:.5rem 0;color:var(--ink2);min-width:0;margin-top:.4rem}
+    .dot{flex:none;width:.6rem;height:.6rem;border-radius:50%;align-self:center}
+    .dot-ok{background:var(--good)}.dot-bad{background:var(--crit)}.dot-warn{background:var(--warn)}
+    .appendix{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 3rem}
+    .appendix h3{font-size:.8rem;color:var(--ink2);margin-top:1.1rem;text-transform:uppercase;letter-spacing:.1em}
+    .clean-list{margin-top:.4rem}
+    .clean-list li{display:grid;grid-template-columns:minmax(8rem,.4fr) minmax(0,1fr);gap:.75rem;border-top:1px solid var(--hair);padding:.45rem 0;min-width:0}
+    .clean-list li>*{min-width:0}.clean-list span{color:var(--ink2)}
+    .artifact,.path{font:500 .76rem ui-monospace,SFMono-Regular,Menlo,monospace;max-width:100%;overflow-wrap:anywhere}
+    .empty{color:var(--muted);font-style:italic;border-top:1px solid var(--hair);padding-top:.45rem;margin-top:.4rem}
+    footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
+    footer p{max-width:70rem;margin:.3rem auto}
+    @media(max-width:760px){.band{padding:1.25rem 1rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media print{body,html{background:#fff;color:#111}.band-alarm{background:#fff}.prompt button{display:none}a{color:#0645ad}}
   </style>
 </head>
-<body>
+<body class="sev-${severity}">
   <a class="skip" href="#main">Skip to dashboard</a>
-  <div class="shell">
-    <header class="hero">
-      <div><p class="eyebrow">Firstmate / meaningful throughput</p><h1>Capacity, without busywork.</h1><p>This view identifies what can safely flow now, what is actually holding delivery back, and where healthy idle should stay idle.</p></div>
-      <aside class="freshness" aria-label="Snapshot freshness"><strong>Generated ${h(model.generated)}</strong><span>${h(model.provenance.freshness)}</span><span>${h(model.provenance.secondmates)}</span></aside>
-    </header>
-    <main id="main">
-      <section aria-label="Top capacity measures" class="metrics">${measureCards}</section>
-      <div class="section-title"><h2>Delivery pipeline</h2><p>One current card per item, classified from authoritative current state and structured backlog evidence.</p></div>
-      <div class="pipeline">${stageHtml}</div>
-      <div class="section-title"><h2>Lane and scope alignment</h2><p>Ephemeral workers are created on demand. Persistent secondmates are healthy when idle unless grounded in-scope work is already ready.</p></div>
-      <section class="lanes" aria-label="Lane utilization">
-        <div class="lane-group"><h3>Ephemeral dispatch lanes</h3><p>${h(model.lanes.ephemeral_workers.pool)}</p><p>Runtime backend: <strong>${h(model.lanes.ephemeral_workers.backend.name)}</strong> - ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth: ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><div class="lane-grid">${dispatchRows}</div></div>
-        <div class="lane-group"><h3>Persistent secondmates</h3><div class="lane-grid">${mateRows}</div></div>
-      </section>
-      <div class="section-title"><h2>Capacity recommendations</h2><p>Stable action IDs are discussion handles. Copying or approving a prompt re-enters normal Firstmate lifecycles in chat; this page executes nothing.</p></div>
-      <section class="recommendations" aria-label="Prioritized capacity recommendations">${recs}</section>
-      <div class="section-title"><h2>Definition health and landed context</h2><p>Nominal queue depth is separated from dispatch-grade supply, with recent outcomes retained for context.</p></div>
-      <section class="health-grid">
-        <div class="list-panel"><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
-        <div class="list-panel"><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
-      </section>
-    </main>
-    <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>
-  </div>
+  <div class="sevbar" aria-hidden="true"></div>
+  <main id="main">
+    <section class="band band-alarm" aria-labelledby="headline"><div class="wrap">
+      <p class="kicker"><span>Primary bottleneck${model.primary_bottleneck.id ? `<span class="action-id">${h(model.primary_bottleneck.id)}</span>` : ""}</span><span class="stamp">Fleet capacity · generated ${h(model.generated)}</span></p>
+      <h1 class="headline" id="headline">${h(model.primary_bottleneck.classification)}</h1>
+      <p class="evidence">${h(primaryRec ? primaryRec.evidence : model.primary_bottleneck.evidence)}</p>
+      <div class="rollcall needs-you" id="needs-you">
+        <h2><span class="n">${h(needsYouCount)}</span> need${needsYouCount === 1 ? "s" : ""} you</h2>
+        <ul>${needsYouRows || `<li class="empty">Nothing is waiting on your decision or approval.</li>`}</ul>
+      </div>
+      <div class="rollcall blocked-items" id="blocked-items">
+        <h2><span class="n">${h(otherBlockedCards.length)}</span> blocked</h2>
+        <ul>${blockedRows || `<li class="empty">No work is blocked on dependencies, time gates, or external waits.</li>`}</ul>
+      </div>
+      ${alarmTail}
+    </div></section>
+    <section class="band band-meter" aria-labelledby="meter-title"><div class="wrap">
+      <p class="kicker">Working vs waiting</p>
+      <h2 class="split" id="meter-title">
+        <span class="pair"><span class="num num-working">${h(working)}</span><span class="lbl">working</span></span>
+        <span class="pair"><span class="num">${h(waiting)}</span><span class="lbl">waiting</span></span>
+        <span class="of">of ${h(total)} current item${total === 1 ? "" : "s"}</span>
+      </h2>
+      ${meterBar}
+      ${whyHtml}
+    </div></section>
+    <section class="band band-quiet" aria-label="Reference detail"><div class="wrap">
+      <h2 class="qhead">Also recommended · ranked by priority</h2>
+      ${recs}
+      <h2 class="qhead">Manifest · every current item by stage</h2>
+      ${manifest}
+      <h2 class="qhead">Lanes</h2>
+      <div class="lanes-grid">
+        <div><h3>Ephemeral dispatch lanes</h3><p class="fine">Created on demand: ${h(model.lanes.ephemeral_workers.pool)}. Runtime backend ${h(model.lanes.ephemeral_workers.backend.name)}: ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><ul>${dispatchRows}</ul></div>
+        <div><h3>Persistent secondmates</h3><p class="fine">Healthy when idle unless grounded in-scope work is already ready.</p><ul>${mateRows}</ul></div>
+      </div>
+      <h2 class="qhead">Definition health and landed context</h2>
+      <div class="appendix">
+        <div><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
+        <div><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
+      </div>
+    </div></section>
+  </main>
+  <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>
   <script>
     document.querySelectorAll('[data-copy]').forEach((button) => button.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = 'Copied'; }
@@ -1310,8 +1472,8 @@ function main() {
   if (!outputRelative || outputRelative.startsWith(`..${path.sep}`) || path.isAbsolute(outputRelative)) {
     throw new Error("dashboard path must stay inside the effective data directory");
   }
-  const model = classify(snapshot, environment);
-  writePrivateAtomic(output, renderHtml(model), snapshot.fm_home || path.dirname(allowedData));
+  const { model, captainActions } = classify(snapshot, environment);
+  writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {
