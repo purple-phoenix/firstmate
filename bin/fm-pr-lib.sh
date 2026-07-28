@@ -42,8 +42,9 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 
-# This is the single authoritative maximum length for newly created task IDs.
-# Creation entrypoints must use fm_task_id_creation_check before writing state.
+# This is the single authoritative maximum length for newly created dispatchable task IDs.
+# Dispatchable creation entrypoints must use fm_task_id_creation_check before writing state.
+# Deterministic, idempotent captain-decision holds owned by fm-decision-hold.sh are the sole non-dispatchable exception and must not be truncated.
 FM_TASK_ID_MAX_LENGTH=64
 
 fm_task_id_path_safe() {
