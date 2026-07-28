@@ -235,6 +235,17 @@ disable_serve_port() {
   "$(tailscale_bin)" serve --https="$1" off >/dev/null 2>&1
 }
 
+disable_owned_serve_port() {
+  local serve_port=$1 expected_target=$2 live_target
+  live_target=$(snapshot_serve_mapping "$serve_port") || return 1
+  [ -n "$live_target" ] || return 0
+  if [ -z "$expected_target" ] || [ "$live_target" != "$expected_target" ]; then
+    printf 'kept: serve port %s carries a non-dashboard mapping\n' "$serve_port"
+    return 0
+  fi
+  disable_serve_port "$serve_port"
+}
+
 cleanup_install_transaction() {
   local file
   for file in "$TX_CONFIG_BACKUP" "$TX_PLIST_BACKUP" "$TX_CHECK_BACKUP" "$TX_TRUST_BACKUP" "$TX_CONFIG_STAGE" "$TX_PLIST_STAGE"; do
@@ -456,7 +467,7 @@ cmd_install() {
 }
 
 cmd_uninstall() {
-  local serve_port="" configured_port label plist_path
+  local serve_port="" configured_port configured_target label plist_path
   while [ $# -gt 0 ]; do
     case "$1" in
       --serve-port) serve_port=${2:?--serve-port needs a value}; shift 2 ;;
@@ -465,13 +476,14 @@ cmd_uninstall() {
   done
   [ "$(uname)" = Darwin ] || err "uninstall requires macOS launchd"
   configured_port=$(configured_serve_port) || err "could not read the configured dashboard serve port"
+  configured_target=$(configured_mapping_target) || err "could not read the configured dashboard mapping target"
   [ -n "$serve_port" ] || serve_port=${configured_port:-$DEFAULT_SERVE_PORT}
   label=$(home_label)
   plist_path="$HOME/Library/LaunchAgents/$label.plist"
   if command -v tailscale >/dev/null 2>&1; then
-    disable_serve_port "$serve_port" || err "could not remove the dashboard mapping for port $serve_port"
+    disable_owned_serve_port "$serve_port" "$configured_target" || err "could not inspect or remove the dashboard mapping for port $serve_port"
     if [ -n "$configured_port" ] && [ "$configured_port" != "$serve_port" ]; then
-      disable_serve_port "$configured_port" || err "could not remove the configured dashboard mapping for port $configured_port"
+      disable_owned_serve_port "$configured_port" "$configured_target" || err "could not inspect or remove the configured dashboard mapping for port $configured_port"
     fi
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true

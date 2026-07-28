@@ -615,7 +615,7 @@ test_installer_plist_and_funnel_stance() {
 }
 
 test_installer_tracks_custom_serve_port() {
-  local fake_bin install_home launch_home launchctl_log launchctl_state occupied_error prior_config real_mv tailscale_log tailscale_state
+  local fake_bin install_home launch_home launchctl_log launchctl_state occupied_error prior_config real_mv tailscale_log tailscale_state uninstall_output
   fake_bin="$TMP_ROOT/fake-bin"
   install_home="$TMP_ROOT/install-home"
   launch_home="$TMP_ROOT/launch-home"
@@ -783,6 +783,20 @@ EOF
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
   assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
+  printf '%s\n' '19553|http://127.0.0.1:29998' '20554|http://127.0.0.1:29999' >> "$tailscale_state"
+  : > "$tailscale_log"
+  uninstall_output=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" uninstall --serve-port 20554) || fail "repeated uninstall with foreign mappings failed"
+  assert_contains "$uninstall_output" 'kept: serve port 20554 carries a non-dashboard mapping' "uninstall did not report the foreign requested mapping"
+  assert_contains "$uninstall_output" 'kept: serve port 19553 carries a non-dashboard mapping' "uninstall did not report the foreign configured mapping"
+  assert_no_grep 'off 20554' "$tailscale_log" "uninstall removed a foreign requested mapping"
+  assert_no_grep 'off 19553' "$tailscale_log" "uninstall removed a foreign configured mapping"
+  assert_grep '19553|http://127.0.0.1:29998' "$tailscale_state" "uninstall mutated the foreign configured mapping"
+  assert_grep '20554|http://127.0.0.1:29999' "$tailscale_state" "uninstall mutated the foreign requested mapping"
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$fake_bin/tailscale" serve --https=19553 off >/dev/null || fail "could not remove the configured foreign mapping fixture"
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$fake_bin/tailscale" serve --https=20554 off >/dev/null || fail "could not remove the requested foreign mapping fixture"
   cp "$install_home/config/dash.json" "$prior_config"
   : > "$tailscale_log"
   if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19668 PATH="$fake_bin:$PATH" \
