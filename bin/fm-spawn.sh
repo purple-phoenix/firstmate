@@ -1471,7 +1471,14 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || {
+  # The durable record is what makes the worker supervisable: without it the
+  # watcher, recovery, and teardown cannot find the task at all. Reporting a
+  # successful spawn here would leave a live worker nobody is tracking, so this
+  # stops instead, and the abort cleanup below still owns backend teardown.
+  echo "error: could not record task metadata at $STATE/$ID.meta" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
