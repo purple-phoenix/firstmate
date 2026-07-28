@@ -104,7 +104,7 @@ bin/fm-dash-install.sh uninstall
 A read-only install is the right shape for running the service ahead of command-consumption wiring: the page, detail views, refresh, and auto-render all work, every mutation route refuses, and any watcher registration from a prior writable install is removed.
 
 Install is idempotent and prints the stable URL, `https://<machine>.<tailnet>.ts.net:8443/`.
-Changing `--serve-port` creates and verifies the replacement, removes the previously recorded mapping, and only then records the new active port.
+Changing `--serve-port` stages the full replacement, verifies it, removes the previous mapping, and restores the prior config, launchd state, watcher registration, and mapping if any step fails.
 Uninstall removes the serve mapping, launchd agent, watcher check, and watcher trust registration but keeps `config/dash.json` and any pending commands.
 The launchd agent logs to `state/dash-serve.log`.
 On a non-macOS host the installer refuses and the service can be run under the local init system with the same tailscale serve mapping.

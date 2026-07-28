@@ -599,12 +599,13 @@ test_installer_plist_and_funnel_stance() {
   grep -n 'tailscale funnel' "$INSTALL_SH" && fail "installer invokes tailscale funnel"
   assert_grep 'assert_no_funnel' "$INSTALL_SH" "installer does not verify funnel is off"
   assert_grep 'never enables Funnel' "$INSTALL_SH" "installer does not declare the funnel boundary"
-  funnel_check=$(sed -n '/^assert_no_funnel()/,/^write_config()/p' "$INSTALL_SH")
+  funnel_check=$(sed -n '/^assert_no_funnel()/,/^write_config_file()/p' "$INSTALL_SH")
   assert_contains "$funnel_check" 'unsupported tailscale serve status schema' "Funnel verification does not reject unexpected schemas"
   assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
   assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
-  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'disable_serve_port "$serve_port"' "failed Funnel verification does not tear down the mapping"
-  assert_contains "$(sed -n '/write_config .*port/,/label=/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
+  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'fail_install' "failed Funnel verification does not enter transactional rollback"
+  assert_contains "$(sed -n '/^rollback_install()/,/^fail_install()/p' "$INSTALL_SH")" 'disable_serve_port "$TX_NEW_SERVE_PORT"' "transactional rollback does not tear down the replacement mapping"
+  assert_contains "$(sed -n '/^cmd_install()/,/^cmd_uninstall()/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
   assert_contains "$(sed -n '/^cmd_uninstall()/,/^cmd_status()/p' "$INSTALL_SH")" 'unregister_check' "uninstall does not unregister the watcher"
   escaped_home="$HOME_DIR/xml & < >"
   plist=$(FM_HOME="$escaped_home" FM_ROOT_OVERRIDE="$HOME_DIR/root & < >" "$INSTALL_SH" print-plist) || fail "print-plist with XML metacharacters failed"
@@ -614,10 +615,14 @@ test_installer_plist_and_funnel_stance() {
 }
 
 test_installer_tracks_custom_serve_port() {
-  local fake_bin install_home launch_home tailscale_log tailscale_state
+  local fake_bin install_home launch_home launchctl_log launchctl_state prior_config real_mv tailscale_log tailscale_state
   fake_bin="$TMP_ROOT/fake-bin"
   install_home="$TMP_ROOT/install-home"
   launch_home="$TMP_ROOT/launch-home"
+  launchctl_log="$TMP_ROOT/launchctl.log"
+  launchctl_state="$TMP_ROOT/launchctl.state"
+  prior_config="$TMP_ROOT/prior-dash.json"
+  real_mv=$(command -v mv)
   tailscale_log="$TMP_ROOT/tailscale.log"
   tailscale_state="$TMP_ROOT/tailscale.state"
   mkdir -p "$fake_bin" "$install_home" "$launch_home"
@@ -627,7 +632,38 @@ echo Darwin
 EOF
   cat > "$fake_bin/launchctl" <<'EOF'
 #!/bin/sh
-exit 0
+case "$1" in
+  print)
+    [ -f "$LAUNCHCTL_STATE" ] && [ "$(cat "$LAUNCHCTL_STATE")" = loaded ]
+    ;;
+  bootout)
+    : > "$LAUNCHCTL_STATE"
+    printf 'bootout\n' >> "$LAUNCHCTL_LOG"
+    ;;
+  bootstrap)
+    if [ -n "${LAUNCHCTL_FAIL_ONCE:-}" ] && [ ! -e "$LAUNCHCTL_FAIL_ONCE" ]; then
+      : > "$LAUNCHCTL_FAIL_ONCE"
+      printf 'bootstrap-failed\n' >> "$LAUNCHCTL_LOG"
+      exit 1
+    fi
+    printf 'loaded\n' > "$LAUNCHCTL_STATE"
+    printf 'bootstrap\n' >> "$LAUNCHCTL_LOG"
+    ;;
+  kickstart)
+    printf 'kickstart\n' >> "$LAUNCHCTL_LOG"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  cat > "$fake_bin/mv" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last=$arg; done
+if [ -n "${MV_FAIL_DEST:-}" ] && [ "$last" = "$MV_FAIL_DEST" ] && [ ! -e "$MV_FAIL_MARKER" ]; then
+  : > "$MV_FAIL_MARKER"
+  exit 1
+fi
+exec "$REAL_MV" "$@"
 EOF
   cat > "$fake_bin/tailscale" <<'EOF'
 #!/bin/sh
@@ -648,6 +684,11 @@ elif [ "$1" = serve ] && [ "${2:-}" = --bg ]; then
   printf 'map %s\n' "$port" >> "$TAILSCALE_LOG"
 elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
   port=${2#--https=}
+  if [ "${TAILSCALE_FAIL_OFF_PORT:-}" = "$port" ] && [ ! -e "$TAILSCALE_FAIL_OFF_MARKER" ]; then
+    : > "$TAILSCALE_FAIL_OFF_MARKER"
+    printf 'off-failed %s\n' "$port" >> "$TAILSCALE_LOG"
+    exit 1
+  fi
   printf 'off %s\n' "$port" >> "$TAILSCALE_LOG"
   if [ -f "$TAILSCALE_STATE" ] && [ "$(cat "$TAILSCALE_STATE")" = "$port" ]; then
     : > "$TAILSCALE_STATE"
@@ -656,38 +697,66 @@ else
   exit 1
 fi
 EOF
-  chmod 700 "$fake_bin/uname" "$fake_bin/launchctl" "$fake_bin/tailscale"
-  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+  chmod 700 "$fake_bin/uname" "$fake_bin/launchctl" "$fake_bin/mv" "$fake_bin/tailscale"
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --read-only --port 18847 --serve-port 19443 --captain "$CAPTAIN" >/dev/null \
     || fail "custom-port install failed"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
     || fail "install did not persist the custom serve port"
+  cp "$install_home/config/dash.json" "$prior_config"
   : > "$tailscale_log"
-  if HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19663 PATH="$fake_bin:$PATH" \
-    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19663 --captain "$CAPTAIN" >/dev/null 2>&1; then
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19663 PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --port 18848 --serve-port 19663 --captain "other@example.com" >/dev/null 2>&1; then
     fail "failed replacement mapping was reported as installed"
   fi
-  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
-    || fail "failed replacement mapping overwrote the recorded active port"
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed replacement mapping did not restore the full prior config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "failed replacement mapping did not restore the prior launchd service"
+  assert_grep 'map 19443' "$tailscale_log" "failed replacement mapping did not restore the prior mapping"
   assert_no_grep 'off 19443' "$tailscale_log" "failed replacement mapping removed the recorded active mapping"
   : > "$tailscale_log"
-  if HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FUNNEL_PORT=19664 PATH="$fake_bin:$PATH" \
-    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19664 --captain "$CAPTAIN" >/dev/null 2>&1; then
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FUNNEL_PORT=19664 PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --port 18848 --serve-port 19664 --captain "other@example.com" >/dev/null 2>&1; then
     fail "Funnel-exposed replacement mapping was reported as installed"
   fi
-  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
-    || fail "failed Funnel verification overwrote the recorded active port"
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed Funnel verification did not restore the full prior config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "failed Funnel verification did not restore the prior launchd service"
   assert_grep 'off 19664' "$tailscale_log" "failed Funnel verification did not remove the replacement mapping"
+  assert_grep 'map 19443' "$tailscale_log" "failed Funnel verification did not restore the prior mapping"
   assert_no_grep 'off 19443' "$tailscale_log" "failed Funnel verification removed the recorded active mapping"
   : > "$tailscale_log"
-  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_FAIL_ONCE="$TMP_ROOT/bootstrap-failed" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --port 18848 --serve-port 19665 --captain "other@example.com" >/dev/null 2>&1; then
+    fail "failed launchd replacement was reported as installed"
+  fi
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed launchd replacement did not restore the full prior config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "failed launchd replacement did not restore the prior service"
+  assert_grep 'map 19443' "$tailscale_log" "failed launchd replacement did not restore the prior mapping"
+  : > "$tailscale_log"
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" MV_FAIL_DEST="$install_home/config/dash.json" MV_FAIL_MARKER="$TMP_ROOT/config-mv-failed" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --port 18848 --serve-port 19666 --captain "other@example.com" >/dev/null 2>&1; then
+    fail "failed config activation was reported as installed"
+  fi
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed config activation did not restore the full prior config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "failed config activation did not restore the prior service"
+  assert_grep 'map 19443' "$tailscale_log" "failed config activation did not restore the prior mapping"
+  : > "$tailscale_log"
+  if HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_FAIL_OFF_MARKER="$TMP_ROOT/off-failed" TAILSCALE_FAIL_OFF_PORT=19443 TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --port 18848 --serve-port 19667 --captain "other@example.com" >/dev/null 2>&1; then
+    fail "failed old-mapping teardown was reported as installed"
+  fi
+  cmp -s "$prior_config" "$install_home/config/dash.json" || fail "failed old-mapping teardown did not restore the full prior config"
+  [ "$(cat "$launchctl_state")" = loaded ] || fail "failed old-mapping teardown did not restore the prior service"
+  assert_grep 'off 19667' "$tailscale_log" "failed old-mapping teardown did not remove the replacement mapping"
+  assert_grep 'map 19443' "$tailscale_log" "failed old-mapping teardown did not restore the prior mapping"
+  : > "$tailscale_log"
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --read-only --port 18847 --serve-port 19553 --captain "$CAPTAIN" >/dev/null \
     || fail "custom-port replacement install failed"
   assert_grep 'off 19443' "$tailscale_log" "port-change install did not remove the recorded previous mapping"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19553) process.exit(1)' "$install_home/config/dash.json" \
     || fail "replacement install did not persist the active serve port"
   : > "$tailscale_log"
-  HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
+  HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
   assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
   pass "custom serve ports persist and old mappings are removed"

@@ -39,6 +39,24 @@ CHECK="$STATE/fm-dash.check.sh"
 CHECK_TRUST="$STATE/fm-dash.check-trust"
 DEFAULT_PORT=8847
 DEFAULT_SERVE_PORT=8443
+TX_ACTIVE=false
+TX_CONFIG_BACKUP=""
+TX_CONFIG_EXISTED=false
+TX_PLIST_BACKUP=""
+TX_PLIST_EXISTED=false
+TX_CHECK_BACKUP=""
+TX_CHECK_EXISTED=false
+TX_TRUST_BACKUP=""
+TX_TRUST_EXISTED=false
+TX_CONFIG_STAGE=""
+TX_PLIST_STAGE=""
+TX_PRIOR_LOADED=false
+TX_PREVIOUS_PORT=""
+TX_PREVIOUS_SERVE_PORT=""
+TX_NEW_SERVE_PORT=""
+TX_NEW_MAPPING=false
+TX_LABEL=""
+TX_PLIST_PATH=""
 
 usage() {
   sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | sed -n '2,29p'
@@ -137,17 +155,18 @@ assert_no_funnel() {
   ' "$serve_port"
 }
 
-write_config() {
-  local port=$1 serve_port=$2 read_only=$3
-  shift 3
-  mkdir -p "$CONFIG_DIR"
+write_config_file() {
+  local target=$1 port=$2 serve_port=$3 read_only=$4
+  shift 4
   node -e '
     const fs = require("node:fs");
     const [config, port, servePort, readOnly, ...logins] = process.argv.slice(1);
     const payload = { port: Number(port), serve_port: Number(servePort), captain_logins: logins, read_only: readOnly === "true" };
     fs.writeFileSync(config, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  ' "$CONFIG" "$port" "$serve_port" "$read_only" "$@" || return 1
-  chmod 600 "$CONFIG" 2>/dev/null || true
+    const verified = JSON.parse(fs.readFileSync(config, "utf8"));
+    if (verified.port !== Number(port) || verified.serve_port !== Number(servePort)) process.exit(1);
+  ' "$target" "$port" "$serve_port" "$read_only" "$@" || return 1
+  chmod 600 "$target" 2>/dev/null || true
 }
 
 configured_serve_port() {
@@ -165,8 +184,86 @@ configured_serve_port() {
   ' "$CONFIG" "$DEFAULT_SERVE_PORT"
 }
 
+configured_loopback_port() {
+  [ -f "$CONFIG" ] || return 0
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const port = parsed.port === undefined ? Number(process.argv[2]) : parsed.port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) process.exit(1);
+      console.log(port);
+    } catch {
+      process.exit(1);
+    }
+  ' "$CONFIG" "$DEFAULT_PORT"
+}
+
 disable_serve_port() {
   "$(tailscale_bin)" serve --https="$1" off >/dev/null 2>&1
+}
+
+cleanup_install_transaction() {
+  local file
+  for file in "$TX_CONFIG_BACKUP" "$TX_PLIST_BACKUP" "$TX_CHECK_BACKUP" "$TX_TRUST_BACKUP" "$TX_CONFIG_STAGE" "$TX_PLIST_STAGE"; do
+    [ -z "$file" ] || rm -f -- "$file"
+  done
+}
+
+fail_staging() {
+  local message=$1
+  cleanup_install_transaction
+  err "$message"
+}
+
+restore_snapshot() {
+  local path=$1 backup=$2 existed=$3
+  if [ "$existed" = true ]; then
+    mv -f -- "$backup" "$path"
+  else
+    rm -f -- "$path"
+  fi
+}
+
+rollback_install() {
+  local status=0
+  TX_ACTIVE=false
+  if [ "$TX_NEW_MAPPING" = true ]; then
+    disable_serve_port "$TX_NEW_SERVE_PORT" || status=1
+  fi
+  restore_snapshot "$CONFIG" "$TX_CONFIG_BACKUP" "$TX_CONFIG_EXISTED" || status=1
+  restore_snapshot "$TX_PLIST_PATH" "$TX_PLIST_BACKUP" "$TX_PLIST_EXISTED" || status=1
+  restore_snapshot "$CHECK" "$TX_CHECK_BACKUP" "$TX_CHECK_EXISTED" || status=1
+  restore_snapshot "$CHECK_TRUST" "$TX_TRUST_BACKUP" "$TX_TRUST_EXISTED" || status=1
+  launchctl bootout "gui/$(id -u)/$TX_LABEL" >/dev/null 2>&1 || true
+  if [ "$TX_PRIOR_LOADED" = true ]; then
+    launchctl bootstrap "gui/$(id -u)" "$TX_PLIST_PATH" >/dev/null 2>&1 || status=1
+    launchctl kickstart "gui/$(id -u)/$TX_LABEL" >/dev/null 2>&1 || status=1
+  fi
+  if [ -n "$TX_PREVIOUS_SERVE_PORT" ]; then
+    "$(tailscale_bin)" serve --bg --https="$TX_PREVIOUS_SERVE_PORT" "http://127.0.0.1:$TX_PREVIOUS_PORT" >/dev/null 2>&1 || status=1
+    assert_no_funnel "$TX_PREVIOUS_SERVE_PORT" >/dev/null 2>&1 || status=1
+  fi
+  cleanup_install_transaction
+  return "$status"
+}
+
+fail_install() {
+  local message=$1
+  if rollback_install; then
+    err "$message; the previous dashboard installation was restored"
+  fi
+  err "$message; rollback was incomplete and requires manual inspection"
+}
+
+snapshot_file() {
+  local path=$1 template=$2 backup_var=$3 existed_var=$4 backup
+  if [ -e "$path" ]; then
+    backup=$(mktemp "$template") || return 1
+    printf -v "$backup_var" '%s' "$backup"
+    cp -p -- "$path" "$backup" || return 1
+    printf -v "$existed_var" '%s' true
+  fi
 }
 
 render_plist() {
@@ -230,7 +327,7 @@ unregister_check() {
 }
 
 cmd_install() {
-  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT recorded_serve_port previous_serve_port read_only=false captains=() label plist_path node_path dnsname
+  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT previous_serve_port read_only=false captains=() label plist_path node_path dnsname
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -245,6 +342,7 @@ cmd_install() {
   node_path=$(node_bin)
   tailscale_bin >/dev/null
   previous_serve_port=$(configured_serve_port) || err "could not read the previously configured dashboard serve port"
+  TX_PREVIOUS_PORT=$(configured_loopback_port) || err "could not read the previously configured dashboard loopback port"
 
   if [ "${#captains[@]}" -eq 0 ]; then
     local self_login
@@ -252,45 +350,58 @@ cmd_install() {
     captains=("$self_login")
   fi
 
-  recorded_serve_port=${previous_serve_port:-$serve_port}
-  write_config "$port" "$recorded_serve_port" "$read_only" "${captains[@]}" || err "could not write $CONFIG"
-  if [ "$read_only" = true ]; then
-    unregister_check
-  else
-    write_check
-  fi
-
   label=$(home_label)
   plist_path="$HOME/Library/LaunchAgents/$label.plist"
-  mkdir -p "$HOME/Library/LaunchAgents" "$STATE"
-  render_plist "$label" "$node_path" "$STATE" > "$plist_path"
+  mkdir -p "$CONFIG_DIR" "$HOME/Library/LaunchAgents" "$STATE"
+  TX_LABEL=$label
+  TX_PLIST_PATH=$plist_path
+  TX_PREVIOUS_SERVE_PORT=$previous_serve_port
+  TX_NEW_SERVE_PORT=$serve_port
+  launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && TX_PRIOR_LOADED=true
+  snapshot_file "$CONFIG" "$CONFIG_DIR/.dash.json.backup.XXXXXX" TX_CONFIG_BACKUP TX_CONFIG_EXISTED || fail_staging "could not snapshot $CONFIG"
+  snapshot_file "$plist_path" "$HOME/Library/LaunchAgents/.$label.backup.XXXXXX" TX_PLIST_BACKUP TX_PLIST_EXISTED || fail_staging "could not snapshot $plist_path"
+  snapshot_file "$CHECK" "$STATE/.fm-dash.check.backup.XXXXXX" TX_CHECK_BACKUP TX_CHECK_EXISTED || fail_staging "could not snapshot $CHECK"
+  snapshot_file "$CHECK_TRUST" "$STATE/.fm-dash.check-trust.backup.XXXXXX" TX_TRUST_BACKUP TX_TRUST_EXISTED || fail_staging "could not snapshot $CHECK_TRUST"
+  TX_CONFIG_STAGE=$(mktemp "$CONFIG_DIR/.dash.json.stage.XXXXXX") || fail_staging "could not stage $CONFIG"
+  TX_PLIST_STAGE=$(mktemp "$HOME/Library/LaunchAgents/.$label.stage.XXXXXX") || fail_staging "could not stage $plist_path"
+  write_config_file "$TX_CONFIG_STAGE" "$port" "$serve_port" "$read_only" "${captains[@]}" || fail_staging "could not stage $CONFIG"
+  render_plist "$label" "$node_path" "$STATE" > "$TX_PLIST_STAGE" || fail_staging "could not stage $plist_path"
+  TX_ACTIVE=true
+  trap '[ "$TX_ACTIVE" != true ] || rollback_install' EXIT
+  mv -f -- "$TX_CONFIG_STAGE" "$CONFIG" || fail_install "could not activate $CONFIG"
+  TX_CONFIG_STAGE=""
+  mv -f -- "$TX_PLIST_STAGE" "$plist_path" || fail_install "could not activate $plist_path"
+  TX_PLIST_STAGE=""
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist_path" || err "launchctl bootstrap failed for $plist_path"
+  launchctl bootstrap "gui/$(id -u)" "$plist_path" || fail_install "launchctl bootstrap failed for $plist_path"
   # RunAtLoad does not reliably start a re-bootstrapped agent on every macOS;
   # kickstart makes install-serves-now deterministic.
-  launchctl kickstart "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl kickstart "gui/$(id -u)/$label" >/dev/null 2>&1 || fail_install "launchctl kickstart failed for $label"
 
   # Tailnet-only HTTPS proxy. tailscale serve without funnel is tailnet-only by
   # construction; the assertion below still verifies no Funnel exposure exists
   # for this port and tears the mapping down if one is found.
   "$(tailscale_bin)" serve --bg --https="$serve_port" "http://127.0.0.1:$port" >/dev/null \
-    || err "tailscale serve refused the mapping; is tailscale up?"
+    || fail_install "tailscale serve refused the replacement mapping"
+  TX_NEW_MAPPING=true
   if ! assert_no_funnel "$serve_port"; then
-    disable_serve_port "$serve_port" || err "could not remove the unverified mapping for port $serve_port"
-    err "could not verify tailnet-only exposure for port $serve_port; the mapping was removed - this service must stay tailnet-only"
+    fail_install "could not verify tailnet-only exposure for port $serve_port"
   fi
   if [ -n "$previous_serve_port" ] && [ "$previous_serve_port" != "$serve_port" ]; then
     if ! disable_serve_port "$previous_serve_port"; then
-      disable_serve_port "$serve_port" || true
-      err "could not remove the previous dashboard mapping for port $previous_serve_port; the replacement was removed and the previous port remains configured"
-    fi
-    if ! write_config "$port" "$serve_port" "$read_only" "${captains[@]}"; then
-      disable_serve_port "$serve_port" || true
-      err "could not persist the replacement dashboard serve port; the replacement mapping was removed"
+      fail_install "could not remove the previous dashboard mapping for port $previous_serve_port"
     fi
   fi
+  if [ "$read_only" = true ]; then
+    unregister_check
+  else
+    write_check
+  fi
+  dnsname=$(tailscale_self_dnsname) || fail_install "could not resolve this machine's tailnet name"
+  TX_ACTIVE=false
+  cleanup_install_transaction
+  trap - EXIT
 
-  dnsname=$(tailscale_self_dnsname) || err "could not resolve this machine's tailnet name"
   printf 'installed: launchd agent %s\n' "$label"
   printf 'captains: %s\n' "${captains[*]}"
   printf 'dashboard: https://%s:%s/\n' "$dnsname" "$serve_port"
