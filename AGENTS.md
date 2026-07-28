@@ -100,6 +100,8 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+  .wake-queue.seq    monotonic wake sequence used to distinguish a normal watcher wake handoff from a silent arm-cycle death
+  .watcher-arm-dead  durable alarm from an arm cycle that ended without a wake handoff or healthy successor while tasks remain; cleared by a confirmed healthy arm or normal handoff
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch

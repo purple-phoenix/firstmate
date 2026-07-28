@@ -1121,6 +1121,24 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
+test_secondmate_landed_report_path_uses_secondmate_home() {
+  local home mate fakebin json expected
+  home=$(make_home mate-report-path); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat >> "$mate/data/backlog.md" <<'EOF'
+- [x] mate-scout - Secondmate scout data/mate-scout/report.md (repo: firstmate) (kind: scout) (completed 2026-07-12)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  # The snapshot layer records the secondmate home physically, so resolve the
+  # fixture path the same way (macOS /var is a symlink to /private/var).
+  expected="$(cd "$mate" && pwd -P)/data/mate-scout/report.md"
+  printf '%s' "$json" | jq -e --arg expected "$expected" '
+    .landed | any(.[]; .id == "mate-scout" and .artifact == $expected)
+  ' >/dev/null || fail "secondmate report artifact must resolve against its home: $json"
+  pass "secondmate landed report paths resolve against the secondmate home"
+}
+
 test_landed_default_balances_dominant_and_sparse_homes() {
   local home dominant sparse_a sparse_b sparse_c fakebin json i actual expected
   home=$(make_home landed-balanced-default)
@@ -1413,6 +1431,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_secondmate_landed_report_path_uses_secondmate_home
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap

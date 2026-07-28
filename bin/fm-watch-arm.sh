@@ -29,15 +29,22 @@
 #   watcher: healthy pid=<N> (beacon <age>s)             - restart mode found a live+fresh
 #                                                          watcher it did not own
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - arm cycle ended with no live successor while tasks are in flight
+#                                                     - cycle died without a wake
+#                                                       handoff and no healthy peer
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live until the identity-matched holder is no longer
-# healthy, then exits zero so the harness background-notify fires then (not as a
-# false empty wake). On restart-only healthy it exits zero after the duplicate
-# child stands down. On FAILED it exits non-zero so the failure is loud. A live
-# cycle already present means re-arm attaches - do not start a second watcher.
+# healthy, then exits zero when idle (no tasks) so the harness background-notify
+# fires then (not as a false empty wake). When an arm cycle ends without a
+# successor, without a wake handoff, and with tasks still in flight, it prints a
+# FAILED line, writes state/.watcher-arm-dead for the guard to name, and exits
+# non-zero so the death is loud (provider-outage gaps must not be silent). On
+# restart-only healthy it exits zero after the duplicate child stands down. On
+# FAILED it exits non-zero so the failure is loud. A live cycle already present
+# means re-arm attaches - do not start a second watcher.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or report restart-only healthy if a
@@ -56,6 +63,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+ARM_DEAD_MARKER="$STATE/.watcher-arm-dead"
+# Monotonic wake counter (fm_wake_append bumps it on every enqueue; never reset by
+# a drain). An attached arm reads it to tell a normal wake handoff from a silent death.
+WAKE_SEQ="$STATE/.wake-queue.seq"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -86,35 +97,114 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# 0 when any state/<id>.meta exists (work is still in flight for this home).
+tasks_in_flight() {
+  local meta
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    return 0
+  done
+  return 1
+}
+
+clear_arm_death_marker() {
+  rm -f "$ARM_DEAD_MARKER"
+}
+
+# Current durable wake sequence, floored at 0 on a missing/garbage counter.
+read_wake_seq() {
+  local s
+  s=$(cat "$WAKE_SEQ" 2>/dev/null || echo 0)
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  printf '%s' "$s"
+}
+
+# Durable marker the guard can name on the next fleet action. Best-effort write;
+# a full disk must not mask the stdout FAILED line.
+write_arm_death_marker() {  # <detail>
+  {
+    printf 'ts=%s\n' "$(date +%s)"
+    printf 'detail=%s\n' "$1"
+  } > "$ARM_DEAD_MARKER" 2>/dev/null || true
+}
+
+report_arm_death() {  # <detail>
+  local detail=${1:-arm cycle ended with no live successor while tasks are in flight}
+  echo "watcher: FAILED - $detail"
+  write_arm_death_marker "$detail"
+}
+
+# End this arm cycle. A wake handoff (watcher printed signal/stale/check/heartbeat)
+# is healthy: the primary re-arms on that notify. A silent end with tasks still in
+# flight and no healthy successor is the 2026-07-12 provider-outage gap - fail loud.
+# Does not return.
+finalize_arm_cycle() {  # <wake_handoff 0|1> [preferred_rc]
+  local handoff=${1:-0} rc=${2:-0}
+  if healthy_watcher; then
+    clear_arm_death_marker
+    exit 0
+  fi
+  if [ "$handoff" = 1 ]; then
+    clear_arm_death_marker
+    exit 0
+  fi
+  if tasks_in_flight; then
+    report_arm_death "arm cycle ended with no live successor while tasks are in flight"
+    exit 1
+  fi
+  clear_arm_death_marker
+  exit "$rc"
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
+  clear_arm_death_marker
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
 report_healthy() {
   local age
   age=$(fm_path_age "$BEAT")
+  clear_arm_death_marker
   echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
 # Stay alive until the attached identity-matched healthy holder is gone.
 # If a different healthy watcher appears mid-attach (rare steal), re-attach.
-# Does not reprint the starter arm's wake reason line; exit 0 lets the harness
-# notify, and firstmate drains state/.wake-queue on background completion.
+# Does not reprint the starter arm's wake reason line; a clean end (no tasks, or
+# a healthy peer) exits 0 so the harness notify fires for re-arm.
+#
+# An attached arm does NOT own the watcher child, so it cannot read the watcher's
+# wake output to set handoff=1 the way the started path does. Distinguishing a
+# normal wake handoff from a silent orphan death would otherwise be impossible,
+# and a bare finalize_arm_cycle 0 0 would falsely declare arm-death every time an
+# owner watcher woke normally while this arm was also attached. Instead it reads
+# the durable wake counter: the watched holder BLOCKS without enqueuing until its
+# single terminal wake, so any advance of the counter since we began watching THIS
+# holder is that wake being delivered (the primary re-arms on the notify) - a
+# healthy handoff, ended quiet. Only a holder that vanished with no wake enqueued
+# is a genuine orphan; that falls through to finalize_arm_cycle, which fails loud
+# when tasks are in flight and no healthy successor exists.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 seq_at_attach
+  seq_at_attach=$(read_wake_seq)
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         attached_pid=$HEALTHY_PID
+        seq_at_attach=$(read_wake_seq)
         report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
     # Attached cycle ended (pid gone, identity mismatch, or beacon no longer fresh).
-    exit 0
+    if [ "$(read_wake_seq)" != "$seq_at_attach" ]; then
+      clear_arm_death_marker
+      exit 0
+    fi
+    finalize_arm_cycle 0 0
   done
 }
 
@@ -173,16 +263,46 @@ child_out=
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 20 ] && fm_pid_alive "$child"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    # Bash may defer the watcher's TERM trap while it waits on its poll sleep.
+    # Reap the exact owned child before checking for a healthy successor, or a
+    # still-fresh dying child can suppress the arm-death alarm on Linux.
+    if fm_pid_alive "$child"; then
+      kill -KILL "$child" 2>/dev/null || true
+    fi
+    wait "$child" 2>/dev/null || true
   fi
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
 }
-trap 'cleanup_child; exit 129' HUP
-trap 'cleanup_child; exit 143' TERM INT
+# Signal exits that leave tasks unsupervised must still print FAILED and write
+# the arm-death marker (same trail as a silent cycle end).
+# shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
+arm_on_hup() {
+  cleanup_child
+  if tasks_in_flight && ! healthy_watcher; then
+    report_arm_death "arm cycle received HUP with no live successor while tasks are in flight"
+  fi
+  exit 129
+}
+# shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
+arm_on_term() {
+  cleanup_child
+  if tasks_in_flight && ! healthy_watcher; then
+    report_arm_death "arm cycle received TERM/INT with no live successor while tasks are in flight"
+  fi
+  exit 143
+}
+trap arm_on_hup HUP
+trap arm_on_term TERM INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  report_arm_death "no live watcher with a fresh beacon"
   exit 1
 }
 "$WATCH" >"$child_out" &
@@ -196,12 +316,17 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
+      clear_arm_death_marker
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
       rc=$?
+      handoff=0
+      watch_output_has_wake "$child_out" && handoff=1
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
-      exit "$rc"
+      child=
+      child_out=
+      finalize_arm_cycle "$handoff" "$rc"
     fi
     # Another watcher won the singleton; our child stood down.
     if [ "$mode" = arm ]; then
@@ -223,9 +348,12 @@ while :; do
     rc=$?
     child_done=1
     if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+      handoff=1
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
-      exit 0
+      child=
+      child_out=
+      finalize_arm_cycle 1 0
     fi
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
@@ -233,7 +361,7 @@ while :; do
 done
 
 trap - HUP TERM INT
-echo "watcher: FAILED - no live watcher with a fresh beacon"
+report_arm_death "no live watcher with a fresh beacon"
 cleanup_child
 wait "$child" 2>/dev/null || true
 exit 1

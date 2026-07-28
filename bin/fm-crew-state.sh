@@ -220,6 +220,7 @@ RUN_OUT=""
 nm_field() {  # <key>
   printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
 }
+
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'

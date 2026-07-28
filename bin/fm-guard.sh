@@ -9,8 +9,11 @@
 # liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
-# doing - the one channel every harness has. The full banner is emitted once per
-# distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
+# doing - the one channel every harness has. A state/.watcher-arm-dead marker
+# left by an arm cycle that died without a successor raises that same banner even
+# while the beacon still looks fresh, unless an independently healthy watcher is
+# confirmed. The full banner is emitted once per distinct unhealthy episode in
+# this FM_HOME (keyed to beacon mtime or absence plus any arm-death marker);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
@@ -41,18 +44,28 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
-# Deterministic episode key from beacon state: same continuous stale beacon
-# (or continuous absence) shares a key; a recovered-then-restale beacon gets a
-# new mtime and therefore a new episode.
+WATCH="$SCRIPT_DIR/fm-watch.sh"
+
+# Deterministic episode key from the unhealthy state: same continuous stale
+# beacon (or continuous absence) shares a key; a recovered-then-restale beacon
+# gets a new mtime and therefore a new episode. An arm-death marker is part of
+# the key so a fresh arm death is its own episode rather than being deduped
+# against an unrelated stale-beacon episode that happened to share a beat mtime.
 fm_guard_stale_episode_key() {
-  local state=$1 beat m
+  local state=$1 beat dead m key
   beat="$state/.last-watcher-beat"
   if [ -e "$beat" ]; then
     m=$(fm_sup_stat_mtime "$beat")
-    printf 'beat:%s\n' "${m:-unknown}"
+    key="beat:${m:-unknown}"
   else
-    printf 'beat:absent\n'
+    key='beat:absent'
   fi
+  dead="$state/.watcher-arm-dead"
+  if [ -e "$dead" ]; then
+    m=$(fm_sup_stat_mtime "$dead")
+    key="$key|arm:${m:-unknown}"
+  fi
+  printf '%s\n' "$key"
 }
 
 # Claim the full banner for this episode. Exit 0 = print full banner (this call
@@ -156,12 +169,20 @@ if [ "$in_flight" -eq 0 ]; then
   exit 0
 fi
 
+arm_dead=false
+if [ -f "$STATE/.watcher-arm-dead" ] \
+  && ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  arm_dead=true
+fi
+
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
-if [ "$watcher_fresh" = false ]; then
+# bordered banner FIRST so it reads as an alarm, not a buried stderr line. An
+# arm-death marker without an independently healthy watcher is the same alarm
+# even while the beacon still looks fresh. Later calls in the same episode get a
+# one-line reminder only.
+if [ "$watcher_fresh" = false ] || [ "$arm_dead" = true ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
   print_full_banner=0
@@ -187,7 +208,16 @@ if [ "$watcher_fresh" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      if [ "$watcher_fresh" = false ]; then
+        printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      else
+        printf '●  %s task(s) in flight; the beacon is fresh-looking but no independently healthy watcher holds this home.\n' "$in_flight"
+      fi
+      if [ -f "$STATE/.watcher-arm-dead" ]; then
+        arm_dead_detail=$(grep '^detail=' "$STATE/.watcher-arm-dead" 2>/dev/null | head -1 | sed 's/^detail=//')
+        [ -n "$arm_dead_detail" ] || arm_dead_detail='arm cycle died without a successor'
+        printf '●  Last arm death: %s (state/.watcher-arm-dead).\n' "$arm_dead_detail"
+      fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else
@@ -197,13 +227,15 @@ if [ "$watcher_fresh" = false ]; then
       printf '●  %s\n' "$fix"
       printf '●%s\n' "$rule"
     } >&2
-  else
+  elif [ "$watcher_fresh" = false ]; then
     printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
       "$beacon_desc" "$GRACE" >&2
+  else
+    printf 'WARNING: watcher arm death still unrepaired (same episode; state/.watcher-arm-dead) - full banner already printed this episode.\n' >&2
   fi
 else
   # Healthy again while work is still in flight: end the episode so a later
-  # restale re-prints the full banner.
+  # restale or arm death re-prints the full banner.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
 fi
 
