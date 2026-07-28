@@ -67,7 +67,7 @@ LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
-# (nm_runs_status_for_branch, below) scans. Generous enough to still find a
+# (nm_runs_record_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
@@ -171,7 +171,7 @@ pane_readable() {  # <target>
 # tmux's regex-only reader would correctly report. Trusting herdr's `idle`
 # outright (skipping that corroboration) is what let a still-working crew read
 # as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_runs_status_for_branch) - as not provably working in
+# missed attribution (see nm_runs_record_for_branch) - as not provably working in
 # fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
 # the absorb-then-escalate path. A genuinely human-blocked agent (a permission
 # dialog, not mid-tool-call) does not render the busy banner, so this
@@ -232,8 +232,36 @@ nm_field() {  # <key>
   printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
+run_listing_epoch_upper_bound() {  # <YYYY-MM-DD HH:MM>
+  local value=$1 epoch
+  printf '%s\n' "$value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' || return 1
+  if LC_ALL=C date -j -f '%Y-%m-%d %H:%M' "$value" +%s >/dev/null 2>&1; then
+    epoch=$(LC_ALL=C date -j -f '%Y-%m-%d %H:%M' "$value" +%s 2>/dev/null) || return 1
+  elif LC_ALL=C date -d "$value" +%s >/dev/null 2>&1; then
+    epoch=$(LC_ALL=C date -d "$value" +%s 2>/dev/null) || return 1
+  else
+    return 1
+  fi
+  printf '%s' "$((epoch + 59))"
+}
+
 run_terminal_epoch() {
-  local key value
+  local record listing_time key value head
+  if [ "$RUN_SOURCE" = coarse ]; then
+    record=$COARSE_RUN_RECORD
+  else
+    head=$(strip_quotes "$(nm_field head)")
+    if [ -n "$head" ]; then
+      record=$(nm_runs_record_for_branch "$CREW_BRANCH" "$head")
+    else
+      record=""
+    fi
+  fi
+  if [ -n "$record" ]; then
+    listing_time=${record##*|}
+    run_listing_epoch_upper_bound "$listing_time" && return 0
+  fi
+  [ "$RUN_SOURCE" = full ] || return 1
   for key in completed_at ended_at updated_at updated; do
     value=$(strip_quotes "$(nm_field "$key")")
     [ -n "$value" ] || continue
@@ -402,24 +430,23 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br
+# is a run for THIS branch active right now. Echoes the first matching row's
+# status, head, and timestamp, optionally requiring the status head as well.
+nm_runs_record_for_branch() {  # <branch> [head]
+  local branch=$1 head=${2:-} out row st br row_head run_date run_time
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
     [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=${row#* }
-    rest=$(trim "$rest")
-    br=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      printf '%s' "$st"
-      return 0
+    read -r st br row_head run_date run_time _ <<< "$row"
+    [ "$br" = "$branch" ] || continue
+    if [ -n "$head" ]; then
+      [ "${#row_head}" -ge 7 ] || continue
+      case "$head" in "$row_head"*) ;; *) continue ;; esac
     fi
+    printf '%s|%s|%s %s' "$st" "$row_head" "$run_date" "$run_time"
+    return 0
   done <<< "$out"
   return 0
 }
@@ -435,6 +462,7 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_RUN_RECORD=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -450,8 +478,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      COARSE_RUN_RECORD=$(nm_runs_record_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_RUN_RECORD" ]; then
+        COARSE_STATUS=${COARSE_RUN_RECORD%%|*}
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi

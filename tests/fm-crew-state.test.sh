@@ -705,7 +705,8 @@ test_paused_outranks_terminal_failed_run() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-pause-fail.meta" "window=fm:fm-feat-pause-fail" "worktree=$d/wt" "kind=ship"
   printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-fail.status"
-  FM_FAKE_AXI_STATUS="$(run_failed_at fm/feat-pause-fail 1)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-pause-fail)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-pause-fail abc1234 2000-01-01 00:00'
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-pause-fail)
   assert_contains "$out" "state: paused" "trailing paused outranks terminal failed run"
@@ -781,6 +782,7 @@ test_unordered_terminal_run_outranks_pause() {
   fm_write_meta "$d/state/feat-unordered-fail.meta" "window=fm:fm-feat-unordered-fail" "worktree=$d/wt" "kind=ship"
   printf 'paused: provider wait with unknown ordering\n' > "$d/state/feat-unordered-fail.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unordered-fail)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-unordered-fail deadbee 2000-01-01 00:00'
   local out; out=$(run_crew_state "$d" feat-unordered-fail)
   assert_contains "$out" "state: failed" "terminal run wins when ordering is unavailable"
   assert_not_contains "$out" "state: paused" "unproven pause must not hide failure"
