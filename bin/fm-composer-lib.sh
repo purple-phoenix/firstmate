@@ -206,9 +206,23 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     printf 'empty'; return 0
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
+  # Exact multi-byte prefix removal only - never ${var#?} / ${var#??}.
+  # Under LC_ALL=C those operators count bytes, so a 3-byte UTF-8 agent glyph
+  # (❯ / ›) leaves a corrupted remainder that no longer matches idle
+  # placeholders and is misread as pending (the no-mistakes C-locale wedge).
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯ '*) content=${content#'❯ '} ;;
+    '› '*) content=${content#'› '} ;;
+    '> '*) content=${content#'> '} ;;
+    '$ '*) content=${content#'$ '} ;;
+    '% '*) content=${content#'% '} ;;
+    '# '*) content=${content#'# '} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

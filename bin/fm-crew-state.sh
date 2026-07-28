@@ -164,7 +164,7 @@ pane_readable() {  # <target>
 # which is a narrower signal than "this crew's turn/tool call is still in
 # progress". A crew blocked on its own long-running foreground tool call (e.g.
 # `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 11) is not generating for that whole span, so
+# or outcome - AGENTS.md section 7) is not generating for that whole span, so
 # agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
 # while the pane's own rendered text still shows the harness's busy banner
 # (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
@@ -241,12 +241,15 @@ run_terminal_epoch() {
       *[!0-9]*) ;;
       *) printf '%s' "$value"; return 0 ;;
     esac
-    if date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s >/dev/null 2>&1; then
-      date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null
+    # Pin LC_ALL=C so parsing stays locale-invariant, the same rule the rest of
+    # the fleet's date reads follow (bin/fm-wake-lib.sh). BSD date first, then
+    # the GNU form; the ISO-Z layout itself is all-numeric either way.
+    if LC_ALL=C date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s >/dev/null 2>&1; then
+      LC_ALL=C date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null
       return 0
     fi
-    if date -d "$value" +%s >/dev/null 2>&1; then
-      date -d "$value" +%s 2>/dev/null
+    if LC_ALL=C date -d "$value" +%s >/dev/null 2>&1; then
+      LC_ALL=C date -d "$value" +%s 2>/dev/null
       return 0
     fi
   done
