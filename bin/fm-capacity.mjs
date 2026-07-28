@@ -21,9 +21,10 @@
  * Run --help for the exact inherited snapshot bounds, environment-probe budget,
  * bottleneck order, CAP-01 through CAP-10 meanings, and output replacement rules.
  *
- * The producer is read-mostly. It writes only the selected dashboard path and
- * never dispatches, merges, tears down, changes backlog/task state, or opens a
- * service. Inline dashboard JavaScript copies prompts only and cannot run actions.
+ * The producer is read-mostly. It writes only the selected dashboard path,
+ * plus the opt-in --refs identity sidecar it owns for the authenticated
+ * dashboard service, and never dispatches, merges, tears down, changes
+ * backlog/task state, or opens a service. Inline dashboard JavaScript copies prompts only and cannot run actions.
  * Live environment probes share one 30-second fleet-wide deadline and preserve
  * unavailable evidence for homes that cannot be inspected within that bound.
  */
@@ -60,7 +61,7 @@ const STAGE_LABELS = {
 
 function usage(exitCode = 0) {
   const out = exitCode === 0 ? process.stdout : process.stderr;
-  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>]
+  out.write(`usage: fm-capacity.mjs [--json] [--output <path>] [--snapshot <json>] [--environment <json>] [--refs <path>]
 
 Gather a fresh bounded fleet snapshot, classify meaningful capacity, and atomically
 replace a self-contained offline dashboard. The default destination is
@@ -70,6 +71,13 @@ must not traverse a symlink below FM_HOME or replace a symlink leaf, and is mode
 --json prints the complete model after writing the dashboard. --snapshot and
 --environment are deterministic fixture inputs for tests/offline review and must not
 be used for a normal /capacity run.
+
+--refs additionally writes the fm-capacity-refs.v1 sidecar this producer owns: the
+private mode-0600 mapping from every opaque dashboard reference (item-NN, project-NN,
+home-NN) to its real identity. The dashboard itself stays identity-opaque; the sidecar
+exists so the captain-authenticated tailnet dashboard service (bin/fm-dash-serve.mjs)
+can enrich the page and serve rich detail views without weakening the offline file.
+The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
@@ -105,7 +113,7 @@ BOTTLENECK ORDER AND STABLE ACTIONS
 }
 
 function parseArgs(argv) {
-  const opts = { json: false, output: null, snapshot: null, environment: null };
+  const opts = { json: false, output: null, snapshot: null, environment: null, refs: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--json") opts.json = true;
@@ -115,9 +123,11 @@ function parseArgs(argv) {
     else if (arg.startsWith("--snapshot=")) opts.snapshot = arg.slice(11);
     else if (arg === "--environment") opts.environment = argv[++i];
     else if (arg.startsWith("--environment=")) opts.environment = arg.slice(14);
+    else if (arg === "--refs") opts.refs = argv[++i];
+    else if (arg.startsWith("--refs=")) opts.refs = arg.slice(7);
     else if (arg === "-h" || arg === "--help") usage(0);
     else usage(2);
-    if ((arg === "--output" || arg === "--snapshot" || arg === "--environment") && !argv[i]) usage(2);
+    if ((arg === "--output" || arg === "--snapshot" || arg === "--environment" || arg === "--refs") && !argv[i]) usage(2);
   }
   return opts;
 }
@@ -1343,6 +1353,7 @@ function renderHtml(model, captainActions) {
     .needs-you h2{color:var(--serious)}.blocked-items h2{color:var(--crit)}
     .rollcall ul{margin-top:.6rem}
     .rollcall li{display:grid;grid-template-columns:5.2rem minmax(0,.45fr) minmax(0,1fr);gap:.4rem 1.1rem;align-items:baseline;border-top:1px solid color-mix(in srgb,var(--sev) 30%,var(--hair));padding:.55rem 0;font-size:1.02rem;min-width:0}
+    .rollcall li.empty{display:block}
     .verb{font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem}
     .verb-approve{color:var(--blue)}.verb-decide{color:var(--serious)}.verb-blocked{color:var(--crit)}
     .who{font-weight:650;min-width:0}.who .item-id{margin-right:.35rem}
@@ -1474,6 +1485,23 @@ function main() {
   }
   const { model, captainActions } = classify(snapshot, environment);
   writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
+  if (opts.refs) {
+    const allowedState = path.resolve(snapshot.roots?.state || path.join(snapshot.fm_home || ROOT, "state"));
+    const refsPath = path.resolve(opts.refs);
+    const insideOf = (root) => {
+      const relative = path.relative(root, refsPath);
+      return relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    };
+    if (!insideOf(allowedState) && !insideOf(allowedData)) {
+      throw new Error("refs sidecar path must stay inside the effective state or data directory");
+    }
+    const refs = {};
+    for (const [key, ref] of opaqueRefs.entries()) {
+      const separator = key.indexOf("\0");
+      refs[ref] = { kind: key.slice(0, separator), value: key.slice(separator + 1) };
+    }
+    writePrivateAtomic(refsPath, `${JSON.stringify({ schema: "fm-capacity-refs.v1", generated: model.generated, refs }, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {

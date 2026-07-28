@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# Behavior and contract tests for the persistent tailnet-only dashboard service:
+# bin/fm-dash-serve.mjs, bin/fm-dash-inbox.sh, and bin/fm-dash-install.sh.
+set -u
+
+# shellcheck source=tests/lib.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SERVE="$ROOT/bin/fm-dash-serve.mjs"
+INBOX_SH="$ROOT/bin/fm-dash-inbox.sh"
+INSTALL_SH="$ROOT/bin/fm-dash-install.sh"
+CAPACITY="$ROOT/bin/fm-capacity.mjs"
+TMP_ROOT=$(fm_test_tmproot fm-dash)
+
+command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
+command -v curl >/dev/null 2>&1 || { echo "skip: curl not found"; exit 0; }
+
+CAPTAIN="captain@example.com"
+SERVER_PID=""
+
+cleanup() {
+  [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+  fm_test_cleanup
+}
+trap cleanup EXIT
+
+make_fixture() {
+  local home=$1 snapshot=$2 environment=$3
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cat > "$snapshot" <<EOF
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-07-28T10:00:00Z",
+  "fm_home": "$home",
+  "roots": {"fm_root":"$ROOT","state":"$home/state","data":"$home/data","config":"$home/config","projects":"$home/projects"},
+  "backlog": {
+    "path": "$home/data/backlog.md",
+    "present": true,
+    "records": [
+      {"order":1,"state":"queued","structured":true,"id":"ready-safe","title":"Ship the gamma feature","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
+      {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout"}
+    ]
+  },
+  "tasks": [],
+  "scout_reports": [],
+  "secondmate_current": {"registry":{"available":true,"complete":true,"records":[]},"records":[],"total":0,"shown":0,"truncated":0},
+  "secondmate_landed": {"records":[],"truncated":[],"unreadable":[]}
+}
+EOF
+  cat > "$environment" <<'EOF'
+{
+  "backend": {"name":"tmux","available":true,"evidence":"required runtime tools present","owner":"fixture"},
+  "github_auth": {"status":"available","evidence":"authenticated","owner":"fixture"},
+  "dispatch": {"config_present":true,"valid":true,"reason":null,"lanes":[
+    {"harness":"codex","model":"gpt-test","effort":"high","when":"default","available":true,"availability_evidence":"executable present","quota":"not observed - capacity never guesses quota"}
+  ]},
+  "secondmates": {}
+}
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] ready-safe - Ship the gamma feature (repo: gamma) (kind: ship)
+  Acceptance criteria: bounded regression tests pass.
+- [ ] captain-choice - Choose the rollout policy (repo: alpha) (kind: captain)
+  Pick the alpha rollout pace before dependent work starts.
+  - Conservative rollout: slower, safest for existing users
+  - Fast rollout: reaches everyone this week, higher regression risk
+
+## Done
+EOF
+  mkdir -p "$home/data/ready-safe" "$home/data/ideas/pitches"
+  cat > "$home/data/ready-safe/brief.md" <<'EOF'
+# Task
+Ship the gamma feature so gamma users get streaming exports.
+
+Acceptance criteria:
+bounded regression tests pass and the export path stays backward compatible.
+
+# Setup
+Standard worktree setup.
+EOF
+  printf 'pr=https://github.com/purple-phoenix/firstmate/pull/999\nproject=%s/projects/gamma\nmode=no-mistakes\n' "$home" > "$home/state/ready-safe.meta"
+  printf 'working: preview at https://demo.tailebcf61.ts.net:5300/\n' > "$home/state/ready-safe.status"
+  cat > "$home/data/ideas/idea-backlog.md" <<'EOF'
+# Idea backlog
+
+## IDEA-01 - Faster onboarding
+New crew homes should self-provision in one command.
+
+## IDEA-02 - Nightly digest
+Send the captain a nightly fleet digest.
+EOF
+  printf '# Faster onboarding pitch\n\nOne command provisions a ready home.\n' > "$home/data/ideas/pitches/IDEA-01.md"
+}
+
+write_config() {
+  local home=$1 port=$2
+  cat > "$home/config/dash.json" <<EOF
+{"port": $port, "captain_logins": ["$CAPTAIN"]}
+EOF
+}
+
+pick_port() {
+  node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});'
+}
+
+start_server() {
+  local home=$1 port=$2 fixture_args=${3:-}
+  FM_HOME="$home" FM_DASH_CAPACITY_ARGS="$fixture_args" node "$SERVE" --port "$port" > "$TMP_ROOT/serve.log" 2>&1 &
+  SERVER_PID=$!
+  local tries=0
+  while ! curl -sf "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "dashboard service did not start (see $TMP_ROOT/serve.log)"
+    sleep 0.1
+  done
+}
+
+stop_server() {
+  [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=""
+}
+
+REQ_STATUS=""
+RESP=""
+req() {
+  # req <method> <url> [login] [body] -> sets REQ_STATUS and RESP
+  local method=$1 url=$2 login=${3:-} body=${4:-}
+  local args=(-s -o "$TMP_ROOT/resp.body" -w '%{http_code}' -X "$method")
+  [ -z "$login" ] || args+=(-H "Tailscale-User-Login: $login")
+  [ -z "$body" ] || args+=(-H "content-type: application/json" -d "$body")
+  REQ_STATUS=$(curl "${args[@]}" "$url")
+  RESP=$(cat "$TMP_ROOT/resp.body")
+}
+
+HOME_DIR="$TMP_ROOT/home"
+SNAPSHOT="$TMP_ROOT/snapshot.json"
+ENVIRONMENT="$TMP_ROOT/environment.json"
+make_fixture "$HOME_DIR" "$SNAPSHOT" "$ENVIRONMENT"
+FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$SNAPSHOT" --environment "$ENVIRONMENT" \
+  --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
+  || fail "could not render the fixture dashboard with its refs sidecar"
+PORT=$(pick_port)
+write_config "$HOME_DIR" "$PORT"
+
+test_identity_fails_closed() {
+  local body
+  start_server "$HOME_DIR" "$PORT"
+  req GET "http://127.0.0.1:$PORT/healthz"
+  [ "$REQ_STATUS" = 200 ] || fail "healthz should not require identity (got $REQ_STATUS)"
+  req GET "http://127.0.0.1:$PORT/"
+  [ "$REQ_STATUS" = 403 ] || fail "identity-less page read was not refused (got $REQ_STATUS)"
+  req GET "http://127.0.0.1:$PORT/" "mallory@example.com"
+  [ "$REQ_STATUS" = 403 ] || fail "unauthorized tailnet identity was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "mallory@example.com" '{"id":"CAP-06"}'
+  [ "$REQ_STATUS" = 403 ] || fail "unauthorized dispatch was not refused (got $REQ_STATUS)"
+  [ -z "$(find "$HOME_DIR/state/dash-inbox" -name '*.json' 2>/dev/null)" ] \
+    || fail "a refused dispatch still wrote an inbox record"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "authorized captain read failed (got $REQ_STATUS)"
+  pass "every route except healthz requires the configured captain identity"
+}
+
+test_served_page_wears_dashboard_with_interactive_layer() {
+  local body
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'Firstmate capacity dashboard' "served page is not the producer dashboard"
+  assert_contains "$RESP" 'fmdash-bar' "served page lacks the injected service bar"
+  assert_contains "$RESP" 'Refresh capacity' "served page lacks the refresh control"
+  assert_contains "$RESP" 'Approve & send' "served page lacks the dispatch control script"
+  assert_contains "$RESP" 'data-copy' "producer copy layer was lost in serving"
+  assert_contains "$RESP" '"ready-safe"' "served page config lacks the de-anonymized work item id"
+  assert_contains "$RESP" 'IDEA-01' "served page config lacks the idea backlog"
+  pass "served page is the producer dashboard wearing the injected interactive layer"
+}
+
+ref_for() {
+  # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/captain-choice"
+  node -e '
+    const refs = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).refs;
+    const wanted = process.argv[2];
+    for (const [ref, entry] of Object.entries(refs)) {
+      if (entry.kind === "item" && entry.value === wanted) { console.log(ref); process.exit(0); }
+    }
+    process.exit(1);
+  ' "$HOME_DIR/state/dash-refs.json" "$1"
+}
+
+test_refs_sidecar_and_rich_work_item_detail() {
+  local ref
+  assert_present "$HOME_DIR/state/dash-refs.json" "producer did not write the refs sidecar"
+  assert_grep 'fm-capacity-refs.v1' "$HOME_DIR/state/dash-refs.json" "refs sidecar lacks its schema"
+  ref=$(ref_for "main/ready-safe") || fail "refs sidecar does not map the main work item"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "work item detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'streaming exports' "detail lacks the brief description"
+  assert_contains "$RESP" 'backward compatible' "detail lacks the test plan"
+  assert_contains "$RESP" 'pull/999' "detail lacks the PR link"
+  assert_contains "$RESP" 'demo.tailebcf61.ts.net' "detail lacks the tailnet preview link"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref"
+  [ "$REQ_STATUS" = 403 ] || fail "identity-less detail read was not refused (got $REQ_STATUS)"
+  pass "clickable work items serve rich detail from briefs, metadata, and previews"
+}
+
+test_decision_detail_options_and_validated_approval() {
+  local ref record
+  ref=$(ref_for "decision/captain-choice") || fail "refs sidecar does not map the decision"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "decision detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'Conservative rollout' "decision detail lacks its first option"
+  assert_contains "$RESP" 'higher regression risk' "decision detail lacks the option impact"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":7}"
+  [ "$REQ_STATUS" = 400 ] || fail "an off-record option was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "decision approval failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" | head -1)")
+  assert_contains "$record" '"decision"' "decision record lacks its kind"
+  assert_contains "$record" 'captain-choice' "decision record lacks the decision key"
+  assert_contains "$record" 'Conservative rollout' "decision record lacks the chosen option"
+  assert_contains "$record" 'chat confirmation' "decision record lacks the destructive-consequence boundary"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":1}"
+  assert_contains "$RESP" 'already-queued' "a second choice for the same decision was not coalesced"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" -delete
+  pass "decisions serve option detail and approvals are validated against the record"
+}
+
+test_idea_pitch_and_verdicts() {
+  local record
+  req GET "http://127.0.0.1:$PORT/api/detail?idea=IDEA-01" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "idea pitch failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'One command provisions' "idea detail lacks the pitch file content"
+  req GET "http://127.0.0.1:$PORT/api/detail?idea=IDEA-02" "$CAPTAIN"
+  assert_contains "$RESP" 'nightly fleet digest' "pitchless idea lacks its concept summary"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-01","verdict":"approve"}'
+  [ "$REQ_STATUS" = 200 ] || fail "idea approval failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")
+  assert_contains "$record" '"idea"' "idea record lacks its kind"
+  assert_contains "$record" 'normal backlog lifecycle' "idea approval does not route creation through firstmate"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-99","verdict":"approve"}'
+  [ "$REQ_STATUS" = 404 ] || fail "an unlisted idea was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":"scope it to weekdays only"}'
+  [ "$REQ_STATUS" = 200 ] || fail "idea suggestion failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-02.json' | head -1)")
+  assert_contains "$record" 'scope it to weekdays only' "suggestion text was not recorded for firstmate"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":""}'
+  [ "$REQ_STATUS" = 400 ] || fail "an empty suggestion was not refused (got $REQ_STATUS)"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-*.json' -delete
+  pass "ideas render their pitches and verdicts flow through the durable inbox"
+}
+
+test_dispatch_writes_one_durable_record() {
+  local body record file
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
+  [ "$REQ_STATUS" = 200 ] || fail "captain dispatch failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" '"queued"' "dispatch did not report queued"
+  file=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' | head -1)
+  [ -n "$file" ] || fail "dispatch wrote no durable inbox record"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$file")" = 600 ] || fail "inbox record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$file")" = 600 ] || fail "inbox record is not mode 0600" ;;
+  esac
+  record=$(cat "$file")
+  assert_contains "$record" '"fm-dash-command.v1"' "inbox record lacks its schema"
+  assert_contains "$record" '"CAP-06"' "inbox record lacks the action id"
+  assert_contains "$record" 'Approve CAP-06' "inbox record lacks the model prompt"
+  assert_contains "$record" "$CAPTAIN" "inbox record lacks the requesting identity"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
+  assert_contains "$RESP" 'already-queued' "duplicate dispatch was not coalesced"
+  [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "duplicate dispatch wrote a second record"
+  pass "a click becomes exactly one durable captain command record"
+}
+
+test_dispatch_refuses_unknown_and_uncurrent_actions() {
+  local body
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"rm -rf /"}'
+  [ "$REQ_STATUS" = 400 ] || fail "free-text dispatch was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-99"}'
+  [ "$REQ_STATUS" = 403 ] || fail "an action outside the one-click allowlist was not refused (got $REQ_STATUS)"
+  assert_contains "$RESP" 'captain chat' "the allowlist refusal does not route to captain chat"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-02"}'
+  [ "$REQ_STATUS" = 409 ] || fail "an action absent from the current dashboard was not refused (got $REQ_STATUS)"
+  pass "dispatch refuses free text, non-allowlisted actions, and stale actions"
+}
+
+test_refresh_reruns_producer_server_side() {
+  local body before after
+  before=$(grep -o 'generated [^<]*' "$HOME_DIR/data/capacity-dashboard.html" | head -1)
+  stop_server
+  start_server "$HOME_DIR" "$PORT" "--snapshot $SNAPSHOT --environment $ENVIRONMENT"
+  rm -f "$HOME_DIR/data/capacity-dashboard.html"
+  req POST "http://127.0.0.1:$PORT/api/refresh" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "refresh failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'refreshed' "refresh did not report success"
+  [ -f "$HOME_DIR/data/capacity-dashboard.html" ] || fail "refresh did not regenerate the dashboard"
+  after=$(grep -o 'generated [^<]*' "$HOME_DIR/data/capacity-dashboard.html" | head -1)
+  [ -n "$after" ] || fail "regenerated dashboard has no generated stamp"
+  : "$before"
+  pass "refresh reruns the capacity producer server-side and replaces the dashboard"
+}
+
+test_inbox_list_claim_and_archive() {
+  local out
+  out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" pending-count)
+  [ "$out" = 1 ] || fail "pending-count expected 1, got: $out"
+  out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" list)
+  assert_contains "$out" 'CAP-06' "list omits the pending action"
+  assert_contains "$out" "$CAPTAIN" "list omits the requesting identity"
+  out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
+  assert_contains "$out" 'claimed: 1' "claim did not claim the pending command"
+  assert_contains "$out" 'Approve CAP-06' "claim omits the command prompt"
+  assert_contains "$out" 'authority limits apply' "claim omits the authority boundary reminder"
+  [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
+    || fail "claim left the record pending"
+  [ -n "$(find "$HOME_DIR/state/dash-inbox/archive" -name '*CAP-06.json' 2>/dev/null)" ] \
+    || fail "claim did not archive the record"
+  out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
+  assert_contains "$out" 'no pending dashboard commands' "second claim re-surfaced the archived command"
+  pass "inbox claim surfaces each command exactly once and archives it durably"
+}
+
+test_read_only_mode_fails_safe() {
+  stop_server
+  cat > "$HOME_DIR/config/dash.json" <<EOF
+{"port": $PORT, "captain_logins": ["$CAPTAIN"], "read_only": true, "auto_refresh_seconds": 0}
+EOF
+  start_server "$HOME_DIR" "$PORT"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "read-only page read failed (got $REQ_STATUS)"
+  assert_contains "$RESP" '"readOnly":true' "read-only page does not declare read-only mode"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
+  [ "$REQ_STATUS" = 403 ] || fail "read-only dispatch was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-01","verdict":"approve"}'
+  [ "$REQ_STATUS" = 403 ] || fail "read-only idea verdict was not refused (got $REQ_STATUS)"
+  stop_server
+  write_config "$HOME_DIR" "$PORT"
+  pass "read-only mode serves the page and refuses every mutation"
+}
+
+test_check_shim_wakes_only_when_pending() {
+  local out
+  FM_HOME="$HOME_DIR" "$INSTALL_SH" write-check >/dev/null || fail "write-check failed"
+  [ -f "$HOME_DIR/state/fm-dash.check-trust" ] || fail "write-check did not register the check"
+  out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
+  [ -z "$out" ] || fail "check shim woke with an empty inbox: $out"
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x"}\n' > "$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
+  out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
+  assert_contains "$out" '1 captain command(s) pending' "check shim did not report the pending command"
+  assert_contains "$out" 'fm-dash-inbox.sh claim' "check shim does not name the claim helper"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "check shim printed more than one line"
+  rm -f "$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
+  pass "the registered watcher check wakes firstmate only while commands are pending"
+}
+
+test_installer_plist_and_funnel_stance() {
+  local plist
+  plist=$(FM_HOME="$HOME_DIR" "$INSTALL_SH" print-plist) || fail "print-plist failed"
+  assert_contains "$plist" 'io.firstmate.dashboard.' "plist lacks the per-home label"
+  assert_contains "$plist" 'fm-dash-serve.mjs' "plist does not run the dashboard service"
+  assert_contains "$plist" '<key>KeepAlive</key><true/>' "plist does not keep the service alive"
+  assert_contains "$plist" '<key>RunAtLoad</key><true/>' "plist does not start at load"
+  assert_contains "$plist" "<string>$HOME_DIR</string>" "plist does not pin FM_HOME"
+  printf '%s' "$plist" | grep -qi funnel && fail "plist mentions funnel"
+  grep -n 'tailscale funnel' "$INSTALL_SH" && fail "installer invokes tailscale funnel"
+  assert_grep 'assert_no_funnel' "$INSTALL_SH" "installer does not verify funnel is off"
+  assert_grep 'never enables Funnel' "$INSTALL_SH" "installer does not declare the funnel boundary"
+  pass "the launchd agent survives reboots and the installer is structurally funnel-free"
+}
+
+test_service_contract_docs_and_ownership() {
+  assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
+  assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
+  assert_grep 'fm-dash' "$ROOT/AGENTS.md" "AGENTS.md lacks the dashboard command wake trigger"
+  assert_grep 'dash-inbox' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-inbox"
+  assert_grep 'config/dash.json' "$ROOT/.gitignore" "config/dash.json is not gitignored"
+  assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
+  assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
+  pass "the service is documented and wired into the operating contract"
+}
+
+test_identity_fails_closed
+test_served_page_wears_dashboard_with_interactive_layer
+test_refs_sidecar_and_rich_work_item_detail
+test_decision_detail_options_and_validated_approval
+test_idea_pitch_and_verdicts
+test_dispatch_writes_one_durable_record
+test_dispatch_refuses_unknown_and_uncurrent_actions
+test_refresh_reruns_producer_server_side
+test_inbox_list_claim_and_archive
+test_read_only_mode_fails_safe
+test_check_shim_wakes_only_when_pending
+test_installer_plist_and_funnel_stance
+test_service_contract_docs_and_ownership
+
+echo "fm-dash tests passed"

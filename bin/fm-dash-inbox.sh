@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# fm-dash-inbox.sh - firstmate-side consumer for captain dashboard commands.
+#
+# Single owner of state/dash-inbox/ consumption: listing pending
+# fm-dash-command.v1 records written by bin/fm-dash-serve.mjs and claiming them
+# durably. "claim" atomically archives each record under
+# state/dash-inbox/archive/ (newest 50 kept) and prints it, so a command is
+# surfaced exactly once even across interrupted turns; a claim that printed is a
+# claim that archived. Consumption semantics are owned by the capacity skill:
+# each claimed prompt is the captain's approval of that CAP action ID with all
+# of that skill's authority limits, never destructive or merge authority.
+#
+# Usage: fm-dash-inbox.sh [list|claim|pending-count]
+#   list           print pending commands without consuming them
+#   claim          archive and print pending commands for handling
+#   pending-count  print the number of pending commands
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+INBOX="$STATE/dash-inbox"
+ARCHIVE="$INBOX/archive"
+ARCHIVE_KEEP=50
+
+usage() {
+  sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | sed -n '2,15p'
+  exit "${1:-0}"
+}
+
+pending_files() {
+  [ -d "$INBOX" ] || return 0
+  find "$INBOX" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort
+}
+
+print_record() {
+  local file=$1
+  # shellcheck disable=SC2016 # the $-expressions below are JavaScript template literals, not shell
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      if (r.schema !== "fm-dash-command.v1" || typeof r.id !== "string" || typeof r.prompt !== "string") {
+        console.log(`- unreadable record ${process.argv[1]} (unexpected schema); inspect it by hand`);
+        process.exit(0);
+      }
+      console.log(`- ${r.id} requested by ${r.requested_by || "unknown"} at ${r.requested_at || "unknown"} (dashboard generated ${r.dashboard_generated || "unknown"})`);
+      console.log(`  prompt: ${r.prompt.replace(/\s+/g, " ")}`);
+    } catch {
+      console.log(`- unreadable record ${process.argv[1]} (invalid JSON); inspect it by hand`);
+    }
+  ' "$file"
+}
+
+prune_archive() {
+  local extra
+  extra=$(find "$ARCHIVE" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | tail -n +$((ARCHIVE_KEEP + 1)))
+  [ -n "$extra" ] || return 0
+  printf '%s\n' "$extra" | while IFS= read -r old; do
+    rm -f -- "$old"
+  done
+}
+
+command -v node >/dev/null 2>&1 || { echo "error: node is required to read dashboard command records" >&2; exit 1; }
+
+case "${1:-list}" in
+  -h|--help)
+    usage 0
+    ;;
+  pending-count)
+    pending_files | grep -c . || true
+    ;;
+  list)
+    files=$(pending_files)
+    if [ -z "$files" ]; then
+      echo "no pending dashboard commands"
+      exit 0
+    fi
+    printf 'pending: %s captain dashboard command(s)\n' "$(printf '%s\n' "$files" | grep -c .)"
+    printf '%s\n' "$files" | while IFS= read -r f; do
+      print_record "$f"
+    done
+    ;;
+  claim)
+    files=$(pending_files)
+    if [ -z "$files" ]; then
+      echo "no pending dashboard commands"
+      exit 0
+    fi
+    mkdir -p "$ARCHIVE"
+    chmod 700 "$ARCHIVE" 2>/dev/null || true
+    count=0
+    claimed=""
+    while IFS= read -r f; do
+      dest="$ARCHIVE/$(basename "$f")"
+      # rename-based claim: a record either stays pending or is archived; a
+      # concurrent claimer loses the rename and skips the record.
+      if mv -n -- "$f" "$dest" 2>/dev/null && [ ! -e "$f" ] && [ -e "$dest" ]; then
+        count=$((count + 1))
+        claimed="$claimed$dest"$'\n'
+      fi
+    done <<EOF
+$files
+EOF
+    if [ "$count" -eq 0 ]; then
+      echo "no pending dashboard commands"
+      exit 0
+    fi
+    printf 'claimed: %s captain dashboard command(s)\n' "$count"
+    printf '%s' "$claimed" | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      print_record "$f"
+    done
+    echo "handle each prompt as the captain's approval of that action ID under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
+    prune_archive
+    ;;
+  *)
+    usage 2 >&2
+    ;;
+esac
