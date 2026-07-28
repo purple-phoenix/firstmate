@@ -51,6 +51,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   awk '
@@ -168,6 +171,10 @@ verify_hold_active() {  # <hold-id>
   [ "$held" = yes ] || fail "captain hold $id is not active"
   [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
+  if ! fm_task_id_creation_valid "$id"; then
+    fm_pr_task_id_valid "$id" && [ "${#id}" -gt "$FM_TASK_ID_MAX_LENGTH" ] \
+      || fail "captain hold $id has an invalid non-dispatchable identity"
+  fi
 }
 
 verify_hold_resolved() {  # <hold-id>

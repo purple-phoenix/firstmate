@@ -42,6 +42,11 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 
+# This is the single authoritative maximum length for newly created dispatchable task IDs.
+# Dispatchable creation entrypoints must use fm_task_id_creation_check before writing state.
+# Deterministic, idempotent captain-decision holds owned by fm-decision-hold.sh are the sole non-dispatchable exception and must not be truncated.
+FM_TASK_ID_MAX_LENGTH=64
+
 fm_task_id_path_safe() {
   local id=${1-}
   local LC_ALL=C
@@ -55,10 +60,20 @@ fm_pr_task_id_valid() {
   fm_task_id_path_safe "$id"
 }
 
-fm_task_id_creation_valid() {
+fm_task_id_creation_check() {
   local id=${1-}
-  fm_pr_task_id_valid "$id" || return 1
-  [ "${#id}" -le 64 ]
+  if ! fm_pr_task_id_valid "$id"; then
+    echo "error: task id must be path-safe and contain only letters, digits, '.', '_', or '-'" >&2
+    return 1
+  fi
+  if [ "${#id}" -gt "$FM_TASK_ID_MAX_LENGTH" ]; then
+    echo "error: task id is ${#id} characters; maximum is $FM_TASK_ID_MAX_LENGTH" >&2
+    return 1
+  fi
+}
+
+fm_task_id_creation_valid() {
+  fm_task_id_creation_check "${1-}" 2>/dev/null
 }
 
 fm_pr_url_parse() {

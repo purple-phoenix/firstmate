@@ -423,6 +423,7 @@ Re-evaluate queued work after every teardown and heartbeat, dispatching items on
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
+Create dispatchable backlog items through `bin/fm-task-add.sh` so every explicit or minted ID satisfies the runtime creation contract before the backlog changes; deterministic captain-decision items are the sole exception, remain non-dispatchable `kind=captain` holds, and are owned by `bin/fm-decision-hold.sh` without truncation.
 `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff safety.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.
