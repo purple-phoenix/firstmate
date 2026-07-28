@@ -146,7 +146,7 @@ write_config() {
     const [config, port, servePort, readOnly, ...logins] = process.argv.slice(1);
     const payload = { port: Number(port), serve_port: Number(servePort), captain_logins: logins, read_only: readOnly === "true" };
     fs.writeFileSync(config, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  ' "$CONFIG" "$port" "$serve_port" "$read_only" "$@" || err "could not write $CONFIG"
+  ' "$CONFIG" "$port" "$serve_port" "$read_only" "$@" || return 1
   chmod 600 "$CONFIG" 2>/dev/null || true
 }
 
@@ -166,7 +166,7 @@ configured_serve_port() {
 }
 
 disable_serve_port() {
-  "$(tailscale_bin)" serve --https="$1" off >/dev/null 2>&1 || true
+  "$(tailscale_bin)" serve --https="$1" off >/dev/null 2>&1
 }
 
 render_plist() {
@@ -230,7 +230,7 @@ unregister_check() {
 }
 
 cmd_install() {
-  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT previous_serve_port read_only=false captains=() label plist_path node_path dnsname
+  local port=$DEFAULT_PORT serve_port=$DEFAULT_SERVE_PORT recorded_serve_port previous_serve_port read_only=false captains=() label plist_path node_path dnsname
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -252,7 +252,8 @@ cmd_install() {
     captains=("$self_login")
   fi
 
-  write_config "$port" "$serve_port" "$read_only" "${captains[@]}"
+  recorded_serve_port=${previous_serve_port:-$serve_port}
+  write_config "$port" "$recorded_serve_port" "$read_only" "${captains[@]}" || err "could not write $CONFIG"
   if [ "$read_only" = true ]; then
     unregister_check
   else
@@ -275,11 +276,18 @@ cmd_install() {
   "$(tailscale_bin)" serve --bg --https="$serve_port" "http://127.0.0.1:$port" >/dev/null \
     || err "tailscale serve refused the mapping; is tailscale up?"
   if ! assert_no_funnel "$serve_port"; then
-    disable_serve_port "$serve_port"
+    disable_serve_port "$serve_port" || err "could not remove the unverified mapping for port $serve_port"
     err "could not verify tailnet-only exposure for port $serve_port; the mapping was removed - this service must stay tailnet-only"
   fi
   if [ -n "$previous_serve_port" ] && [ "$previous_serve_port" != "$serve_port" ]; then
-    disable_serve_port "$previous_serve_port"
+    if ! disable_serve_port "$previous_serve_port"; then
+      disable_serve_port "$serve_port" || true
+      err "could not remove the previous dashboard mapping for port $previous_serve_port; the replacement was removed and the previous port remains configured"
+    fi
+    if ! write_config "$port" "$serve_port" "$read_only" "${captains[@]}"; then
+      disable_serve_port "$serve_port" || true
+      err "could not persist the replacement dashboard serve port; the replacement mapping was removed"
+    fi
   fi
 
   dnsname=$(tailscale_self_dnsname) || err "could not resolve this machine's tailnet name"
@@ -302,9 +310,9 @@ cmd_uninstall() {
   label=$(home_label)
   plist_path="$HOME/Library/LaunchAgents/$label.plist"
   if command -v tailscale >/dev/null 2>&1; then
-    disable_serve_port "$serve_port"
+    disable_serve_port "$serve_port" || err "could not remove the dashboard mapping for port $serve_port"
     if [ -n "$configured_port" ] && [ "$configured_port" != "$serve_port" ]; then
-      disable_serve_port "$configured_port"
+      disable_serve_port "$configured_port" || err "could not remove the configured dashboard mapping for port $configured_port"
     fi
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true

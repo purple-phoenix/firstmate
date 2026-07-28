@@ -635,9 +635,15 @@ if [ "$1" = status ] && [ "${2:-}" = --json ]; then
   printf '%s\n' '{"Self":{"UserID":1,"DNSName":"dash.tail.ts.net."},"User":{"1":{"LoginName":"captain@example.com"}}}'
 elif [ "$1" = serve ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
   port=$(cat "$TAILSCALE_STATE")
-  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{}},"AllowFunnel":{"dash.tail.ts.net:%s":false}}\n' "$port" "$port" "$port"
+  funnel=false
+  [ "${TAILSCALE_FUNNEL_PORT:-}" != "$port" ] || funnel=true
+  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"dash.tail.ts.net:%s":{}},"AllowFunnel":{"dash.tail.ts.net:%s":%s}}\n' "$port" "$port" "$port" "$funnel"
 elif [ "$1" = serve ] && [ "${2:-}" = --bg ]; then
   port=${3#--https=}
+  if [ "${TAILSCALE_FAIL_MAP_PORT:-}" = "$port" ]; then
+    printf 'map-failed %s\n' "$port" >> "$TAILSCALE_LOG"
+    exit 1
+  fi
   printf '%s\n' "$port" > "$TAILSCALE_STATE"
   printf 'map %s\n' "$port" >> "$TAILSCALE_LOG"
 elif [ "$1" = serve ] && [ "${2#--https=}" != "$2" ] && [ "${3:-}" = off ]; then
@@ -656,6 +662,23 @@ EOF
     || fail "custom-port install failed"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
     || fail "install did not persist the custom serve port"
+  : > "$tailscale_log"
+  if HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FAIL_MAP_PORT=19663 PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19663 --captain "$CAPTAIN" >/dev/null 2>&1; then
+    fail "failed replacement mapping was reported as installed"
+  fi
+  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
+    || fail "failed replacement mapping overwrote the recorded active port"
+  assert_no_grep 'off 19443' "$tailscale_log" "failed replacement mapping removed the recorded active mapping"
+  : > "$tailscale_log"
+  if HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" TAILSCALE_FUNNEL_PORT=19664 PATH="$fake_bin:$PATH" \
+    "$INSTALL_SH" install --read-only --port 18847 --serve-port 19664 --captain "$CAPTAIN" >/dev/null 2>&1; then
+    fail "Funnel-exposed replacement mapping was reported as installed"
+  fi
+  node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
+    || fail "failed Funnel verification overwrote the recorded active port"
+  assert_grep 'off 19664' "$tailscale_log" "failed Funnel verification did not remove the replacement mapping"
+  assert_no_grep 'off 19443' "$tailscale_log" "failed Funnel verification removed the recorded active mapping"
   : > "$tailscale_log"
   HOME="$launch_home" FM_HOME="$install_home" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --read-only --port 18847 --serve-port 19553 --captain "$CAPTAIN" >/dev/null \
