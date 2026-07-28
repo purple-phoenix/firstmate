@@ -353,6 +353,29 @@ test_incomplete_sources_fail_closed() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing-backlog capacity run failed"
   printf '%s' "$json" | jq -e '.readiness.available == false and (.recommendations | any(.id == "CAP-08") | not)' >/dev/null ||
     fail "missing main backlog produced a demand-shortage conclusion: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' '{"schema":"fm-capacity-wait-history.v1","active":{"main/validate-now:validation":{"kind":"validation","first_observed":1000,"last_observed":1600}},"durations":{}}' > "$history"
+  jq '.tasks = [.tasks[] | select(.id != "validate-now")]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing main task capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false' >/dev/null ||
+    fail "missing in-flight main task did not suppress readiness: $json"
+  jq -e '
+    .active["main/validate-now:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "missing main task retired an unobserved active wait: $(cat "$history")"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '(.tasks[] | select(.id == "validate-now") | .current_state.state) = "unknown"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "unknown main task state capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false' >/dev/null ||
+    fail "unknown main task state did not suppress readiness: $json"
+  jq -e '
+    .active["main/validate-now:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "unknown main task state retired an unobserved active wait: $(cat "$history")"
   pass "capacity suppresses readiness and demand claims for incomplete bounded sources"
 }
 

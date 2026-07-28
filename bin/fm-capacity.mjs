@@ -634,7 +634,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     readinessComplete = false;
   }
 
-  const mainInventoryComplete = snapshot.backlog?.present === true
+  let mainInventoryComplete = snapshot.backlog?.present === true
     && Array.isArray(snapshot.backlog?.records)
     && Array.isArray(snapshot.tasks);
   if (snapshot.backlog?.present !== true || !Array.isArray(snapshot.backlog?.records)) {
@@ -643,7 +643,6 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   if (!Array.isArray(snapshot.tasks)) {
     markUnavailable("main-tasks", "main", "main current-task inventory unavailable");
   }
-  if (mainInventoryComplete) authoritativeWaitOwners.add("main");
   const registry = snapshot.secondmate_current?.registry;
   const secondmateInventoryComplete = Boolean(snapshot.secondmate_current
     && Array.isArray(snapshot.secondmate_current.records)
@@ -723,6 +722,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (!task || !repo) {
       markUnavailable(itemRef("main", record.id), "main", "in-flight work lacks current task or project provenance");
     }
+    if (!task) mainInventoryComplete = false;
   }
 
   for (const task of snapshot.tasks || []) {
@@ -754,6 +754,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
+      mainInventoryComplete = false;
     }
     if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "pr_ci_approval", "blocked"].includes(stage)) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
@@ -797,6 +798,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       attachMeasurable(taskCard, "main", task.id, waitKindFromDetail(task.current_state?.detail));
     }
   }
+  if (mainInventoryComplete) authoritativeWaitOwners.add("main");
 
   const blockedByIds = (record) => (Array.isArray(record.blocked_by_all)
     ? record.blocked_by_all
