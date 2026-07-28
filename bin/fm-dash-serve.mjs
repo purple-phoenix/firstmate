@@ -9,8 +9,8 @@
  * launchd persistence and tailscale serve wiring; bin/fm-dash-inbox.sh owns
  * firstmate-side consumption of the records this service writes.
  *
- * The service never executes fleet commands, never calls firstmate tooling other
- * than the read-mostly bin/fm-capacity.mjs producer, and never mutates any state
+ * The service never executes fleet commands, calls only the read-mostly capacity
+ * producer and quota probe, and never mutates any state
  * outside state/dash-inbox/ and the producer-owned dashboard file. A clicked
  * CAP action becomes one durable fm-dash-command.v1 record in state/dash-inbox/;
  * the running firstmate consumes it through its registered fm-dash watcher check
@@ -52,8 +52,11 @@ const REFS = path.join(STATE, "dash-refs.json");
 const BACKLOG = path.join(DATA, "backlog.md");
 const IDEAS = path.join(DATA, "ideas", "idea-backlog.md");
 const PITCHES = path.join(DATA, "ideas", "pitches");
+const QUOTA_AXI = process.env.FM_DASH_QUOTA_AXI || "quota-axi";
 const REFRESH_TIMEOUT_MS = 180000;
-const MAX_BODY_BYTES = 4096;
+const QUOTA_TIMEOUT_MS = 8000;
+const QUOTA_CACHE_MS = 60000;
+const MAX_BODY_BYTES = 16384;
 
 // One-click eligible action IDs. Every current CAP action only requests
 // lifecycle-safe guidance or work that re-enters normal authority checks
@@ -83,10 +86,11 @@ auto-render. Routes:
   GET  /              dashboard with the interactive layer injected
   GET  /api/pending   pending command count
   POST /api/refresh   rerun bin/fm-capacity.mjs server-side (serialized)
-  POST /api/dispatch  {"id":"CAP-NN"} -> durable record in state/dash-inbox/
+  POST /api/dispatch  validated CAP action, decision answer, or idea verdict
 All routes except /healthz require a Tailscale-User-Login header matching a
 configured captain login and fail closed otherwise. Dispatch refuses IDs not in
-both the served dashboard and the fixed one-click allowlist.
+both the served dashboard and the fixed one-click allowlist. Browser POSTs must
+also be same-origin.
 `);
   process.exit(exitCode);
 }
@@ -152,7 +156,10 @@ function pendingRecords() {
     if (!name.endsWith(".json")) continue;
     try {
       const record = JSON.parse(fs.readFileSync(path.join(INBOX, name), "utf8"));
-      if (record && typeof record.id === "string") records.push(record);
+      if (record && typeof record.id === "string") {
+        Object.defineProperty(record, "_file", { value: path.join(INBOX, name) });
+        records.push(record);
+      }
     } catch {
       // An unreadable record still counts as pending for the inbox owner; skip here.
     }
@@ -167,6 +174,13 @@ function enqueueCommand(record) {
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(tmp, path.join(INBOX, name));
   return name;
+}
+
+function replaceCommand(file, record) {
+  const tmp = path.join(INBOX, `.tmp-${randomBytes(6).toString("hex")}`);
+  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return path.basename(file);
 }
 
 // --- read-only detail assembly -------------------------------------------
@@ -253,18 +267,54 @@ function previewLinks(...texts) {
   return [...links];
 }
 
-// Bulleted or numbered body lines of a captain-hold item are its options; each
-// option's impact is the text of that line plus any continuation up to the next
-// option marker.
-function decisionOptions(body) {
+function decisionRef(entry) {
+  const parts = entry.value.split("/");
+  if (parts[0] !== "decision") return null;
+  if (parts.length >= 3) return { home: parts[1], id: parts.slice(2).join("/") };
+  return { home: "main", id: parts.slice(1).join("/") };
+}
+
+function decisionHome(home) {
+  if (home === "main") return FM_HOME;
+  const meta = readMeta(home);
+  return meta.home ? path.resolve(meta.home) : null;
+}
+
+function decisionDocument(home, id) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
+  const root = decisionHome(home);
+  if (!root) return null;
+  const text = readText(path.join(root, "data", "decisions", `${id}.md`), 131072);
+  if (!text) return null;
+  const title = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim();
+  const sections = text.split(/^##\s+Options\s*$/im);
+  if (!title || sections.length < 2) return null;
+  const context = sections[0].replace(/^#\s+.*$/m, "").trim().slice(0, 4000) || null;
   const options = [];
   let current = null;
-  for (const line of body) {
-    const marker = line.match(/^(?:[-*]|\d+[.)])\s+(.*)$/);
-    if (marker) { current = { text: marker[1].trim(), impact: [] }; options.push(current); continue; }
-    if (current && line !== "") current.impact.push(line);
+  for (const line of sections.slice(1).join("\n## Options\n").split("\n")) {
+    const marker = line.match(/^\s*-\s+(?:\[recommended\]\s*)?(.+?)(?:\s+-\s+(.+))?\s*$/i);
+    if (marker) {
+      current = {
+        text: marker[1].trim(),
+        impact: (marker[2] || "").trim(),
+        recommended: /^\s*-\s+\[recommended\]/i.test(line),
+      };
+      options.push(current);
+      continue;
+    }
+    if (current && /^\s{2,}\S/.test(line)) current.impact = `${current.impact} ${line.trim()}`.trim();
   }
-  return options.map((option) => ({ text: option.text, impact: option.impact.join(" ").slice(0, 800) }));
+  const boundedOptions = options
+    .filter((option) => option.text && option.impact)
+    .slice(0, 20)
+    .map((option) => ({ ...option, text: option.text.slice(0, 300), impact: option.impact.slice(0, 1200) }));
+  if (!context || boundedOptions.length === 0) return null;
+  return {
+    title,
+    context,
+    options: boundedOptions,
+  };
 }
 
 function refDisplayMap(refsFile) {
@@ -275,7 +325,8 @@ function refDisplayMap(refsFile) {
     else if (entry.kind === "item") {
       const separator = entry.value.indexOf("/");
       const owner = entry.value.slice(0, separator);
-      const id = entry.value.slice(separator + 1);
+      const decision = decisionRef(entry);
+      const id = decision ? decision.id : entry.value.slice(separator + 1);
       display[ref] = owner === "decision"
         ? { t: "decision", label: id }
         : { t: "work", label: id, owner };
@@ -291,20 +342,21 @@ function assembleDetail(ref) {
   if (!entry || entry.kind !== "item") return null;
   const separator = entry.value.indexOf("/");
   const owner = entry.value.slice(0, separator);
-  const id = entry.value.slice(separator + 1);
+  const decision = decisionRef(entry);
+  const id = decision ? decision.id : entry.value.slice(separator + 1);
   const backlogItem = parseBacklog().find((item) => item.id === id) || null;
 
   if (owner === "decision") {
-    const body = backlogItem ? backlogItem.body : [];
+    const document = decisionDocument(decision.home, id);
     return {
       type: "decision",
       ref,
       id,
-      title: backlogItem ? backlogItem.title : id,
-      description: body.filter((line) => !/^(?:[-*]|\d+[.)])\s+/.test(line)).join("\n").trim().slice(0, 2000) || null,
-      options: decisionOptions(body),
+      title: document?.title || backlogItem?.title || id,
+      description: document?.context || null,
+      options: document?.options || [],
       recent: statusTail(id),
-      note: backlogItem ? null : "No structured record was found for this decision key; answer it in captain chat.",
+      note: document ? null : "This legacy decision has no structured options document; answer it in captain chat.",
     };
   }
   if (owner !== "main") {
@@ -403,6 +455,75 @@ function runRefresh() {
   return refreshing;
 }
 
+let usageCache = null;
+let usageProbe = null;
+function probeUsage() {
+  const now = Date.now();
+  if (usageCache && now - usageCache.at < QUOTA_CACHE_MS) return Promise.resolve(usageCache.value);
+  if (usageProbe) return usageProbe;
+  usageProbe = new Promise((resolve) => {
+    const child = spawn(QUOTA_AXI, ["--json"], { cwd: ROOT, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      usageCache = { at: Date.now(), value };
+      usageProbe = null;
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish({ status: "unavailable", providers: [] });
+    }, QUOTA_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => {
+      size += chunk.length;
+      if (size <= 1024 * 1024) chunks.push(chunk);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      finish({ status: "unavailable", providers: [] });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || size > 1024 * 1024) {
+        finish({ status: "unavailable", providers: [] });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (parsed.schemaVersion !== 2 || !Array.isArray(parsed.providers)) throw new Error("unsupported schema");
+        const allowed = new Set(["claude", "codex", "grok"]);
+        const providers = parsed.providers
+          .filter((provider) => allowed.has(provider?.provider))
+          .map((provider) => ({
+            provider: provider.provider,
+            label: typeof provider.label === "string" ? provider.label.slice(0, 80) : provider.provider,
+            windows: Array.isArray(provider.windows)
+              ? provider.windows.filter((window) =>
+                typeof window?.label === "string"
+                && Number.isFinite(window.percentUsed)
+                && window.percentUsed >= 0
+                && window.percentUsed <= 100
+                && typeof window.resetsAt === "string"
+                && Number.isFinite(Date.parse(window.resetsAt))
+              ).slice(0, 8).map((window) => ({
+                label: window.label.slice(0, 100),
+                percentUsed: window.percentUsed,
+                resetsAt: window.resetsAt,
+              }))
+              : [],
+          }));
+        finish({ status: "ok", providers });
+      } catch {
+        finish({ status: "unavailable", providers: [] });
+      }
+    });
+  });
+  return usageProbe;
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
@@ -422,6 +543,18 @@ function requesterLogin(req) {
 function authorized(req, config) {
   const login = requesterLogin(req);
   return login !== "" && config.logins.includes(login);
+}
+
+function sameOriginPost(req) {
+  const origin = req.headers.origin;
+  const fetchSite = req.headers["sec-fetch-site"];
+  if (origin === undefined && fetchSite === undefined) return true;
+  if (typeof origin !== "string" || fetchSite !== "same-origin") return false;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
 }
 
 function inlineScriptJson(value) {
@@ -444,6 +577,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     readOnly: readOnly === true,
     refs: extras?.refs || {},
     ideas: extras?.ideas || [],
+    usage: extras?.usage || { status: "unavailable", providers: [] },
   });
   return `<style>
   .fmdash-bar{display:flex;justify-content:space-between;align-items:center;gap:.6rem 1.5rem;flex-wrap:wrap;padding:.6rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
@@ -469,6 +603,17 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-option strong{color:var(--ink);font-size:.95rem}
   .fmdash-option small{display:block;color:var(--muted);margin-top:.25rem}
   .fmdash-close{border:1px solid var(--ink);background:transparent;color:var(--ink);font-weight:700;padding:.4rem .8rem;cursor:pointer;font-size:.78rem}
+  .fmdash-usage{border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .fmdash-usage-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:1rem}
+  .fmdash-usage-card{min-width:0;border-top:.45rem solid var(--blue);padding:.8rem 0}
+  .fmdash-usage-card h3{font-size:.76rem;letter-spacing:.14em;text-transform:uppercase}
+  .fmdash-window{margin-top:.7rem}
+  .fmdash-window-head{display:flex;justify-content:space-between;gap:.8rem;font-size:.8rem;color:var(--ink2)}
+  .fmdash-meter{height:.65rem;background:var(--hair);margin-top:.3rem}
+  .fmdash-meter span{display:block;height:100%;background:var(--blue)}
+  .fmdash-reset{font-size:.72rem;color:var(--muted);margin-top:.25rem}
+  .fmdash-custom{width:100%;margin-top:.7rem;padding:.6rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair)}
+  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
   </style>
   <script>
   (() => {
@@ -500,6 +645,64 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       } catch { refreshButton.textContent = "Refresh failed"; }
       setTimeout(() => { refreshButton.disabled = false; refreshButton.textContent = "Refresh capacity"; }, 4000);
     });
+    const postJson = (body) => fetch("/api/dispatch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const usageSection = document.createElement("section");
+    usageSection.className = "band fmdash-usage";
+    usageSection.setAttribute("aria-label", "Subscription usage");
+    const usageWrap = document.createElement("div");
+    usageWrap.className = "wrap";
+    usageWrap.innerHTML = '<p class="kicker">Subscription usage</p>';
+    const usageGrid = document.createElement("div");
+    usageGrid.className = "fmdash-usage-grid";
+    const distance = (iso) => {
+      const milliseconds = Date.parse(iso) - Date.now();
+      if (milliseconds <= 0) return "reset due";
+      const minutes = Math.ceil(milliseconds / 60000);
+      if (minutes < 60) return "resets in " + minutes + "m";
+      const hours = Math.ceil(minutes / 60);
+      if (hours < 48) return "resets in " + hours + "h";
+      return "resets in " + Math.ceil(hours / 24) + "d";
+    };
+    if (cfg.usage.status === "ok" && cfg.usage.providers.some((provider) => provider.windows.length)) {
+      cfg.usage.providers.forEach((provider) => {
+        if (!provider.windows.length) return;
+        const card = document.createElement("article");
+        card.className = "fmdash-usage-card";
+        card.appendChild(textBlock("h3", provider.label));
+        provider.windows.forEach((window) => {
+          const item = document.createElement("div");
+          item.className = "fmdash-window";
+          const head = document.createElement("div");
+          head.className = "fmdash-window-head";
+          head.appendChild(textBlock("span", window.label));
+          head.appendChild(textBlock("strong", Math.round(window.percentUsed) + "% used"));
+          const meter = document.createElement("div");
+          meter.className = "fmdash-meter";
+          const fill = document.createElement("span");
+          fill.style.width = window.percentUsed + "%";
+          meter.appendChild(fill);
+          const reset = textBlock("div", distance(window.resetsAt) + " · " + new Date(window.resetsAt).toLocaleString());
+          reset.className = "fmdash-reset";
+          item.appendChild(head);
+          item.appendChild(meter);
+          item.appendChild(reset);
+          card.appendChild(item);
+        });
+        usageGrid.appendChild(card);
+      });
+    } else {
+      usageGrid.appendChild(textBlock("p", "Subscription usage is temporarily unavailable."));
+    }
+    usageWrap.appendChild(usageGrid);
+    usageSection.appendChild(usageWrap);
+    const meterBand = document.querySelector(".band-meter");
+    const mainForUsage = document.querySelector("main");
+    if (meterBand) meterBand.after(usageSection);
+    else if (mainForUsage) mainForUsage.appendChild(usageSection);
     // De-anonymize known references for the authenticated captain and open
     // rich detail views on click. The server refuses detail and approval
     // requests it cannot validate, so this layer is presentation only.
@@ -561,11 +764,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       button.disabled = true;
       button.textContent = "Sending…";
       try {
-        const res = await fetch("/api/dispatch", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ref, option: index }),
-        });
+        const res = await postJson({ ref, option: index });
         const out = await res.json();
         if (out.status === "queued" || out.status === "already-queued") {
           button.textContent = "Approved · queued";
@@ -575,6 +774,21 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         button.textContent = "Refused";
         button.disabled = false;
       } catch { button.textContent = "Failed"; button.disabled = false; }
+    }
+    async function answerDecision(ref, answer, button) {
+      button.disabled = true;
+      button.textContent = "Sending…";
+      try {
+        const res = await postJson({ ref, answer });
+        const out = await res.json();
+        if (out.status === "queued" || out.status === "already-queued") {
+          button.textContent = "Answer queued";
+          showPending(out.pending);
+          return;
+        }
+        button.textContent = "Refused";
+      } catch { button.textContent = "Failed"; }
+      button.disabled = false;
     }
     async function openDetail(ref, entry) {
       const overlay = document.createElement("div");
@@ -633,7 +847,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           row.className = "fmdash-option";
           const body = document.createElement("div");
           const label = document.createElement("strong");
-          label.textContent = option.text;
+          label.textContent = option.recommended ? "Recommended · " + option.text : option.text;
           body.appendChild(label);
           if (option.impact) {
             const impact = document.createElement("small");
@@ -653,6 +867,23 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           panel.appendChild(row);
         });
         if (!cfg.readOnly) panel.appendChild(textBlock("p", "An approval here is your routine decision only; anything destructive or irreversible still gets re-confirmed with you in chat."));
+        if (!cfg.readOnly) {
+          const custom = document.createElement("textarea");
+          custom.className = "fmdash-custom";
+          custom.rows = 4;
+          custom.maxLength = 2000;
+          custom.placeholder = "Or give firstmate a custom answer…";
+          custom.setAttribute("aria-label", "Custom answer for " + detail.id);
+          const sendCustom = document.createElement("button");
+          sendCustom.type = "button";
+          sendCustom.className = "fmdash-send";
+          sendCustom.textContent = "Send custom answer";
+          sendCustom.addEventListener("click", () => {
+            if (custom.value.trim()) answerDecision(ref, custom.value.trim(), sendCustom);
+          });
+          panel.appendChild(custom);
+          panel.appendChild(sendCustom);
+        }
       } else if (detail.type === "decision") {
         panel.appendChild(textBlock("p", "This decision has no structured options on record; answer it in chat."));
       }
@@ -706,13 +937,9 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       const original = button.textContent;
       button.textContent = "Sending…";
       try {
-        const res = await fetch("/api/dispatch", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ idea: id, verdict, suggestion }),
-        });
+        const res = await postJson({ idea: id, verdict, suggestion });
         const out = await res.json();
-        if (out.status === "queued" || out.status === "already-queued") {
+        if (out.status === "queued" || out.status === "replaced" || out.status === "already-queued") {
           button.textContent = verdict === "suggest" ? "Suggestions sent" : (verdict === "approve" ? "Approved · queued" : "Denied · queued");
           showPending(out.pending);
           return true;
@@ -827,11 +1054,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         send.disabled = true;
         send.textContent = "Sending…";
         try {
-          const res = await fetch("/api/dispatch", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id }),
-          });
+          const res = await postJson({ id });
           const out = await res.json();
           if (out.status === "queued" || out.status === "already-queued") {
             send.textContent = "Approved · queued";
@@ -888,6 +1111,10 @@ async function handle(req, res) {
     sendJson(res, 403, { status: "forbidden", error: "tailnet identity is not an authorized captain login" });
     return;
   }
+  if (req.method === "POST" && !sameOriginPost(req)) {
+    sendJson(res, 403, { status: "forbidden", error: "cross-origin browser posts are refused" });
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/") {
     const dashboard = readDashboard();
     if (!dashboard) {
@@ -897,9 +1124,11 @@ async function handle(req, res) {
     }
     const dispatchable = config.readOnly ? [] : [...dashboard.actions.keys()].filter((id) => ONE_CLICK_ACTIONS.has(id));
     const refsFile = readRefs(dashboard.generated);
+    const usage = await probeUsage();
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
+      usage,
     });
     sendHtml(res, 200, dashboard.html.replace("</body>", `${layer}</body>`));
     return;
@@ -953,11 +1182,15 @@ async function handle(req, res) {
         sendJson(res, 400, { status: "refused", error: "approval accepts a currently listed decision only" });
         return;
       }
-      const option = detail.options?.[body.option];
-      if (!option) {
+      const customAnswer = typeof body.answer === "string" ? body.answer.trim() : "";
+      const hasOption = Number.isInteger(body.option)
+        && body.option >= 0
+        && body.option < detail.options.length;
+      if (!hasOption && (!customAnswer || customAnswer.length > 2000 || detail.options.length === 0)) {
         sendJson(res, 400, { status: "refused", error: "the chosen option is not on the decision's record" });
         return;
       }
+      const option = hasOption ? detail.options[body.option] : null;
       const pending = pendingRecords();
       if (pending.some((record) => record.kind === "decision" && record.decision_key === detail.id)) {
         sendJson(res, 200, { status: "already-queued", pending: pending.length });
@@ -968,10 +1201,13 @@ async function handle(req, res) {
         kind: "decision",
         id: body.ref,
         decision_key: detail.id,
-        option_text: option.text,
+        option_text: option?.text || null,
+        custom_answer: option ? null : customAnswer,
         requested_by: requesterLogin(req),
         requested_at: new Date().toISOString(),
-        prompt: `Captain approved decision ${detail.id}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
+        prompt: option
+          ? `Captain approved decision ${detail.id}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
+          : `Captain answered decision ${detail.id}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
       };
       const name = enqueueCommand(record);
       log(`queued decision ${detail.id} as ${name} for ${record.requested_by}`);
@@ -993,13 +1229,16 @@ async function handle(req, res) {
         sendJson(res, 404, { status: "refused", error: `${body.idea} is not in the idea backlog` });
         return;
       }
-      const suggestion = verdict === "suggest" ? String(body.suggestion || "").trim().slice(0, 2000) : null;
-      if (verdict === "suggest" && !suggestion) {
+      const suggestion = verdict === "suggest" && typeof body.suggestion === "string" ? body.suggestion.trim() : null;
+      if (verdict === "suggest" && (!suggestion || suggestion.length > 2000)) {
         sendJson(res, 400, { status: "refused", error: "suggestions need text" });
         return;
       }
       const pending = pendingRecords();
-      if (verdict !== "suggest" && pending.some((record) => record.kind === "idea" && record.idea === idea.id && record.verdict === verdict)) {
+      const priorVerdict = verdict === "suggest"
+        ? null
+        : pending.find((record) => record.kind === "idea" && record.idea === idea.id && record.verdict !== "suggest");
+      if (priorVerdict?.verdict === verdict) {
         sendJson(res, 200, { status: "already-queued", pending: pending.length });
         return;
       }
@@ -1015,9 +1254,9 @@ async function handle(req, res) {
         requested_at: new Date().toISOString(),
         prompt: `Captain ${verbs[verdict]} idea ${idea.id} (${idea.title}).${suggestion ? ` Captain suggestion text: ${suggestion}` : ""}${verdict === "approve" ? " Create the follow-up work item(s) through the normal backlog lifecycle." : ""}`,
       };
-      const name = enqueueCommand(record);
+      const name = priorVerdict ? replaceCommand(priorVerdict._file, record) : enqueueCommand(record);
       log(`queued idea ${idea.id} ${verdict} as ${name} for ${record.requested_by}`);
-      sendJson(res, 200, { status: "queued", pending: pending.length + 1 });
+      sendJson(res, 200, { status: priorVerdict ? "replaced" : "queued", pending: pending.length + (priorVerdict ? 0 : 1) });
       return;
     }
 

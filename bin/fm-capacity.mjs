@@ -387,6 +387,10 @@ function itemRef(owner, id) {
   return opaqueRef("item", `${owner}/${id}`);
 }
 
+function decisionRef(owner, id) {
+  return opaqueRef("item", `decision/${owner}/${id}`);
+}
+
 function ownerRef(owner) {
   if (owner === "main" || owner === "ephemeral worker") return owner;
   return `persistent ${opaqueRef("home", String(owner).replace(/^secondmate\s+/, ""))}`;
@@ -600,7 +604,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: "main",
         task: itemRef("main", task.id),
-        key: itemRef("decision", decision.key || task.id),
+        key: decisionRef("main", decision.key || task.id),
         reason: "Open decision raised by work already under way.",
       });
     }
@@ -641,7 +645,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: "main",
         task: itemRef("main", record.id),
-        key: itemRef("decision", record.id),
+        key: decisionRef("main", record.id),
         reason: "A queued choice is held for your decision.",
       });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
@@ -649,8 +653,9 @@ function classify(snapshot, environment) {
       continue;
     }
     if (record.blocked_by || record.hold_reason) {
-      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "dependency or structured hold" });
-      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Dependency or structured hold"));
+      const reason = record.blocked_by ? `Blocked by ${itemRef("main", record.blocked_by)}` : "Structured hold";
+      blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
+      pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", reason));
       continue;
     }
     const timeGate = futureTimeGate(record, now);
@@ -705,7 +710,7 @@ function classify(snapshot, environment) {
       decisions.push({
         owner: ownerRef(mate.id),
         task: itemRef(mate.id, decision.id || mate.id),
-        key: itemRef("decision", decision.key || decision.id || mate.id),
+        key: decisionRef(mate.id, decision.key || decision.id || mate.id),
         reason: "Open decision raised by work already under way.",
       });
     }
@@ -766,8 +771,9 @@ function classify(snapshot, environment) {
         continue;
       }
       if (record.blocked_by || record.hold_reason) {
-        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "dependency or structured hold" });
-        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", "Dependency or structured hold"));
+        const reason = record.blocked_by ? `Blocked by ${itemRef(mate.id, record.blocked_by)}` : "Structured hold";
+        blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason });
+        pipeline.blocked.push(cardFromBacklog(record, mate.id, "blocked", reason));
         continue;
       }
       const timeGate = futureTimeGate(record, now);

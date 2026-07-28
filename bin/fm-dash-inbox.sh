@@ -3,10 +3,9 @@
 #
 # Single owner of state/dash-inbox/ consumption: listing pending
 # fm-dash-command.v1 records written by bin/fm-dash-serve.mjs and claiming them
-# durably. "claim" atomically archives each record under
-# state/dash-inbox/archive/ (newest 50 kept) and prints it, so a command is
-# surfaced exactly once even across interrupted turns; a claim that printed is a
-# claim that archived. Consumption semantics are owned by the capacity skill:
+# durably. "claim" prints each record before archiving it under
+# state/dash-inbox/archive/ (newest 50 kept), so an interruption can re-surface
+# a command but can never silently lose one. Consumption semantics are owned by the capacity skill:
 # each claimed prompt is the captain's approval of that CAP action ID with all
 # of that skill's authority limits, never destructive or merge authority.
 #
@@ -91,14 +90,16 @@ case "${1:-list}" in
     mkdir -p "$ARCHIVE"
     chmod 700 "$ARCHIVE" 2>/dev/null || true
     count=0
-    claimed=""
     while IFS= read -r f; do
       dest="$ARCHIVE/$(basename "$f")"
-      # rename-based claim: a record either stays pending or is archived; a
-      # concurrent claimer loses the rename and skips the record.
+      if [ -e "$dest" ]; then
+        rm -f -- "$f"
+        continue
+      fi
+      [ -e "$f" ] || continue
+      print_record "$f"
       if mv -n -- "$f" "$dest" 2>/dev/null && [ ! -e "$f" ] && [ -e "$dest" ]; then
         count=$((count + 1))
-        claimed="$claimed$dest"$'\n'
       fi
     done <<EOF
 $files
@@ -108,10 +109,6 @@ EOF
       exit 0
     fi
     printf 'claimed: %s captain dashboard command(s)\n' "$count"
-    printf '%s' "$claimed" | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      print_record "$f"
-    done
     echo "handle each prompt as the captain's approval of that action ID under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
     prune_archive
     ;;

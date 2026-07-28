@@ -11,6 +11,7 @@ INBOX_SH="$ROOT/bin/fm-dash-inbox.sh"
 INSTALL_SH="$ROOT/bin/fm-dash-install.sh"
 CAPACITY="$ROOT/bin/fm-capacity.mjs"
 TMP_ROOT=$(fm_test_tmproot fm-dash)
+QUOTA_STUB="$TMP_ROOT/quota-axi"
 
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 command -v curl >/dev/null 2>&1 || { echo "skip: curl not found"; exit 0; }
@@ -37,11 +38,15 @@ make_fixture() {
     "path": "$home/data/backlog.md",
     "present": true,
     "records": [
+      {"order":0,"state":"in_flight","structured":true,"id":"active-task","title":"Run the active rollout","repo":"alpha","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: rollout remains observable."},
       {"order":1,"state":"queued","structured":true,"id":"ready-safe","title":"Ship the gamma feature","repo":"gamma","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: bounded regression tests pass."},
-      {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout"}
+      {"order":2,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast rollout"},
+      {"order":3,"state":"queued","structured":true,"id":"blocked-child","title":"Ship after rollout choice","repo":"alpha","project_resolved":true,"kind":"ship","blocked_by":"captain-choice","body_excerpt":"Acceptance criteria: follows the selected rollout."}
     ]
   },
-  "tasks": [],
+  "tasks": [
+    {"id":"active-task","kind":"ship","project":"alpha","current_state":{"state":"working","source":"pane","detail":"running rollout"},"endpoint":{"exists":true},"hints":{"open_decisions":[{"key":"runtime-policy"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"active-task","title":"Run the active rollout","repo":"alpha","project_resolved":true,"kind":"ship"}}
+  ],
   "scout_reports": [],
   "secondmate_current": {"registry":{"available":true,"complete":true,"records":[]},"records":[],"total":0,"shown":0,"truncated":0},
   "secondmate_landed": {"records":[],"truncated":[],"unreadable":[]}
@@ -59,6 +64,8 @@ EOF
 EOF
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
+- [ ] active-task - Run the active rollout (repo: alpha) (kind: ship)
+  Acceptance criteria: rollout remains observable.
 
 ## Queued
 - [ ] ready-safe - Ship the gamma feature (repo: gamma) (kind: ship)
@@ -67,10 +74,12 @@ EOF
   Pick the alpha rollout pace before dependent work starts.
   - Conservative rollout: slower, safest for existing users
   - Fast rollout: reaches everyone this week, higher regression risk
+- [ ] blocked-child - Ship after rollout choice (repo: alpha) (kind: ship) (blocked-by: captain-choice)
+  Acceptance criteria: follows the selected rollout.
 
 ## Done
 EOF
-  mkdir -p "$home/data/ready-safe" "$home/data/ideas/pitches"
+  mkdir -p "$home/data/ready-safe" "$home/data/ideas/pitches" "$home/data/decisions"
   cat > "$home/data/ready-safe/brief.md" <<'EOF'
 # Task
 Ship the gamma feature so gamma users get streaming exports.
@@ -93,6 +102,26 @@ New crew homes should self-provision in one command.
 Send the captain a nightly fleet digest.
 EOF
   printf '# Faster onboarding pitch\n\nOne command provisions a ready home.\n' > "$home/data/ideas/pitches/IDEA-01.md"
+  cat > "$home/data/decisions/captain-choice.md" <<'EOF'
+# Choose the rollout policy
+
+Pick the alpha rollout pace before dependent work starts.
+
+## Options
+
+- [recommended] Conservative rollout - Slower delivery with the lowest regression risk.
+- Fast rollout - Reaches everyone this week with higher regression risk.
+EOF
+  cat > "$home/data/decisions/runtime-policy.md" <<'EOF'
+# Choose the runtime policy
+
+Choose how the active rollout should continue.
+
+## Options
+
+- [recommended] Conservative rollout - Slower delivery with the lowest regression risk.
+- Fast rollout - Reaches everyone this week with higher regression risk.
+EOF
 }
 
 write_config() {
@@ -108,7 +137,7 @@ pick_port() {
 
 start_server() {
   local home=$1 port=$2 fixture_args=${3:-}
-  FM_HOME="$home" FM_DASH_CAPACITY_ARGS="$fixture_args" node "$SERVE" --port "$port" > "$TMP_ROOT/serve.log" 2>&1 &
+  FM_HOME="$home" FM_DASH_CAPACITY_ARGS="$fixture_args" FM_DASH_QUOTA_AXI="$QUOTA_STUB" node "$SERVE" --port "$port" > "$TMP_ROOT/serve.log" 2>&1 &
   SERVER_PID=$!
   local tries=0
   while ! curl -sf "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; do
@@ -139,6 +168,11 @@ HOME_DIR="$TMP_ROOT/home"
 SNAPSHOT="$TMP_ROOT/snapshot.json"
 ENVIRONMENT="$TMP_ROOT/environment.json"
 make_fixture "$HOME_DIR" "$SNAPSHOT" "$ENVIRONMENT"
+cat > "$QUOTA_STUB" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","windows":[{"label":"session","percentUsed":42,"resetsAt":"2026-07-29T10:00:00Z"}]},{"provider":"codex","label":"Codex","windows":[{"label":"week","percentUsed":61,"resetsAt":"2026-08-01T10:00:00Z"}]},{"provider":"grok","label":"Grok","windows":[{"label":"credits","percentUsed":7,"resetsAt":"2026-07-30T10:00:00Z"}]},{"provider":"cursor","label":"Cursor","windows":[{"label":"month","percentUsed":99,"resetsAt":"2026-08-28T10:00:00Z"}]}]}'
+EOF
+chmod 700 "$QUOTA_STUB"
 FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$SNAPSHOT" --environment "$ENVIRONMENT" \
   --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
   || fail "could not render the fixture dashboard with its refs sidecar"
@@ -163,6 +197,35 @@ test_identity_fails_closed() {
   pass "every route except healthz requires the configured captain identity"
 }
 
+test_browser_posts_require_same_origin() {
+  REQ_STATUS=$(curl -s -o "$TMP_ROOT/resp.body" -w '%{http_code}' -X POST \
+    -H "Tailscale-User-Login: $CAPTAIN" \
+    -H 'Origin: https://evil.example' \
+    -H 'Sec-Fetch-Site: cross-site' \
+    -H 'content-type: application/json' \
+    -d '{"id":"CAP-06"}' \
+    "http://127.0.0.1:$PORT/api/dispatch")
+  [ "$REQ_STATUS" = 403 ] || fail "cross-site browser dispatch was not refused (got $REQ_STATUS)"
+  REQ_STATUS=$(curl -s -o "$TMP_ROOT/resp.body" -w '%{http_code}' -X POST \
+    -H "Tailscale-User-Login: $CAPTAIN" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    -H 'content-type: application/json' \
+    -d '{"id":"CAP-06"}' \
+    "http://127.0.0.1:$PORT/api/dispatch")
+  [ "$REQ_STATUS" = 403 ] || fail "browser dispatch without Origin was not refused (got $REQ_STATUS)"
+  REQ_STATUS=$(curl -s -o "$TMP_ROOT/resp.body" -w '%{http_code}' -X POST \
+    -H "Tailscale-User-Login: $CAPTAIN" \
+    -H "Origin: http://127.0.0.1:$PORT" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    -H 'content-type: application/json' \
+    -d '{"id":"CAP-02"}' \
+    "http://127.0.0.1:$PORT/api/dispatch")
+  [ "$REQ_STATUS" = 409 ] || fail "same-origin browser dispatch did not reach normal validation (got $REQ_STATUS)"
+  [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
+    || fail "refused browser dispatch wrote an inbox record"
+  pass "authenticated browser posts require a matching same origin"
+}
+
 test_served_page_wears_dashboard_with_interactive_layer() {
   local body
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
@@ -173,7 +236,27 @@ test_served_page_wears_dashboard_with_interactive_layer() {
   assert_contains "$RESP" 'data-copy' "producer copy layer was lost in serving"
   assert_contains "$RESP" '"ready-safe"' "served page config lacks the de-anonymized work item id"
   assert_contains "$RESP" 'IDEA-01' "served page config lacks the idea backlog"
+  assert_contains "$RESP" 'postJson({ id })' "served prompt actions still require copy-paste"
+  assert_contains "$RESP" 'Blocked by item-' "served dashboard does not render the blocked dependency chain"
   pass "served page is the producer dashboard wearing the injected interactive layer"
+}
+
+test_subscription_usage_panel() {
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'Subscription usage' "served page lacks the subscription usage panel"
+  assert_contains "$RESP" '"label":"Claude"' "usage panel lacks Claude"
+  assert_contains "$RESP" '"label":"Codex"' "usage panel lacks Codex"
+  assert_contains "$RESP" '"label":"Grok"' "usage panel lacks Grok"
+  assert_not_contains "$RESP" '"label":"Cursor"' "usage panel included a forbidden provider"
+  assert_contains "$RESP" 'percentUsed":42' "usage panel lacks percent-used data"
+  assert_contains "$RESP" 'toLocaleString()' "usage reset time is not rendered in the captain local timezone"
+  assert_contains "$RESP" 'resets in ' "usage panel lacks reset-distance rendering"
+  stop_server
+  rm -f "$QUOTA_STUB"
+  start_server "$HOME_DIR" "$PORT"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"usage":{"status":"unavailable","providers":[]}' "missing quota-axi did not degrade gracefully"
+  pass "subscription usage is bounded to Claude, Codex, and Grok"
 }
 
 test_inline_config_is_script_safe() {
@@ -190,7 +273,7 @@ EOF
 }
 
 ref_for() {
-  # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/captain-choice"
+  # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/main/runtime-policy"
   node -e '
     const refs = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).refs;
     const wanted = process.argv[2];
@@ -219,29 +302,46 @@ test_refs_sidecar_and_rich_work_item_detail() {
 
 test_decision_detail_options_and_validated_approval() {
   local ref record
-  ref=$(ref_for "decision/captain-choice") || fail "refs sidecar does not map the decision"
+  ref=$(ref_for "decision/main/runtime-policy") || fail "refs sidecar does not map a non-backlog decision key"
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "decision detail failed (got $REQ_STATUS: $RESP)"
   assert_contains "$RESP" 'Conservative rollout' "decision detail lacks its first option"
   assert_contains "$RESP" 'higher regression risk' "decision detail lacks the option impact"
+  assert_contains "$RESP" '"recommended":true' "decision detail lacks its recommended marker"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":7}"
   [ "$REQ_STATUS" = 400 ] || fail "an off-record option was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":\"length\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "an array property was accepted as an option index (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":\"constructor\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "an inherited property was accepted as an option index (got $REQ_STATUS)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":0}"
   [ "$REQ_STATUS" = 200 ] || fail "decision approval failed (got $REQ_STATUS: $RESP)"
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" | head -1)")
   assert_contains "$record" '"decision"' "decision record lacks its kind"
-  assert_contains "$record" 'captain-choice' "decision record lacks the decision key"
+  assert_contains "$record" 'runtime-policy' "decision record lacks the decision key"
   assert_contains "$record" 'Conservative rollout' "decision record lacks the chosen option"
   assert_contains "$record" 'chat confirmation' "decision record lacks the destructive-consequence boundary"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":1}"
   assert_contains "$RESP" 'already-queued' "a second choice for the same decision was not coalesced"
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" -delete
-  pass "decisions serve option detail and approvals are validated against the record"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"answer\":\"Use a 10% canary for 48 hours\"}"
+  [ "$REQ_STATUS" = 200 ] || fail "custom decision answer failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" | head -1)")
+  assert_contains "$record" 'Use a 10% canary for 48 hours' "decision record lacks the custom answer"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" -delete
+  mv "$HOME_DIR/data/decisions/runtime-policy.md" "$HOME_DIR/data/decisions/runtime-policy.md.off"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  assert_contains "$RESP" 'legacy decision' "legacy decision does not route to captain chat"
+  assert_contains "$RESP" '"options":[]' "legacy backlog bullets were treated as structured decision options"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"answer\":\"unsafe fallback\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "legacy decision accepted free text without an options document"
+  mv "$HOME_DIR/data/decisions/runtime-policy.md.off" "$HOME_DIR/data/decisions/runtime-policy.md"
+  pass "decision documents validate option picks and bounded custom answers"
 }
 
 test_stale_refs_are_disabled() {
   local ref
-  ref=$(ref_for "decision/captain-choice") || fail "refs sidecar does not map the decision"
+  ref=$(ref_for "decision/main/runtime-policy") || fail "refs sidecar does not map the decision"
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
@@ -277,12 +377,21 @@ test_idea_pitch_and_verdicts() {
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")
   assert_contains "$record" '"idea"' "idea record lacks its kind"
   assert_contains "$record" 'normal backlog lifecycle' "idea approval does not route creation through firstmate"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-01","verdict":"deny"}'
+  assert_contains "$RESP" '"replaced"' "newest contradictory idea verdict did not replace the pending verdict"
+  [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "verdict replacement left contradictory pending records"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-01.json' | head -1)")
+  assert_contains "$record" '"verdict": "deny"' "verdict replacement did not retain the newest choice"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-99","verdict":"approve"}'
   [ "$REQ_STATUS" = 404 ] || fail "an unlisted idea was not refused (got $REQ_STATUS)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":"scope it to weekdays only"}'
   [ "$REQ_STATUS" = 200 ] || fail "idea suggestion failed (got $REQ_STATUS: $RESP)"
   record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-02.json' | head -1)")
   assert_contains "$record" 'scope it to weekdays only' "suggestion text was not recorded for firstmate"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":"include landed work"}'
+  [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-02.json' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "additive idea suggestions were coalesced"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":""}'
   [ "$REQ_STATUS" = 400 ] || fail "an empty suggestion was not refused (got $REQ_STATUS)"
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*IDEA-*.json' -delete
@@ -341,12 +450,23 @@ test_refresh_reruns_producer_server_side() {
 }
 
 test_inbox_list_claim_and_archive() {
-  local out
+  local out stub_bin
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" pending-count)
   [ "$out" = 1 ] || fail "pending-count expected 1, got: $out"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" list)
   assert_contains "$out" 'CAP-06' "list omits the pending action"
   assert_contains "$out" "$CAPTAIN" "list omits the requesting identity"
+  stub_bin="$TMP_ROOT/failing-mv"
+  mkdir -p "$stub_bin"
+  cat > "$stub_bin/mv" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+  chmod 700 "$stub_bin/mv"
+  out=$(PATH="$stub_bin:$PATH" FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
+  assert_contains "$out" 'Approve CAP-06' "claim did not deliver before attempting archive"
+  [ -n "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' 2>/dev/null)" ] \
+    || fail "failed archive silently removed the delivered command"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
   assert_contains "$out" 'claimed: 1' "claim did not claim the pending command"
   assert_contains "$out" 'Approve CAP-06' "claim omits the command prompt"
@@ -357,7 +477,7 @@ test_inbox_list_claim_and_archive() {
     || fail "claim did not archive the record"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
   assert_contains "$out" 'no pending dashboard commands' "second claim re-surfaced the archived command"
-  pass "inbox claim surfaces each command exactly once and archives it durably"
+  pass "inbox claim delivers before archive and safely permits replay"
 }
 
 test_read_only_mode_fails_safe() {
@@ -394,7 +514,7 @@ test_check_shim_wakes_only_when_pending() {
 }
 
 test_installer_plist_and_funnel_stance() {
-  local escaped_home plist
+  local escaped_home funnel_check plist
   plist=$(FM_HOME="$HOME_DIR" "$INSTALL_SH" print-plist) || fail "print-plist failed"
   assert_contains "$plist" 'io.firstmate.dashboard.' "plist lacks the per-home label"
   assert_contains "$plist" 'fm-dash-serve.mjs' "plist does not run the dashboard service"
@@ -405,6 +525,11 @@ test_installer_plist_and_funnel_stance() {
   grep -n 'tailscale funnel' "$INSTALL_SH" && fail "installer invokes tailscale funnel"
   assert_grep 'assert_no_funnel' "$INSTALL_SH" "installer does not verify funnel is off"
   assert_grep 'never enables Funnel' "$INSTALL_SH" "installer does not declare the funnel boundary"
+  funnel_check=$(sed -n '/^assert_no_funnel()/,/^write_config()/p' "$INSTALL_SH")
+  assert_contains "$funnel_check" 'unsupported tailscale serve status schema' "Funnel verification does not reject unexpected schemas"
+  assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
+  assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
+  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'serve --https="$serve_port" off' "failed Funnel verification does not tear down the mapping"
   escaped_home="$HOME_DIR/xml & < >"
   plist=$(FM_HOME="$escaped_home" FM_ROOT_OVERRIDE="$HOME_DIR/root & < >" "$INSTALL_SH" print-plist) || fail "print-plist with XML metacharacters failed"
   assert_contains "$plist" "$HOME_DIR/xml &amp; &lt; &gt;" "plist did not XML-escape FM_HOME"
@@ -420,11 +545,15 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'config/dash.json' "$ROOT/.gitignore" "config/dash.json is not gitignored"
   assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
   assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
+  assert_grep 'data/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the decision-options format"
+  assert_grep 'secondmate-owned work item deliberately shows only a limited ownership note' "$ROOT/docs/dashboard-service.md" "service doc omits the accepted secondmate detail boundary"
   pass "the service is documented and wired into the operating contract"
 }
 
 test_identity_fails_closed
+test_browser_posts_require_same_origin
 test_served_page_wears_dashboard_with_interactive_layer
+test_subscription_usage_panel
 test_inline_config_is_script_safe
 test_refs_sidecar_and_rich_work_item_detail
 test_decision_detail_options_and_validated_approval

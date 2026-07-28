@@ -98,21 +98,39 @@ tailscale_self_dnsname() {
 # Refuse loudly if any Funnel exposure exists for the served port. Funnel is
 # never acceptable for this service.
 assert_no_funnel() {
-  local serve_port=$1
-  "$(tailscale_bin)" serve status --json 2>/dev/null | node -e '
+  local serve_port=$1 status_json
+  status_json=$("$(tailscale_bin)" serve status --json 2>/dev/null) || {
+    echo "could not verify Funnel state: tailscale serve status failed" >&2
+    return 1
+  }
+  printf '%s' "$status_json" | node -e '
     let raw = "";
     process.stdin.on("data", (c) => { raw += c; });
     process.stdin.on("end", () => {
       try {
-        const s = JSON.parse(raw || "{}");
+        const s = JSON.parse(raw);
+        if (!s || Array.isArray(s) || typeof s !== "object"
+          || !s.TCP || Array.isArray(s.TCP) || typeof s.TCP !== "object"
+          || !s.Web || Array.isArray(s.Web) || typeof s.Web !== "object"
+          || !s.TCP[process.argv[1]] || s.TCP[process.argv[1]].HTTPS !== true
+          || !Object.keys(s.Web).some((hostport) => hostport.endsWith(":" + process.argv[1]))) {
+          throw new Error("unsupported tailscale serve status schema");
+        }
+        if (s.AllowFunnel !== undefined && (!s.AllowFunnel || Array.isArray(s.AllowFunnel) || typeof s.AllowFunnel !== "object")) {
+          throw new Error("unsupported AllowFunnel schema");
+        }
         const allow = s.AllowFunnel || {};
         for (const [hostport, enabled] of Object.entries(allow)) {
+          if (typeof enabled !== "boolean") throw new Error("unsupported AllowFunnel value");
           if (enabled && hostport.endsWith(":" + process.argv[1])) {
             console.error("funnel is enabled for " + hostport);
             process.exit(1);
           }
         }
-      } catch {}
+      } catch (error) {
+        console.error("could not verify Funnel state: " + error.message);
+        process.exit(1);
+      }
     });
   ' "$serve_port"
 }
@@ -230,7 +248,7 @@ cmd_install() {
     || err "tailscale serve refused the mapping; is tailscale up?"
   if ! assert_no_funnel "$serve_port"; then
     "$(tailscale_bin)" serve --https="$serve_port" off >/dev/null 2>&1 || true
-    err "funnel exposure detected for port $serve_port; the mapping was removed - this service must stay tailnet-only"
+    err "could not verify tailnet-only exposure for port $serve_port; the mapping was removed - this service must stay tailnet-only"
   fi
 
   dnsname=$(tailscale_self_dnsname) || err "could not resolve this machine's tailnet name"
