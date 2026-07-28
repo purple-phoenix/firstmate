@@ -124,6 +124,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/capacity/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -173,6 +177,10 @@
     },
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/user-journey-audit/SKILL.md",
       "audience": "agent-runtime"
     },
     {

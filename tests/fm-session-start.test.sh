@@ -723,7 +723,11 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      # BASHPID arrived in Bash 4.0; stock macOS Bash is 3.2, where referencing it
+      # under set -u aborts every racer subshell and the winner count is always 0.
+      # The fallback execs sh in the substitution subshell, so its PPID is this
+      # racer's own pid - $$ would report the shared parent and defeat the race.
+      harness_pid=${BASHPID:-$(exec sh -c 'echo $PPID')}
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do

@@ -4,7 +4,10 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+# Sourced for the task-id validators only. Deliberately not followed statically:
+# bin/fm-lint.sh's source-graph boundary keeps production context out of tests
+# that do not need callback or variable interop.
+# shellcheck source=/dev/null disable=SC1091
 . "$ROOT/bin/fm-pr-lib.sh"
 
 ADD="$ROOT/bin/fm-task-add.sh"
