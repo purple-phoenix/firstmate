@@ -486,6 +486,7 @@ test_parking_lot_enrichment_and_unpark() {
   assert_contains "$RESP" '"title":"Refresh the omicron gateway"' "parked entry was not enriched with its real title"
   assert_contains "$RESP" '"reason":"Captain parked omicron work until the retreat"' "parked entry was not enriched with the park reason"
   assert_contains "$RESP" '"since":"2026-07-10"' "parked entry was not enriched with its date"
+  assert_contains "$RESP" 'meta.textContent = "on the books since " + info.since' "served parking metadata does not render the parsed date"
   assert_contains "$RESP" 'Unpark' "parked entry lacks the unpark control"
   ref=$(ref_for "main/parked-rest") || fail "refs sidecar does not map the parked item"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"unpark":"item-99"}'

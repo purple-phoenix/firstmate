@@ -1250,16 +1250,28 @@ test_wait_history_estimates_and_overrun() {
 }
 
 test_parked_items_rest_in_the_parking_lot() {
-  local home="$TMP_ROOT/parked-home" snapshot="$TMP_ROOT/parked-snapshot.json" environment="$TMP_ROOT/parked-environment.json" output="$TMP_ROOT/parked-home/data/parked.html" json
+  local home="$TMP_ROOT/parked-home" mate_home="$TMP_ROOT/parked-mate" snapshot="$TMP_ROOT/parked-snapshot.json" environment="$TMP_ROOT/parked-environment.json" output="$TMP_ROOT/parked-home/data/parked.html" json mate_json
   make_fixture "$home" "$snapshot" "$environment"
-  jq '
+  mkdir -p "$mate_home/data" "$mate_home/state" "$mate_home/config" "$mate_home/projects"
+  printf '%s\n' '- delta [direct-PR] - delta project (added 2026-07-17)' > "$mate_home/data/projects.md"
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] design-ready - Refresh the delta design tokens (repo: delta) (kind: ship)' \
+    '  Acceptance criteria: token snapshots pass.' \
+    '- [ ] mate-parked - Parked delta exploration (repo: delta) (kind: ship) (since 2026-07-12) (hold: Mate parked reason stays private) (hold-kind: parked)' \
+    '  Acceptance criteria: exploration is summarized.' > "$mate_home/data/backlog.md"
+  mate_json=$(FM_HOME="$mate_home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate parked summary fixture failed"
+  printf '%s' "$mate_json" | jq -e '
+    .counts.queued == 2
+    and (.queued | any(.id == "mate-parked" and .since == "2026-07-12" and .hold_kind == "parked"))
+  ' >/dev/null || fail "production secondmate projection omitted the parked since date: $mate_json"
+  jq --argjson mate "$mate_json" '
     .backlog.records += [
       {"order":10,"state":"queued","structured":true,"id":"parked-rest","title":"Refresh the omicron gateway","repo":"omicron","project_resolved":true,"kind":"ship","since":"2026-07-10","hold_kind":"parked","hold_reason":"Captain parked omicron work until the retreat","body_excerpt":"Acceptance criteria: omicron gateway upgraded."}
     ]
-    | (.secondmate_current.records[] | select(.id == "design") | .queued) += [
-      {"id":"mate-parked","title":"Parked delta exploration","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-12","hold_kind":"parked","hold_reason":"Mate parked reason stays private","body_excerpt":"Acceptance criteria: exploration is summarized."}
-    ]
-    | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = 2
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) = $mate.queued
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = $mate.counts.queued
   ' "$snapshot" > "$snapshot.tmp" && mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "parked fixture run failed"
   printf '%s' "$json" | jq -e '

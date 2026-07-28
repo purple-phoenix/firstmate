@@ -1135,6 +1135,8 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         const reason = info.reason ? "Parked: " + info.reason : copy.textContent;
         copy.textContent = (info.title && info.title !== info.id ? info.title + " - " : "") + reason;
       }
+      const meta = row.querySelector(".mmeta");
+      if (meta && info.since) meta.textContent = "on the books since " + info.since;
       if (cfg.readOnly) return;
       const unpark = document.createElement("button");
       unpark.type = "button";
