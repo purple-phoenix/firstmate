@@ -29,6 +29,9 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
 
+If a PR was opened or its branch was pushed without the gate, do not paste the signature into the body by hand.
+Commit the intended correction on the same feature branch and run it through `no-mistakes`; the passing pipeline updates the existing PR with its deterministic `## Pipeline` section.
+
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
 ## Repo conventions
