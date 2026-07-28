@@ -232,6 +232,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/dashboard-service.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/decision-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
