@@ -264,7 +264,8 @@ function titleAnnotations(rawTitle) {
 // Parking-lot enrichment for the authenticated captain: resolve each
 // data-parked-ref the producer rendered through the current-generation refs
 // sidecar, then read the owning home's backlog for the real title, park
-// reason, and dates. Reads only; the offline artifact itself stays opaque.
+// reason, and backlog `since` date. Reads only; the offline artifact itself
+// stays opaque.
 function parkedEntries(dashboardHtml, refsFile) {
   const entries = [];
   if (!refsFile) return entries;

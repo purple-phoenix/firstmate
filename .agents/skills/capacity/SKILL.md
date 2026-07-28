@@ -89,7 +89,7 @@ Continue the already-required live supervision cycle after presenting the result
 
 ## 6. Dashboard command service
 
-The optional persistent dashboard service (`bin/fm-dash-serve.mjs`, installed by `bin/fm-dash-install.sh`, designed in `docs/dashboard-service.md`) publishes the generated dashboard tailnet-only, never Funnel, and lets the captain click a current `CAP-NN` action or a server-side refresh.
+The optional persistent dashboard service (`bin/fm-dash-serve.mjs`, installed by `bin/fm-dash-install.sh`, designed in `docs/dashboard-service.md`) publishes the generated dashboard tailnet-only, never Funnel, and layers the captain-authenticated interactions documented by that design onto the offline artifact.
 The service never executes fleet commands: a click only writes a durable command record into `state/dash-inbox/`, and the registered `fm-dash` watcher check wakes Firstmate while records are pending.
 Its refresh button reruns the producer server-side and is equivalent to a fresh normal invocation, so it needs no Firstmate action.
 
