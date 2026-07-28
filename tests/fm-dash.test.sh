@@ -366,6 +366,8 @@ test_decision_answers_are_qualified_by_home_and_origin() {
   cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$HOME_DIR/data/origin-alpha/decisions/shared-policy.md"
   cp "$HOME_DIR/data/active-task/decisions/rollout-policy.md" "$HOME_DIR/data/origin-beta/decisions/shared-policy.md"
   cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$HOME_DIR/design/data/design-origin/decisions/shared-policy.md"
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
@@ -402,6 +404,8 @@ EOF
 test_stale_refs_are_disabled() {
   local ref
   ref=$(ref_for "decision/main/active-task/runtime-policy") || fail "refs sidecar does not map the decision"
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
@@ -415,6 +419,8 @@ test_stale_refs_are_disabled() {
   [ "$REQ_STATUS" = 404 ] || fail "stale refs still resolved detail (got $REQ_STATUS)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":0}"
   [ "$REQ_STATUS" = 400 ] || fail "stale refs still authorized an approval (got $REQ_STATUS)"
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
@@ -604,6 +610,8 @@ test_installer_plist_and_funnel_stance() {
   assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
   assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
   assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'fail_install' "failed Funnel verification does not enter transactional rollback"
+  # The single-quoted assertion is intentionally literal.
+  # shellcheck disable=SC2016
   assert_contains "$(sed -n '/^rollback_install()/,/^fail_install()/p' "$INSTALL_SH")" 'disable_serve_port "$TX_NEW_SERVE_PORT"' "transactional rollback does not tear down the replacement mapping"
   assert_contains "$(sed -n '/^cmd_install()/,/^cmd_uninstall()/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
   assert_contains "$(sed -n '/^cmd_uninstall()/,/^cmd_status()/p' "$INSTALL_SH")" 'unregister_check' "uninstall does not unregister the watcher"
