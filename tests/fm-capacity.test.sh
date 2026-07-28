@@ -774,7 +774,7 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_grep 'overflow-wrap:anywhere' "$output" "dashboard lacks long-token containment"
   assert_grep '@media(max-width:760px)' "$output" "dashboard lacks narrow-width safeguards"
   assert_grep 'prefers-color-scheme: light' "$output" "dashboard lacks a light-mode theme"
-  assert_grep '--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087a08;--warn:#8a6200;--serious:#a54824;--crit:#ae2525' "$output" "light-mode text status tokens are not contrast-safe"
+  assert_grep '--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087708;--warn:#8a6200;--serious:#a54824;--crit:#ae2525' "$output" "light-mode text status tokens are not contrast-safe"
   assert_grep 'class="skip" href="#main"' "$output" "dashboard lacks a keyboard skip link"
   assert_grep '<body class="sev-' "$output" "dashboard lacks the severity-classed alarm band"
   assert_grep 'id="needs-you"' "$output" "dashboard lacks the needs-you roll call"

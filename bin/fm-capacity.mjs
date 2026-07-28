@@ -1319,7 +1319,7 @@ function renderHtml(model, captainActions) {
   <title>Firstmate capacity dashboard</title>
   <style>
     :root{color-scheme:dark;--bg:#0d0d0d;--ink:#ffffff;--ink2:#c3c2b7;--muted:#898781;--hair:#2c2c2a;--line:rgba(255,255,255,.10);--blue:#3987e5;--good:#0ca30c;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--gray:#52514e;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-    @media(prefers-color-scheme: light){:root{color-scheme:light;--bg:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087a08;--warn:#8a6200;--serious:#a54824;--crit:#ae2525;--gray:#c3c2b7}}
+    @media(prefers-color-scheme: light){:root{color-scheme:light;--bg:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087708;--warn:#8a6200;--serious:#a54824;--crit:#ae2525;--gray:#c3c2b7}}
     .sev-critical{--sev:var(--crit)}.sev-serious{--sev:var(--serious)}.sev-info{--sev:var(--blue)}.sev-neutral{--sev:var(--muted)}.sev-good{--sev:var(--good)}
     *{box-sizing:border-box}html{background:var(--bg)}
     body{margin:0;color:var(--ink);background:var(--bg);line-height:1.45;overflow-wrap:anywhere}
