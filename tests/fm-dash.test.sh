@@ -828,6 +828,35 @@ EOF
   pass "custom serve ports persist and old mappings are removed"
 }
 
+test_launchd_env_and_degraded_render_selfcheck() {
+  local plist rows
+  stop_server
+  start_server "$HOME_DIR" "$PORT"
+  plist=$(FM_HOME="$HOME_DIR" "$INSTALL_SH" print-plist) || fail "print-plist failed"
+  assert_contains "$plist" '<key>PATH</key>' "plist does not pin the installing PATH for launchd (states degrade to unknown without it)"
+  assert_contains "$plist" "$(dirname "$(command -v node)")" "plist PATH does not carry the node tool directory"
+  cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.bak"
+  rows=""
+  for _ in 1 2 3 4; do
+    rows="$rows<li class=\"mrow\"><span class=\"mreason\">Authoritative current state: unknown</span></li>"
+  done
+  printf '%s' "$(sed "s|</body>|$rows</body>|" "$TMP_ROOT/dashboard.bak")" > "$HOME_DIR/data/capacity-dashboard.html"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'RENDER DEGRADED' "a mostly-unknown render is presented as truth instead of loudly degraded"
+  cp "$TMP_ROOT/dashboard.bak" "$HOME_DIR/data/capacity-dashboard.html"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  case "$RESP" in *'"degraded":true'*) fail "a healthy render is marked degraded" ;; esac
+  pass "launchd env is pinned and a mostly-unknown render is loudly marked degraded"
+}
+
+test_served_page_has_zero_copy_affordances() {
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'copyButton.replaceWith(send)' "dispatch does not replace the copy button"
+  assert_contains "$RESP" 'copyButton.remove()' "read-only and non-action copy buttons are not removed"
+  case "$RESP" in *"copyButton.after(send)"*) fail "copy buttons are supplemented instead of replaced" ;; esac
+  pass "every copy-prompt affordance on the served page is replaced by direct dispatch"
+}
+
 test_service_contract_docs_and_ownership() {
   assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
   assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
@@ -862,6 +891,8 @@ test_read_only_mode_fails_safe
 test_check_shim_wakes_only_when_pending
 test_installer_plist_and_funnel_stance
 test_installer_tracks_custom_serve_port
+test_launchd_env_and_degraded_render_selfcheck
+test_served_page_has_zero_copy_affordances
 test_service_contract_docs_and_ownership
 
 echo "fm-dash tests passed"

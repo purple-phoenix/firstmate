@@ -913,6 +913,46 @@ test_unknown_project_is_a_definition_gap() {
   pass "unknown projects remain definition gaps despite safe delivery-mode fallback"
 }
 
+test_keyless_questions_and_blocker_chains() {
+  local home="$TMP_ROOT/chains-home" snapshot="$TMP_ROOT/chains-snapshot.json" environment="$TMP_ROOT/chains-environment.json" output json html
+  output="$home/data/chains.html"
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: exporter ships."},
+      {"order":2,"state":"in_flight","structured":true,"id":"keyed-asker","title":"Build the API","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: API ships."},
+      {"order":3,"state":"queued","structured":true,"id":"dependent","title":"Publish the dependent release","repo":"gamma","project_resolved":true,"kind":"ship","blocked_by":"asker","blocked_reason":"needs exporter","body_excerpt":"Acceptance criteria: release ships."},
+      {"order":4,"state":"queued","structured":true,"id":"policy-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick conservative or fast"},
+      {"order":5,"state":"queued","structured":true,"id":"after-policy","title":"Apply the rollout policy","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"policy-choice","body_excerpt":"Acceptance criteria: rollout applied."}
+    ]
+    | .tasks = [
+      {"id":"asker","kind":"ship","project":"alpha","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting reply"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"default","verb":"needs-decision","summary":"which port should the exporter bind"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"asker","title":"Build the exporter","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
+      {"id":"keyed-asker","kind":"ship","project":"beta","current_state":{"state":"blocked","source":"status-fold","detail":"awaiting decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[{"key":"api-shape","verb":"needs-decision","summary":"choose v1 or v2 response shape"}]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"keyed-asker","title":"Build the API","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
+    ]
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "keyless-question capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | map(select(.reason | contains("Worker question being handled in chat"))) | length) == 1
+    and (.pipeline.blocked | map(select(.reason | contains("Worker question"))) | .[0].what_you_can_do | contains("firstmate is handling"))
+    and ([.pipeline.blocked[] | select(.waits_on != null) | .waits_on[0]] | any(contains("waiting on your decision")))
+    and ([.pipeline.blocked[] | .what_you_can_do // ""] | any(contains("unblocks itself when")))
+    and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("blocked by") and contains("currently")))
+    and ([.pipeline.blocked[] | .waits_on // [] | join(" ")] | any(contains("which port")) | not)
+  ' >/dev/null || fail "keyless questions or blocker chains are wrong: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'What you can do:' "blocked rows omit the explicit captain action line"
+  case "$html" in
+    *'item-id">default'*) fail "a keyless worker question was fabricated into a decision identity" ;;
+  esac
+  pass "keyless worker questions stay chat-handled and blocked rows carry privacy-safe root-cause chains"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_cross_home_overlap_holds_supersession_and_active_count
@@ -933,3 +973,4 @@ test_html_is_private_escaped_accessible_and_responsive
 test_output_replacement_rejects_symlinks_and_enforces_mode
 test_fleet_snapshot_preserves_registered_scope_provenance
 test_unknown_project_is_a_definition_gap
+test_keyless_questions_and_blocker_chains

@@ -319,12 +319,18 @@ snapshot_file() {
 }
 
 render_plist() {
-  local label node_path log_dir fm_root fm_home
+  local label node_path log_dir fm_root fm_home path_env
   label=$(xml_escape "$1")
   node_path=$(xml_escape "$2")
   log_dir=$(xml_escape "$3")
   fm_root=$(xml_escape "$FM_ROOT")
   fm_home=$(xml_escape "$FM_HOME")
+  # launchd starts agents with a minimal PATH that cannot resolve the state
+  # reader tools (tmux, no-mistakes, tasks-axi, gh), which silently degrades
+  # every rendered state to unknown. Capture the installing shell's full PATH
+  # so the service and the generator it runs see the same tools the captain's
+  # interactive runs do.
+  path_env=$(xml_escape "$PATH")
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -339,6 +345,7 @@ render_plist() {
   <key>EnvironmentVariables</key>
   <dict>
     <key>FM_HOME</key><string>$fm_home</string>
+    <key>PATH</key><string>$path_env</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

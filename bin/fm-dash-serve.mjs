@@ -599,6 +599,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     refs: extras?.refs || {},
     ideas: extras?.ideas || [],
     usage: extras?.usage || { status: "unavailable", providers: [] },
+    degraded: extras?.degraded === true,
   });
   return `<style>
   .fmdash-bar{display:flex;justify-content:space-between;align-items:center;gap:.6rem 1.5rem;flex-wrap:wrap;padding:.6rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
@@ -610,6 +611,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-send{border:1px solid var(--ink);background:transparent;color:var(--ink);font-weight:700;padding:.5rem .9rem;cursor:pointer;font-size:.82rem;grid-column:2}
   .fmdash-send[disabled]{opacity:.55;cursor:default}
   .fmdash-chat{color:var(--muted);font-size:.76rem;align-self:center}
+  .fmdash-degraded{background:var(--crit);color:#fff;font-weight:800;font-size:.85rem;letter-spacing:.05em;padding:.7rem clamp(1rem,6vw,5rem)}
   .fmdash-click{cursor:pointer;text-decoration:underline;text-decoration-color:var(--muted);text-underline-offset:.22em}
   .fmdash-click:hover,.fmdash-click:focus-visible{color:var(--blue);text-decoration-color:var(--blue)}
   .fmdash-overlay{position:fixed;inset:0;background:color-mix(in srgb,var(--bg) 55%,transparent);backdrop-filter:blur(2px);display:grid;place-items:start center;overflow-y:auto;padding:clamp(1rem,6vh,4rem) 1rem;z-index:50}
@@ -645,6 +647,16 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       + '<span class="fmdash-pending"></span>'
       + '<button type="button" class="fmdash-refresh">Refresh capacity</button>';
     document.body.prepend(bar);
+    if (cfg.degraded) {
+      const warn = document.createElement("div");
+      warn.className = "fmdash-degraded";
+      warn.setAttribute("role", "alert");
+      warn.textContent = "RENDER DEGRADED - most worker states read as unknown, so this page may not reflect reality. The service environment is likely missing its state-reader tools; fix the environment and refresh.";
+      bar.after(warn);
+    }
+    // Zero copy-prompt affordances on the served page: every producer copy
+    // button is removed here and, where eligible, replaced by direct dispatch.
+    const copyButtons = [...document.querySelectorAll("button[data-copy]")];
     const pendingEl = bar.querySelector(".fmdash-pending");
     const showPending = (n) => {
       pendingEl.textContent = cfg.readOnly
@@ -1055,15 +1067,18 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         box.focus();
       });
     }
-    if (cfg.readOnly) return;
-    document.querySelectorAll("button[data-copy]").forEach((copyButton) => {
+    if (cfg.readOnly) {
+      copyButtons.forEach((copyButton) => copyButton.remove());
+      return;
+    }
+    copyButtons.forEach((copyButton) => {
       const id = ((copyButton.dataset.copy || "").match(/CAP-\\d{2}/) || [])[0];
-      if (!id) return;
+      if (!id) { copyButton.remove(); return; }
       if (!cfg.dispatchable.includes(id)) {
         const note = document.createElement("span");
         note.className = "fmdash-chat";
         note.textContent = "Raise in captain chat";
-        copyButton.after(note);
+        copyButton.replaceWith(note);
         return;
       }
       const send = document.createElement("button");
@@ -1086,7 +1101,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           send.disabled = false;
         } catch { send.textContent = "Failed"; send.disabled = false; }
       });
-      copyButton.after(send);
+      copyButton.replaceWith(send);
     });
   })();
   </script>`;
@@ -1146,10 +1161,19 @@ async function handle(req, res) {
     const dispatchable = config.readOnly ? [] : [...dashboard.actions.keys()].filter((id) => ONE_CLICK_ACTIONS.has(id));
     const refsFile = readRefs(dashboard.generated);
     const usage = await probeUsage();
+    // Degraded-render self-check: when most worker states rendered as unknown,
+    // the generator likely ran without its state-reader tools (for example a
+    // stripped launchd environment). Say so loudly rather than presenting
+    // degraded data as truth.
+    const unknownStates = (dashboard.html.match(/Authoritative current state: unknown/g) || []).length;
+    const manifestRows = (dashboard.html.match(/class="mrow"/g) || []).length;
+    const degraded = unknownStates >= 3 && unknownStates * 2 >= manifestRows;
+    if (degraded) log(`degraded render detected: ${unknownStates} of ${manifestRows} manifest rows read unknown; check the service environment (PATH/tools)`);
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
       usage,
+      degraded,
     });
     sendHtml(res, 200, dashboard.html.replace("</body>", `${layer}</body>`));
     return;

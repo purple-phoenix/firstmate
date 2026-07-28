@@ -14,6 +14,9 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 - An Ideas section renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.
 - A service bar shows how many captain commands are queued for firstmate.
 - A Subscription usage band shows cached `quota-axi --json` windows for Claude, Codex, and Grok, including percent used and reset distance with reset time formatted by the captain's browser in local time.
+- Every blocked row carries its plain-language blocker chain resolved to the root cause plus an explicit "What you can do" line, so no blocked row leaves the captain guessing; chains stay privacy-safe in the on-disk file and de-anonymize at serve time like every other reference.
+- The served page has zero copy-prompt affordances: each producer copy button is replaced by direct dispatch, or removed outright in read-only mode, while the offline file keeps its copy buttons for `file://` use.
+- The installer pins the installing shell's `PATH` into the launchd agent so the generator's state-reader tools resolve, and the service marks a render `RENDER DEGRADED` loudly on the page and in its log when most worker states read unknown - degraded data is never presented as truth.
 
 `bin/fm-capacity.mjs` remains the single owner of the dashboard's content and look; the service injects its interactive layer at serve time and never modifies the file on disk, so the file keeps working offline exactly as before.
 The on-disk dashboard stays identity-opaque: the producer's opt-in `--refs` sidecar (`state/dash-refs.json`, `fm-capacity-refs.v1`, mode 0600) carries the opaque-to-real mapping, and only the captain-authenticated service reads it to enrich the served page.
