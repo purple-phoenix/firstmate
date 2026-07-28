@@ -30,7 +30,7 @@ Decision filing and its structured options document are owned by the decision-ho
 The generated dashboard is a polished, responsive, accessible, self-contained HTML file that works directly from disk.
 Do not invoke, depend on, open, poll, share, or embed Lavish for `/capacity`.
 Do not expose the dashboard through any local, LAN, public, or third-party service; the sole sanctioned exposure is the tailnet-only dashboard service in section 6, and even that surface is never Funnel and never public.
-The normal invocation may replace only the generated private dashboard and must not write a cache unless the producing script's help explicitly adds and owns one in the future.
+The normal invocation may replace only the generated private dashboard and the producer-owned private wait-history cache documented by `bin/fm-capacity.mjs --help`.
 Never put secrets, credentials, PHI, production data, or report bodies into the dashboard.
 
 ## 2. Interpret capacity safely

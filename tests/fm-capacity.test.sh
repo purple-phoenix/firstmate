@@ -307,8 +307,10 @@ test_secondmate_readiness_uses_home_owned_runtime_lanes() {
 }
 
 test_incomplete_sources_fail_closed() {
-  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete-home/data/incomplete.html" json
+  local home="$TMP_ROOT/incomplete-home" snapshot="$TMP_ROOT/incomplete-snapshot.json" environment="$TMP_ROOT/incomplete-environment.json" output="$TMP_ROOT/incomplete-home/data/incomplete.html"
+  local history="$TMP_ROOT/incomplete-home/data/capacity-wait-history.json" json
   make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' '{"schema":"fm-capacity-wait-history.v1","active":{"design/missing:validation":{"kind":"validation","first_observed":1000,"last_observed":1600}},"durations":{}}' > "$history"
   jq '.secondmate_current.truncated = 1' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "truncated capacity run failed"
@@ -319,6 +321,10 @@ test_incomplete_sources_fail_closed() {
     and (.recommendations | any(.id == "CAP-06") | not)
     and (.recommendations | any(.id == "CAP-08") | not)
   ' >/dev/null || fail "truncated secondmate inventory did not suppress readiness: $json"
+  jq -e '
+    .active["design/missing:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "truncated inventory retired an unobserved active wait: $(cat "$history")"
 
   make_fixture "$home" "$snapshot" "$environment"
   jq '.secondmate_current.records[0].omitted = [{"surface":"queued","count":1}]' "$snapshot" > "$snapshot.tmp"
@@ -347,6 +353,29 @@ test_incomplete_sources_fail_closed() {
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing-backlog capacity run failed"
   printf '%s' "$json" | jq -e '.readiness.available == false and (.recommendations | any(.id == "CAP-08") | not)' >/dev/null ||
     fail "missing main backlog produced a demand-shortage conclusion: $json"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' '{"schema":"fm-capacity-wait-history.v1","active":{"main/validate-now:validation":{"kind":"validation","first_observed":1000,"last_observed":1600}},"durations":{}}' > "$history"
+  jq '.tasks = [.tasks[] | select(.id != "validate-now")]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "missing main task capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false' >/dev/null ||
+    fail "missing in-flight main task did not suppress readiness: $json"
+  jq -e '
+    .active["main/validate-now:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "missing main task retired an unobserved active wait: $(cat "$history")"
+
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '(.tasks[] | select(.id == "validate-now") | .current_state.state) = "unknown"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "unknown main task state capacity run failed"
+  printf '%s' "$json" | jq -e '.readiness.available == false' >/dev/null ||
+    fail "unknown main task state did not suppress readiness: $json"
+  jq -e '
+    .active["main/validate-now:validation"].last_observed == 1600
+    and (.durations.validation == null)
+  ' "$history" >/dev/null || fail "unknown main task state retired an unobserved active wait: $(cat "$history")"
   pass "capacity suppresses readiness and demand claims for incomplete bounded sources"
 }
 
@@ -817,8 +846,20 @@ test_html_is_private_escaped_accessible_and_responsive() {
 
 test_output_replacement_rejects_symlinks_and_enforces_mode() {
   local home="$TMP_ROOT/output-home" snapshot="$TMP_ROOT/output-snapshot.json" environment="$TMP_ROOT/output-environment.json"
-  local output="$home/data/capacity-dashboard.html" target="$TMP_ROOT/symlink-target" redirected="$TMP_ROOT/redirected-data" mode
+  local output="$home/data/capacity-dashboard.html" history="$home/data/capacity-wait-history.json"
+  local target="$TMP_ROOT/symlink-target" redirected="$TMP_ROOT/redirected-data" mode
   make_fixture "$home" "$snapshot" "$environment"
+  printf '%s\n' sentinel > "$history"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$history" >/dev/null 2>&1; then
+    fail "capacity accepted its wait history as the dashboard destination"
+  fi
+  [ "$(cat "$history")" = sentinel ] || fail "dashboard collision changed wait history"
+  if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$history" >/dev/null 2>&1; then
+    fail "capacity accepted its wait history as the refs destination"
+  fi
+  [ "$(cat "$history")" = sentinel ] || fail "refs collision changed wait history"
+  [ ! -e "$output" ] || fail "refs collision wrote the dashboard before refusing"
+  rm "$history"
   printf '%s\n' sentinel > "$target"
   ln -s "$target" "$output"
   if "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null 2>&1; then
@@ -1009,6 +1050,205 @@ test_keyless_questions_and_blocker_chains() {
   pass "keyless worker questions stay chat-handled and blocked rows carry privacy-safe root-cause chains"
 }
 
+test_wait_estimator_honesty() {
+  local unit="$TMP_ROOT/wait-estimator-unit.mjs"
+  cat > "$unit" <<'EOF'
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+const wp = await import(pathToFileURL(process.argv[2]).href);
+
+// No-history case: never a fabricated percentage, elapsed time only.
+const none = wp.estimateWait(720, []);
+assert.equal(none.basis, "none");
+assert.equal(none.percent, null);
+assert.equal(none.remaining_seconds, null);
+assert.match(wp.progressLabel(none), /^time unknown - 12m elapsed so far$/);
+
+// Mid-run case: median-based percent and remaining, labeled as an estimate.
+const mid = wp.estimateWait(1800, [3600, 3600, 3500]);
+assert.equal(mid.basis, "history");
+assert.equal(mid.percent, 50);
+assert.equal(mid.remaining_seconds, 1800);
+assert.equal(mid.overrun, false);
+assert.match(wp.progressLabel(mid), /~50% done - ~30m left, based on past runs/);
+
+// Overrun case: no frozen near-complete percentage, explicit overrun wording.
+const over = wp.estimateWait(1800, [600, 600, 700]);
+assert.equal(over.overrun, true);
+assert.equal(over.percent, null);
+assert.equal(over.remaining_seconds, null);
+assert.match(wp.progressLabel(over), /running longer than usual - typically ~10m, 30m so far/);
+
+// Percent clamps: a wait still under way is never 0% or 100%.
+assert.equal(wp.estimateWait(1, [600]).percent, 1);
+assert.equal(wp.estimateWait(600, [600]).percent, 99);
+assert.equal(wp.estimateWait(600, [600]).overrun, false);
+
+// Deadline math: exact remaining, percent only when the start is known.
+const gate = wp.deadlineWait(288000, 748800);
+assert.equal(gate.basis, "deadline");
+assert.equal(gate.percent, 72);
+assert.match(wp.progressLabel(gate), /~3d 8h until it resumes/);
+assert.equal(wp.deadlineWait(288000, null).percent, null);
+
+// Observation lifecycle: a vanished wait rolls its observed duration into the
+// bounded per-kind history; a single sighting never records a zero.
+const history = { schema: wp.WAIT_HISTORY_SCHEMA, active: {}, durations: {} };
+let elapsed = wp.observeWaits(history, new Map([["main/a:validation", "validation"]]), 1000);
+assert.equal(elapsed.get("main/a:validation"), 0);
+elapsed = wp.observeWaits(history, new Map([["main/a:validation", "validation"]]), 1600);
+assert.equal(elapsed.get("main/a:validation"), 600);
+wp.observeWaits(history, new Map(), 2000);
+assert.deepEqual(history.durations.validation, [600]);
+assert.deepEqual(history.active, {});
+wp.observeWaits(history, new Map([["main/b:ci", "ci"]]), 3000);
+wp.observeWaits(history, new Map(), 4000);
+assert.equal(history.durations.ci, undefined);
+history.active["design/d:validation"] = { kind: "validation", first_observed: 1000, last_observed: 1600 };
+wp.observeWaits(history, new Map(), 2000, new Set(["main"]));
+assert.deepEqual(history.active["design/d:validation"], { kind: "validation", first_observed: 1000, last_observed: 1600 });
+assert.deepEqual(history.durations.validation, [600]);
+for (let index = 0; index < 30; index += 1) {
+  wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5000 + index * 300);
+  wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5100 + index * 300);
+  wp.observeWaits(history, new Map(), 5200 + index * 300);
+}
+assert.equal(history.durations.paused.length, wp.WAIT_HISTORY_LIMIT);
+
+// Corrupt, missing, or wrong-schema files start fresh instead of failing.
+const corrupt = path.join(path.dirname(process.argv[3]), "corrupt-history.json");
+fs.writeFileSync(corrupt, "{not json");
+assert.deepEqual(wp.loadWaitHistory(corrupt).active, {});
+assert.deepEqual(wp.loadWaitHistory(path.join(path.dirname(corrupt), "absent.json")).durations, {});
+fs.writeFileSync(corrupt, JSON.stringify({ schema: "other", active: { x: { kind: "validation", first_observed: 1, last_observed: 2 } } }));
+assert.deepEqual(wp.loadWaitHistory(corrupt).active, {});
+process.stdout.write("estimator-unit-ok\n");
+EOF
+  node "$unit" "$ROOT/bin/fm-wait-progress.mjs" "$unit" | grep -q 'estimator-unit-ok' ||
+    fail "wait estimator unit contract failed"
+  pass "wait estimator is honest for no-history, mid-run, overrun, deadline, and rolling-history cases"
+}
+
+test_wait_classes_render_distinct_treatments() {
+  local home="$TMP_ROOT/wait-class-home" snapshot="$TMP_ROOT/wait-class-snapshot.json" environment="$TMP_ROOT/wait-class-environment.json" output="$TMP_ROOT/wait-class-home/data/wait-class.html" json html
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records += [
+      {"order":10,"state":"in_flight","structured":true,"id":"paused-task","title":"Wait for the upstream release","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: upstream landed."},
+      {"order":11,"state":"in_flight","structured":true,"id":"stuck-task","title":"Ship the kappa importer","repo":"kappa","project_resolved":true,"kind":"ship","since":"2026-07-16","body_excerpt":"Acceptance criteria: importer ships."},
+      {"order":12,"state":"queued","structured":true,"id":"queued-root","title":"Prepare queued dependency","repo":"theta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: dependency is ready."},
+      {"order":13,"state":"queued","structured":true,"id":"queued-dependent","title":"Use queued dependency","repo":"lambda","project_resolved":true,"kind":"ship","blocked_by":"queued-root","body_excerpt":"Acceptance criteria: dependency is used."}
+    ]
+    | .tasks += [
+      {"id":"paused-task","kind":"ship","project":"iota","current_state":{"state":"paused","source":"status-fold","detail":"upstream release window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"paused-task","title":"Wait for the upstream release","repo":"iota","project_resolved":true,"kind":"ship","since":"2026-07-16"}},
+      {"id":"stuck-task","kind":"ship","project":"kappa","current_state":{"state":"blocked","source":"status-fold","detail":"credential missing"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"stuck-task","title":"Ship the kappa importer","repo":"kappa","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "wait-class capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.validating_fixing | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "validation"
+      and (.wait.copy | contains("test suite"))
+      and .wait.progress.basis == "none"
+      and .wait.progress.percent == null
+      and (.wait.progress.label | contains("time unknown"))))
+    and (.pipeline.blocked | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "paused"
+      and (.wait.copy | contains("external delay"))
+      and .wait.progress.percent == null))
+    and (.pipeline.blocked | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "time_gate"
+      and (.wait.copy | contains("resumes automatically after 2026-08-01"))
+      and .wait.progress.basis == "deadline"
+      and .wait.progress.remaining_seconds > 0))
+    and (.pipeline.blocked | any(
+      .reason == "Captain hold"
+      and .wait.class == "needs_actor"
+      and (.waits_on | length) == 1
+      and (.what_you_can_do | contains("Answer decision"))))
+    and (.pipeline.blocked | any(
+      .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("queued and not started"))
+      and (.what_you_can_do | contains("Dispatch"))))
+    and (.pipeline.blocked | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "dependency"
+      and ((.waits_on | join(" ")) | contains("currently working"))))
+    and (.pipeline.blocked | all(.wait.class == "self_clearing" or .wait.class == "needs_actor"))
+  ' >/dev/null || fail "wait classifications are wrong: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'id="selfwait-items"' "dashboard lacks the calm self-clearing wait group"
+  assert_contains "$html" 'no action needed' "self-clearing group does not say no action is needed"
+  assert_contains "$html" 'class="verb verb-waiting"' "self-clearing rows lack the calm waiting verb"
+  assert_contains "$html" 'class="verb verb-blocked"' "needs-actor rows lost the attention verb"
+  assert_contains "$html" 'resumes by itself' "self-clearing rows lack plain-language resume copy"
+  assert_contains "$html" 'What you can do:' "needs-actor rows lost the what-you-can-do line"
+  assert_contains "$html" 'role="progressbar"' "progress affordances lack the progressbar role"
+  assert_contains "$html" 'aria-valuemin="0" aria-valuemax="100"' "progressbars lack aria value bounds"
+  assert_contains "$html" 'time unknown' "a no-history wait does not admit its unknown duration"
+  assert_contains "$html" 'wbar-unknown' "a no-history wait renders a determinate bar"
+  assert_contains "$html" 'waiting on their own' "the waiting breakdown lacks the self-clearing line"
+  case "$html" in
+    *'% done'*) fail "a wait with no recorded history fabricated a percentage" ;;
+  esac
+  pass "self-clearing and needs-actor waits render distinct honest treatments"
+}
+
+test_wait_history_estimates_and_overrun() {
+  local home="$TMP_ROOT/wait-history-home" snapshot="$TMP_ROOT/wait-history-snapshot.json" environment="$TMP_ROOT/wait-history-environment.json" output="$TMP_ROOT/wait-history-home/data/wait-history.html" history json html first
+  history="$home/data/capacity-wait-history.json"
+  make_fixture "$home" "$snapshot" "$environment"
+  first=$(node -e 'console.log(Math.floor(Date.parse("2026-07-17T15:30:00Z") / 1000))')
+  printf '%s\n' "{\"schema\":\"fm-capacity-wait-history.v1\",\"active\":{\"main/validate-now:validation\":{\"kind\":\"validation\",\"first_observed\":$first,\"last_observed\":$first}},\"durations\":{\"validation\":[3600,3600,3500]}}" > "$history"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "seeded wait-history capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .pipeline.validating_fixing | any(
+      .wait.progress.basis == "history"
+      and .wait.progress.percent == 50
+      and .wait.progress.elapsed_seconds == 1800
+      and .wait.progress.remaining_seconds == 1800
+      and .wait.progress.overrun == false
+      and (.wait.progress.label | contains("based on past runs")))
+  ' >/dev/null || fail "seeded history did not produce a mid-run estimate: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'aria-valuenow="50"' "mid-run progressbar lacks its current value"
+  assert_contains "$html" 'based on past runs' "mid-run estimate is not labeled as an estimate"
+
+  printf '%s\n' "{\"schema\":\"fm-capacity-wait-history.v1\",\"active\":{\"main/validate-now:validation\":{\"kind\":\"validation\",\"first_observed\":$first,\"last_observed\":$first}},\"durations\":{\"validation\":[600,600,700]}}" > "$history"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "overrun wait-history capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .pipeline.validating_fixing | any(
+      .wait.progress.overrun == true
+      and .wait.progress.percent == null
+      and (.wait.progress.label | contains("running longer than usual")))
+  ' >/dev/null || fail "an exceeded estimate did not degrade to running-longer-than-usual: $json"
+  assert_grep 'running longer than usual' "$output" "overrun wording is missing from the dashboard"
+
+  jq '.tasks = [.tasks[] | if .id == "validate-now" then .current_state.detail = "implementing" | .pr.url = null else . end]' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null ||
+    fail "completion wait-history capacity run failed"
+  jq -e '
+    (.active | has("main/validate-now:validation") | not)
+    and (.durations.validation | index(1800))
+  ' "$history" >/dev/null || fail "a completed wait was not rolled into the duration history: $(cat "$history")"
+  if [ "$(uname)" = Darwin ]; then
+    [ "$(stat -f '%Lp' "$history")" = 600 ] || fail "wait history file is not private"
+  else
+    [ "$(stat -c '%a' "$history")" = 600 ] || fail "wait history file is not private"
+  fi
+  pass "recorded wait history yields labeled estimates, overruns degrade honestly, and completions roll into history"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_cross_home_overlap_holds_supersession_and_active_count
@@ -1030,3 +1270,6 @@ test_output_replacement_rejects_symlinks_and_enforces_mode
 test_fleet_snapshot_preserves_registered_scope_provenance
 test_unknown_project_is_a_definition_gap
 test_keyless_questions_and_blocker_chains
+test_wait_estimator_honesty
+test_wait_classes_render_distinct_treatments
+test_wait_history_estimates_and_overrun
