@@ -114,7 +114,8 @@ EOF
     fi
     printf 'delivered: %s captain dashboard command(s)\n' "$delivered"
     printf 'archived: %s captain dashboard command(s)\n' "$archived"
-    echo "apply idempotency checks to every delivered prompt, then handle it as the captain's approval of that action ID under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
+    echo "apply idempotency checks to every delivered prompt, then handle it by kind under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
+    echo "CAP records approve that action ID; decision records answer the named owner-qualified decision through the decision lifecycle, with destructive consequences re-confirmed in chat; idea records are captain verdicts: approve creates work through the normal backlog lifecycle, deny records the outcome, and suggestions are captain input."
     prune_archive
     ;;
   *)
