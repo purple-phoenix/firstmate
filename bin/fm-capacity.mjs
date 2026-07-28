@@ -586,7 +586,14 @@ function classify(snapshot, environment) {
       markUnavailable(itemRef("main", task.id), "main", "in-flight work lacks project provenance");
     }
     const open = task.hints?.open_decisions || [];
-    for (const decision of open) decisions.push({ owner: "main", task: itemRef("main", task.id), key: itemRef("decision", decision.key || task.id) });
+    for (const decision of open) {
+      decisions.push({
+        owner: "main",
+        task: itemRef("main", task.id),
+        key: itemRef("decision", decision.key || task.id),
+        reason: "Open decision raised by work already under way.",
+      });
+    }
     if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
     }
@@ -621,7 +628,12 @@ function classify(snapshot, environment) {
     }
     if (isSuperseded(record)) continue;
     if (record.kind === "captain" && record.hold_kind === "captain") {
-      decisions.push({ owner: "main", task: itemRef("main", record.id), key: itemRef("decision", record.id) });
+      decisions.push({
+        owner: "main",
+        task: itemRef("main", record.id),
+        key: itemRef("decision", record.id),
+        reason: "A queued choice is held for your decision.",
+      });
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
       pipeline.blocked.push(cardFromBacklog(record, "main", "blocked", "Captain hold"));
       continue;
@@ -680,7 +692,12 @@ function classify(snapshot, environment) {
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
     for (const decision of mate.decisions_open || []) {
-      decisions.push({ owner: ownerRef(mate.id), task: itemRef(mate.id, decision.id || mate.id), key: itemRef("decision", decision.key || decision.id || mate.id) });
+      decisions.push({
+        owner: ownerRef(mate.id),
+        task: itemRef(mate.id, decision.id || mate.id),
+        key: itemRef("decision", decision.key || decision.id || mate.id),
+        reason: "Open decision raised by work already under way.",
+      });
     }
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
@@ -1101,7 +1118,10 @@ function classify(snapshot, environment) {
       ...(recentLandingsComplete ? [] : [recentLandingsProvenance]),
     ],
   };
-  return sanitizeDeep(model);
+  return {
+    model: sanitizeDeep(model),
+    captainActions: sanitizeDeep(decisions),
+  };
 }
 
 function redact(value) {
@@ -1216,7 +1236,7 @@ function copyPrompt(rec) {
   return `<div class="prompt"><code>${h(rec.prompt)}</code><button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button></div>`;
 }
 
-function renderHtml(model) {
+function renderHtml(model, captainActions) {
   const severity = severityFor(model);
   const primaryRec = model.recommendations.find((rec) => rec.id === model.primary_bottleneck.id) || null;
   const working = model.pipeline.building.length + model.pipeline.validating_fixing.length;
@@ -1229,13 +1249,11 @@ function renderHtml(model) {
 
   const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
   const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
-  const otherCaptainActions = Math.max(0, model.measures.open_captain_actions - captainDecisionCards.length - captainApprovalCards.length);
   const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold");
   const needsYouCount = model.measures.open_captain_actions;
   const needsYouRows = [
     ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
-    ...captainDecisionCards.map((card) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">A queued choice is held for your decision.</span></li>`),
-    ...(otherCaptainActions > 0 ? [`<li><span class="verb verb-decide">Decide</span><span class="who">${h(otherCaptainActions)} more</span><span class="why">Open decision${otherCaptainActions === 1 ? "" : "s"} raised by work already under way.</span></li>`] : []),
+    ...captainActions.map((action) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
   const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}</span></li>`).join("");
 
@@ -1301,7 +1319,7 @@ function renderHtml(model) {
   <title>Firstmate capacity dashboard</title>
   <style>
     :root{color-scheme:dark;--bg:#0d0d0d;--ink:#ffffff;--ink2:#c3c2b7;--muted:#898781;--hair:#2c2c2a;--line:rgba(255,255,255,.10);--blue:#3987e5;--good:#0ca30c;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--gray:#52514e;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-    @media(prefers-color-scheme: light){:root{color-scheme:light;--bg:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#2a78d6;--gray:#c3c2b7}}
+    @media(prefers-color-scheme: light){:root{color-scheme:light;--bg:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087a08;--warn:#8a6200;--serious:#a54824;--crit:#ae2525;--gray:#c3c2b7}}
     .sev-critical{--sev:var(--crit)}.sev-serious{--sev:var(--serious)}.sev-info{--sev:var(--blue)}.sev-neutral{--sev:var(--muted)}.sev-good{--sev:var(--good)}
     *{box-sizing:border-box}html{background:var(--bg)}
     body{margin:0;color:var(--ink);background:var(--bg);line-height:1.45;overflow-wrap:anywhere}
@@ -1454,8 +1472,8 @@ function main() {
   if (!outputRelative || outputRelative.startsWith(`..${path.sep}`) || path.isAbsolute(outputRelative)) {
     throw new Error("dashboard path must stay inside the effective data directory");
   }
-  const model = classify(snapshot, environment);
-  writePrivateAtomic(output, renderHtml(model), snapshot.fm_home || path.dirname(allowedData));
+  const { model, captainActions } = classify(snapshot, environment);
+  writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(model, null, 2)}\n`);
   } else {
