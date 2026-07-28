@@ -174,10 +174,10 @@ function enqueueCommand(record) {
 // refs sidecar, the backlog, task briefs, task metadata, status tails, and
 // scout reports. Detail is served only to the authenticated captain.
 
-function readRefs() {
+function readRefs(generated) {
   try {
     const parsed = JSON.parse(fs.readFileSync(REFS, "utf8"));
-    if (parsed.schema !== "fm-capacity-refs.v1" || typeof parsed.refs !== "object") return null;
+    if (parsed.schema !== "fm-capacity-refs.v1" || parsed.generated !== generated || typeof parsed.refs !== "object") return null;
     return parsed;
   } catch {
     return null;
@@ -285,7 +285,8 @@ function refDisplayMap(refsFile) {
 }
 
 function assembleDetail(ref) {
-  const refsFile = readRefs();
+  const dashboard = readDashboard();
+  const refsFile = dashboard ? readRefs(dashboard.generated) : null;
   const entry = refsFile?.refs?.[ref];
   if (!entry || entry.kind !== "item") return null;
   const separator = entry.value.indexOf("/");
@@ -423,13 +424,20 @@ function authorized(req, config) {
   return login !== "" && config.logins.includes(login);
 }
 
+function inlineScriptJson(value) {
+  return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => {
+    const escapes = { "<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029" };
+    return escapes[character];
+  });
+}
+
 // Injected interactive layer. It only talks to this service's own API; the
 // underlying producer file stays untouched on disk and keeps working offline.
 // When the producer's refs sidecar is present the layer also de-anonymizes the
 // page for the authenticated captain: opaque item/project/home references get
 // their real names, and work items and decisions become clickable detail views.
 function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
-  const config = JSON.stringify({
+  const config = inlineScriptJson({
     dispatchable,
     pending,
     generated,
@@ -888,7 +896,7 @@ async function handle(req, res) {
       return;
     }
     const dispatchable = config.readOnly ? [] : [...dashboard.actions.keys()].filter((id) => ONE_CLICK_ACTIONS.has(id));
-    const refsFile = readRefs();
+    const refsFile = readRefs(dashboard.generated);
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),

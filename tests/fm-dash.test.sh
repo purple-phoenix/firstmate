@@ -176,6 +176,19 @@ test_served_page_wears_dashboard_with_interactive_layer() {
   pass "served page is the producer dashboard wearing the injected interactive layer"
 }
 
+test_inline_config_is_script_safe() {
+  cat >> "$HOME_DIR/data/ideas/idea-backlog.md" <<'EOF'
+
+## IDEA-03 - </script><script>globalThis.fmdashPwned=true</script>&
+Inline configuration must remain data.
+EOF
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "page with hostile operational data failed (got $REQ_STATUS)"
+  assert_not_contains "$RESP" '</script><script>globalThis.fmdashPwned=true</script>' "operational data broke out of the inline script"
+  assert_contains "$RESP" '\u003c/script\u003e\u003cscript\u003eglobalThis.fmdashPwned=true\u003c/script\u003e\u0026' "inline script data was not safely escaped"
+  pass "operational data cannot break out of the inline configuration script"
+}
+
 ref_for() {
   # ref_for <kind-owner-prefix> e.g. "main/ready-safe" or "decision/captain-choice"
   node -e '
@@ -224,6 +237,32 @@ test_decision_detail_options_and_validated_approval() {
   assert_contains "$RESP" 'already-queued' "a second choice for the same decision was not coalesced"
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$ref.json" -delete
   pass "decisions serve option detail and approvals are validated against the record"
+}
+
+test_stale_refs_are_disabled() {
+  local ref
+  ref=$(ref_for "decision/captain-choice") || fail "refs sidecar does not map the decision"
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const refs = JSON.parse(fs.readFileSync(file, "utf8"));
+    refs.generated = "stale-generation";
+    fs.writeFileSync(file, `${JSON.stringify(refs, null, 2)}\n`);
+  ' "$HOME_DIR/state/dash-refs.json"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"refs":{}' "stale refs still de-anonymized the served page"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 404 ] || fail "stale refs still resolved detail (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 400 ] || fail "stale refs still authorized an approval (got $REQ_STATUS)"
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const refs = JSON.parse(fs.readFileSync(file, "utf8"));
+    refs.generated = "2026-07-28T10:00:00Z";
+    fs.writeFileSync(file, `${JSON.stringify(refs, null, 2)}\n`);
+  ' "$HOME_DIR/state/dash-refs.json"
+  pass "refs are usable only for their matching dashboard generation"
 }
 
 test_idea_pitch_and_verdicts() {
@@ -355,7 +394,7 @@ test_check_shim_wakes_only_when_pending() {
 }
 
 test_installer_plist_and_funnel_stance() {
-  local plist
+  local escaped_home plist
   plist=$(FM_HOME="$HOME_DIR" "$INSTALL_SH" print-plist) || fail "print-plist failed"
   assert_contains "$plist" 'io.firstmate.dashboard.' "plist lacks the per-home label"
   assert_contains "$plist" 'fm-dash-serve.mjs' "plist does not run the dashboard service"
@@ -366,6 +405,10 @@ test_installer_plist_and_funnel_stance() {
   grep -n 'tailscale funnel' "$INSTALL_SH" && fail "installer invokes tailscale funnel"
   assert_grep 'assert_no_funnel' "$INSTALL_SH" "installer does not verify funnel is off"
   assert_grep 'never enables Funnel' "$INSTALL_SH" "installer does not declare the funnel boundary"
+  escaped_home="$HOME_DIR/xml & < >"
+  plist=$(FM_HOME="$escaped_home" FM_ROOT_OVERRIDE="$HOME_DIR/root & < >" "$INSTALL_SH" print-plist) || fail "print-plist with XML metacharacters failed"
+  assert_contains "$plist" "$HOME_DIR/xml &amp; &lt; &gt;" "plist did not XML-escape FM_HOME"
+  assert_contains "$plist" "$HOME_DIR/root &amp; &lt; &gt;/bin/fm-dash-serve.mjs" "plist did not XML-escape the executable path"
   pass "the launchd agent survives reboots and the installer is structurally funnel-free"
 }
 
@@ -382,8 +425,10 @@ test_service_contract_docs_and_ownership() {
 
 test_identity_fails_closed
 test_served_page_wears_dashboard_with_interactive_layer
+test_inline_config_is_script_safe
 test_refs_sidecar_and_rich_work_item_detail
 test_decision_detail_options_and_validated_approval
+test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts
 test_dispatch_writes_one_durable_record
 test_dispatch_refuses_unknown_and_uncurrent_actions
