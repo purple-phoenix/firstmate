@@ -1,14 +1,14 @@
 # Persistent tailnet-only capacity dashboard service
 
 This document owns the architecture narrative, trust design, and verification evidence for the always-on capacity dashboard.
-Mechanics live with their owners: `bin/fm-dash-serve.mjs --help` (routes, config schema, one-click allowlist), `bin/fm-dash-install.sh --help` (persistence and tailscale wiring), `bin/fm-dash-inbox.sh --help` (command consumption), and the capacity skill (handling semantics for delivered commands).
+Mechanics live with their owners: `docs/configuration.md` (config schema), `bin/fm-dash-serve.mjs --help` (routes and one-click allowlist), `bin/fm-dash-install.sh --help` (persistence and tailscale wiring), `bin/fm-dash-inbox.sh --help` (command consumption), and the capacity skill (handling semantics for delivered commands).
 
 ## What it is
 
 The service publishes the producer-generated `data/capacity-dashboard.html` at one stable tailnet HTTPS URL that survives reboots, and layers interactive abilities onto it:
 
 - Every current one-click-eligible `CAP-NN` action gets an "Approve & send" button.
-- A "Refresh capacity" button reruns `bin/fm-capacity.mjs` server-side and reloads the page; the producer also reruns automatically on the configured interval so the page never goes stale.
+- A "Refresh capacity" button reruns `bin/fm-capacity.mjs` server-side and reloads the page; the service also reruns the producer automatically on the configured interval.
 - The page is de-anonymized for the authenticated captain: opaque `item-NN`/`project-NN`/`home-NN` references become real names, and work items and decisions are clickable rich detail views (description, test plan, PR link, tailnet preview links, report excerpt, recent activity) assembled from task briefs, recorded metadata, the backlog, and scout reports.
 - Open decisions with `data/<origin>/decisions/<key>.md` records show each recorded option with its impact, a per-option Approve button, and a bounded custom-answer control.
 - An Ideas section renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.
@@ -38,7 +38,7 @@ The design keeps the web process outside every fleet-mutation path:
 
 Consequences of that shape:
 
-- The service holds no session with firstmate, no terminal access, and no merge, dispatch, or teardown capability; compromise of the web process yields at most bogus `CAP-NN` approval records, which firstmate still re-resolves through every normal lifecycle authority check.
+- The service holds no session with firstmate, no terminal access, and no merge, dispatch, or teardown capability; compromise of the web process yields at most bogus dashboard command records, which firstmate still re-resolves through every normal lifecycle authority check.
 - Delivery is durable: a click made while firstmate is down waits in the inbox and is delivered on the next watcher cycle or session start sweep of pending checks.
 - Delivery latency is the watcher check cadence, not instantaneous; the page says "queued for firstmate" honestly rather than pretending immediacy.
 - Commands survive service restarts, firstmate restarts, and reboots because the inbox is plain durable state.
@@ -50,7 +50,7 @@ Identity is enforced at every layer that can fail:
 
 - `tailscale serve` terminates HTTPS on the tailnet and injects the `Tailscale-User-Login` header for the authenticated tailnet peer; Funnel traffic would carry no such identity.
 - The service refuses every route except `/healthz` unless that header matches a login in `config/dash.json` (`captain_logins`, recorded from the tailnet self login at install time or passed with `--captain`).
-- Authenticated browser POSTs must also carry a matching Origin and `Sec-Fetch-Site: same-origin`; headerless same-machine clients remain allowed because a local process is already inside the filesystem trust boundary.
+- Authenticated browser POSTs must also carry a matching Origin and `Sec-Fetch-Site: same-origin`; same-machine clients without Origin or `Sec-Fetch-Site` headers remain allowed because a local process is already inside the filesystem trust boundary.
 - With no configured captain login the service serves only a setup notice and refuses everything else.
 - The service binds 127.0.0.1, so the only remote path in is the tailscale proxy; a local process on the captain's machine is already inside the trust boundary because it could write `FM_HOME` state directly.
 
@@ -101,7 +101,7 @@ bin/fm-dash-install.sh status
 bin/fm-dash-install.sh uninstall
 ```
 
-A read-only install is the right shape for running the service ahead of command-consumption wiring: the page, detail views, refresh, and auto-render all work, every mutation route refuses, and any watcher registration from a prior writable install is removed.
+A read-only install is the right shape for running the service ahead of command-consumption wiring: the page, detail views, refresh, and auto-render all work, command dispatch refuses, and any watcher registration from a prior writable install is removed.
 
 Install is idempotent and prints the stable URL, `https://<machine>.<tailnet>.ts.net:8443/`.
 Changing `--serve-port` stages the full replacement, verifies it, removes the previous mapping, and restores the prior config, launchd state, watcher registration, and observed live mapping state if any step fails.

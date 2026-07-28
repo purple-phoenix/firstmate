@@ -6,9 +6,10 @@
 # durably. "claim" prints each record before archiving it under
 # state/dash-inbox/archive/ (newest 50 kept), so an interruption can re-surface
 # a command but can never silently lose one. Delivery is at-least-once across
-# interruption, and the capacity skill requires idempotency checks before handling re-surfaced records:
-# each claimed prompt is the captain's approval of that CAP action ID with all
-# of that skill's authority limits, never destructive or merge authority.
+# interruption, and the capacity skill requires idempotency checks before
+# handling re-surfaced CAP actions, decision answers, or idea verdicts.
+# Each claimed prompt carries the capacity skill's authority limits and never
+# grants destructive or merge authority.
 #
 # Usage: fm-dash-inbox.sh [list|claim|pending-count]
 #   list           print pending commands without consuming them

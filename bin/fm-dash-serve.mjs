@@ -10,8 +10,8 @@
  * firstmate-side consumption of the records this service writes.
  *
  * The service never executes fleet commands, calls only the read-mostly capacity
- * producer and quota probe, and never mutates any state
- * outside state/dash-inbox/ and the producer-owned dashboard file. A clicked
+ * producer and quota probe, and mutates only state/dash-inbox/ plus the
+ * producer-owned dashboard and private refs sidecar. A clicked
  * CAP action becomes one durable fm-dash-command.v1 record in state/dash-inbox/;
  * the running firstmate consumes it through its registered fm-dash watcher check
  * (bin/fm-dash-inbox.sh claim). Delivery therefore rides the sanctioned wake
