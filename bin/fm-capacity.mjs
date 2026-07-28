@@ -15,12 +15,16 @@
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
- *   pipeline, lanes, readiness, aging, recommendations, and omissions.
+ *   pipeline, parked, lanes, readiness, aging, recommendations, and omissions.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
  * Blocked and self-clearing cards carry a wait treatment (wait.class, copy,
  * and honest progress); bin/fm-wait-progress.mjs owns the estimator math and
  * the private rolling observed-duration record it feeds from.
+ * Items whose active hold has kind=parked are deliberately dormant: they land
+ * in the separate parked collection, stay out of every pipeline stage, count,
+ * attention summary, and wait treatment, and render only in a collapsed
+ * parking-lot section that disappears entirely when empty.
  * Run --help for the exact inherited snapshot bounds, environment-probe budget,
  * bottleneck order, CAP-01 through CAP-10 meanings, wait-progress honesty
  * rules, and output replacement rules.
@@ -88,11 +92,22 @@ The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
-  lanes, readiness, aging, recommendations, omissions. Pipeline owns queued, ready,
-  building, validating_fixing, pr_ci_approval, blocked, and recently_landed arrays.
-  Each recommendation owns id, classification, priority, evidence,
+  parked, lanes, readiness, aging, recommendations, omissions. Pipeline owns queued,
+  ready, building, validating_fixing, pr_ci_approval, blocked, and recently_landed
+  arrays. Each recommendation owns id, classification, priority, evidence,
   expected_throughput_consequence, safety_authority_boundary,
   recommended_next_action, and prompt.
+
+PARKING LOT
+  A backlog item whose active structured hold has kind=parked is captain-parked:
+  deliberately dormant, not stuck. It is classified into the top-level parked
+  array instead of the blocked stage and is excluded from blocked counts,
+  waiting measures, attention summaries, aging, and wait/blocker treatments.
+  Park reasons are withheld from this privacy-bounded artifact like every other
+  hold reason; the authenticated dashboard service enriches them. The dashboard
+  renders parked items only inside one collapsed low-key parking-lot section at
+  the bottom, and renders no parking-lot section at all when nothing is parked.
+  Every other hold kind (captain, external, load, future) keeps its treatment.
 
 BOUNDS AND PROBES
   The canonical fm-fleet-snapshot.v1 producer owns snapshot completion; this wrapper
@@ -567,6 +582,22 @@ function cardFromBacklog(record, owner, stage, reason = null) {
   };
 }
 
+// Captain-parked work (active hold kind=parked) is deliberately dormant: it
+// never joins a pipeline stage, count, attention summary, or wait treatment,
+// and the park reason stays out of this privacy-bounded artifact.
+function parkedCard(record, owner) {
+  return {
+    id: itemRef(owner, record.id || "unstructured"),
+    owner: ownerRef(owner),
+    repo: projectRef(record.repo),
+    kind: ["ship", "scout"].includes(record.kind) ? record.kind : null,
+    delivery_mode: safeDeliveryMode(record.delivery_mode),
+    parked_since: /^\d{4}-\d{2}-\d{2}$/.test(record.since || "") ? record.since : null,
+    reason: "Parked at your request - deliberately resting, not stuck",
+    provenance: owner === "main" ? "main structured backlog" : "validated structured-home backlog",
+  };
+}
+
 // Wait treatment: root kinds that clear with no actor at all, the captain
 // copy per measurable wait kind, and the observation plumbing that feeds
 // bin/fm-wait-progress.mjs. Only validation, CI, and declared external delays
@@ -611,6 +642,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     };
   };
   const pipeline = Object.fromEntries(STAGES.map((stage) => [stage, []]));
+  const parked = [];
   const mainRecords = snapshot.backlog?.records || [];
   const taskById = new Map((snapshot.tasks || []).map((task) => [task.id, task]));
   const activeProjects = new Set();
@@ -957,6 +989,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       continue;
     }
     if (isSuperseded(record)) continue;
+    if (record.hold_kind === "parked") {
+      parked.push(parkedCard(record, "main"));
+      continue;
+    }
     if (record.kind === "captain" && record.hold_kind === "captain") {
       const decision = backlogDecisionIdentity(record);
       const holdRef = decisionRef("main", decision.origin, decision.key);
@@ -1059,8 +1095,12 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
           open_decisions: (mate.decisions_open || []).filter((decision) => decision.id === child.id),
         },
       }));
+    const parkedQueuedIds = new Set((mate.queued || []).filter((record) => record.hold_kind === "parked").map((record) => record.id));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
+      // A parked queued record can also project into holds through its
+      // dependency edge; the parked classification below wins.
+      if (parkedQueuedIds.has(hold.id)) continue;
       heldIds.add(hold.id);
       if (hold.source === "child-state") {
         if (requiresGithubAuth(hold.delivery_mode)) secondmateGithubBoundDelivery.add(mate.id);
@@ -1119,6 +1159,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
     for (const record of mate.queued || []) {
       if (isSuperseded(record) || heldIds.has(record.id)) continue;
+      if (record.hold_kind === "parked") {
+        parked.push(parkedCard(record, mate.id));
+        continue;
+      }
       secondmateQueuedConsidered += 1;
       if (record.kind === "captain" && record.hold_kind === "captain") {
         const identity = backlogDecisionIdentity(record);
@@ -1452,6 +1496,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     card.wait.progress = { ...estimate, label: progressLabel(estimate) };
   }
 
+  parked.sort((a, b) => `${a.owner}/${a.id}`.localeCompare(`${b.owner}/${b.id}`));
   recommendations.sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   const primary = recommendations[0] || {
     id: null,
@@ -1488,6 +1533,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     },
     primary_bottleneck: { id: primary.id, classification: primary.classification, evidence: primary.evidence },
     pipeline,
+    parked,
     lanes: {
       ephemeral_workers: {
         active: (snapshot.tasks || []).filter((task) => task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)).length,
@@ -1499,7 +1545,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       persistent_secondmates: mates,
     },
     readiness: {
-      queued_considered: queue.filter((record) => !isSuperseded(record)).length + secondmateQueuedConsidered,
+      queued_considered: queue.filter((record) => !isSuperseded(record) && record.hold_kind !== "parked").length + secondmateQueuedConsidered,
       grounded_candidates: readinessComplete ? candidates.length : 0,
       independent_start_count: executableReady.length,
       available: readinessComplete,
@@ -1513,6 +1559,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       "No quota inference or utilization target is computed.",
       "Natural-language secondmate scopes and project names are withheld and not machine-guessed against main-home work.",
       "Backlog bodies are used only for bounded definition checks and are never rendered.",
+      "Park reasons are withheld like every other hold reason; the authenticated dashboard service enriches them.",
       "Status tails, terminal chat, scout report contents, and visual artifacts are not consulted.",
       ...(recentLandingsComplete ? [] : [recentLandingsProvenance]),
     ],
@@ -1752,6 +1799,22 @@ function renderHtml(model, captainActions) {
   const gaps = model.readiness.definition_gaps.map((row) => `<li><strong>${h(`${row.owner}/${row.id}`)}</strong><span>${h(row.gaps.join("; "))}</span></li>`).join("") || `<li><strong>None</strong><span>No definition gaps detected in the bounded queue.</span></li>`;
   const landed = model.pipeline.recently_landed.map((card) => `<li><strong>${h(`${card.owner}/${card.id}`)}</strong><span>${h(card.reason)}</span>${card.artifact ? artifact(card.artifact) : ""}</li>`).join("") || `<li><strong>None</strong><span>No recent completions are in the bounded baseline.</span></li>`;
 
+  // Parking lot: captain-parked work rendered once, low-key, collapsed by
+  // default, and entirely absent when nothing is parked. Rows stay
+  // identity-opaque here; the authenticated service enriches them and adds the
+  // unpark control. data-parked-ref is the service's validation anchor.
+  const parkedRows = model.parked.map((card) => `<li class="mrow" data-parked-ref="${h(card.id)}">
+    <span class="mid"><span class="item-id">${h(card.id)}</span><span class="mowner">${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span></span>
+    <span class="mreason"><span class="parked-copy">${h(card.reason)}.</span></span>
+    <span class="mmeta">${card.parked_since ? `on the books since ${h(card.parked_since)}` : ""}</span>
+  </li>`).join("");
+  const parkingLot = model.parked.length ? `<section class="band band-quiet band-parking" aria-label="Parking lot"><div class="wrap">
+      <details class="parking">
+        <summary>Parking lot (${h(model.parked.length)}) · parked at your request, resting outside the active pipeline</summary>
+        <ul class="mlist">${parkedRows}</ul>
+      </details>
+    </div></section>` : "";
+
   const alarmTail = primaryRec
     ? `<p class="next">&rarr; <strong>Next:</strong> ${h(primaryRec.recommended_next_action)}</p>
       ${copyPrompt(primaryRec)}
@@ -1863,6 +1926,10 @@ function renderHtml(model, captainActions) {
     .clean-list li>*{min-width:0}.clean-list span{color:var(--ink2)}
     .artifact,.path{font:500 .76rem ui-monospace,SFMono-Regular,Menlo,monospace;max-width:100%;overflow-wrap:anywhere}
     .empty{color:var(--muted);font-style:italic;border-top:1px solid var(--hair);padding-top:.45rem;margin-top:.4rem}
+    .band-parking{padding-top:0}
+    .parking summary{cursor:pointer;color:var(--muted);font-size:.74rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:.5rem 0;border-top:1px solid var(--hair)}
+    .parking summary::marker{color:var(--muted)}
+    .parking .mreason,.parked-copy{color:var(--muted)}
     footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
     footer p{max-width:70rem;margin:.3rem auto}
     @media(max-width:760px){.band{padding:1.25rem 1rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
@@ -1914,6 +1981,7 @@ function renderHtml(model, captainActions) {
         <div><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
       </div>
     </div></section>
+    ${parkingLot}
   </main>
   <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>
   <script>

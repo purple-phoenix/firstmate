@@ -12,10 +12,13 @@
  * The service never executes fleet commands, calls only the read-mostly capacity
  * producer and quota probe, and mutates only state/dash-inbox/ plus the
  * producer-owned dashboard and private refs sidecar. A clicked
- * CAP action becomes one durable fm-dash-command.v1 record in state/dash-inbox/;
+ * CAP action, decision answer, idea verdict, or parking-lot unpark becomes one
+ * durable fm-dash-command.v1 record in state/dash-inbox/;
  * the running firstmate consumes it through its registered fm-dash watcher check
  * (bin/fm-dash-inbox.sh claim). Delivery therefore rides the sanctioned wake
- * path and inherits its cadence rather than any direct control channel.
+ * path and inherits its cadence rather than any direct control channel; an
+ * unpark click only asks firstmate to lift the parked hold through the normal
+ * backlog lifecycle.
  *
  * Identity fails closed: every route except /healthz requires the
  * Tailscale-User-Login header injected by tailscale serve to match a login in
@@ -89,11 +92,13 @@ auto-render. Routes:
   GET  /              dashboard with the interactive layer injected
   GET  /api/pending   pending command count
   POST /api/refresh   rerun bin/fm-capacity.mjs server-side (serialized)
-  POST /api/dispatch  validated CAP action, decision answer, or idea verdict
+  POST /api/dispatch  validated CAP action, decision answer, idea verdict, or
+                      parking-lot unpark request
 All routes except /healthz require a Tailscale-User-Login header matching a
 configured captain login and fail closed otherwise. Dispatch refuses IDs not in
-both the served dashboard and the fixed one-click allowlist. Browser POSTs must
-also be same-origin.
+both the served dashboard and the fixed one-click allowlist, and refuses an
+unpark for any item the served dashboard does not currently list as parked.
+Browser POSTs must also be same-origin.
 `);
   process.exit(exitCode);
 }
@@ -221,8 +226,8 @@ function readText(file, maxBytes = 65536) {
 
 // Parse the tasks-axi markdown backlog: "## Section" headers and
 // "- [ ] id - Title (annotation) ..." items with indented body lines.
-function parseBacklog() {
-  const text = readText(BACKLOG, 262144);
+function parseBacklog(file = BACKLOG) {
+  const text = readText(file, 262144);
   if (!text) return [];
   const items = [];
   let section = "";
@@ -241,6 +246,56 @@ function parseBacklog() {
     else current = null;
   }
   return items;
+}
+
+// Strip trailing "(key: value)" / "(since date)" tasks-axi annotations from a
+// backlog title line; hold reasons are single-line with no parentheses.
+function titleAnnotations(rawTitle) {
+  const fields = {};
+  let title = String(rawTitle || "").trim();
+  let match;
+  while ((match = title.match(/\s*\((repo|kind|priority|hold|hold-kind|hold-until|since|merged|reported|done)[:\s]\s*([^)]*)\)$/))) {
+    fields[match[1]] = match[2].trim();
+    title = title.slice(0, match.index).trimEnd();
+  }
+  return { title, fields };
+}
+
+// Parking-lot enrichment for the authenticated captain: resolve each
+// data-parked-ref the producer rendered through the current-generation refs
+// sidecar, then read the owning home's backlog for the real title, park
+// reason, and backlog `since` date. Reads only; the offline artifact itself
+// stays opaque.
+function parkedEntries(dashboardHtml, refsFile) {
+  const entries = [];
+  if (!refsFile) return entries;
+  const backlogCache = new Map();
+  const backlogFor = (owner) => {
+    if (!backlogCache.has(owner)) {
+      const root = decisionHome(owner);
+      backlogCache.set(owner, root ? parseBacklog(path.join(root, "data", "backlog.md")) : []);
+    }
+    return backlogCache.get(owner);
+  };
+  for (const match of dashboardHtml.matchAll(/data-parked-ref="(item-\d{2,})"/g)) {
+    const ref = match[1];
+    const entry = refsFile.refs[ref];
+    if (!entry || entry.kind !== "item") continue;
+    const separator = entry.value.indexOf("/");
+    const owner = entry.value.slice(0, separator);
+    const id = entry.value.slice(separator + 1);
+    const item = backlogFor(owner).find((row) => row.id === id) || null;
+    const parsed = item ? titleAnnotations(item.title) : null;
+    entries.push({
+      ref,
+      id,
+      owner,
+      title: parsed?.title || id,
+      reason: parsed?.fields["hold"] || null,
+      since: parsed?.fields["since"] || null,
+    });
+  }
+  return entries;
 }
 
 function briefSections(id) {
@@ -598,6 +653,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     readOnly: readOnly === true,
     refs: extras?.refs || {},
     ideas: extras?.ideas || [],
+    parked: extras?.parked || [],
     usage: extras?.usage || { status: "unavailable", providers: [] },
     degraded: extras?.degraded === true,
   });
@@ -636,6 +692,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-meter span{display:block;height:100%;background:var(--blue)}
   .fmdash-reset{font-size:.72rem;color:var(--muted);margin-top:.25rem}
   .fmdash-custom{width:100%;margin-top:.7rem;padding:.6rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair)}
+  .fmdash-unpark{margin-left:.8rem;padding:.3rem .7rem;font-size:.74rem}
   @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
   </style>
   <script>
@@ -1067,6 +1124,44 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         box.focus();
       });
     }
+    // Parking lot: enrich the collapsed parked rows with the real title and
+    // park reason, and add the unpark request control. Unpark only queues a
+    // command record; firstmate lifts the hold through the normal backlog
+    // lifecycle.
+    cfg.parked.forEach((info) => {
+      const row = document.querySelector('[data-parked-ref="' + info.ref + '"]');
+      if (!row) return;
+      const copy = row.querySelector(".parked-copy");
+      if (copy) {
+        const reason = info.reason ? "Parked: " + info.reason : copy.textContent;
+        copy.textContent = (info.title && info.title !== info.id ? info.title + " - " : "") + reason;
+      }
+      const meta = row.querySelector(".mmeta");
+      if (meta && info.since) meta.textContent = "on the books since " + info.since;
+      if (cfg.readOnly) return;
+      const unpark = document.createElement("button");
+      unpark.type = "button";
+      unpark.className = "fmdash-send fmdash-unpark";
+      unpark.textContent = "Unpark";
+      unpark.setAttribute("aria-label", "Unpark " + (info.title || info.id));
+      unpark.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        unpark.disabled = true;
+        unpark.textContent = "Sending…";
+        try {
+          const res = await postJson({ unpark: info.ref });
+          const out = await res.json();
+          if (out.status === "queued" || out.status === "already-queued") {
+            unpark.textContent = "Unpark queued";
+            showPending(out.pending);
+            return;
+          }
+          unpark.textContent = "Refused";
+          unpark.disabled = false;
+        } catch { unpark.textContent = "Failed"; unpark.disabled = false; }
+      });
+      (row.querySelector(".mreason") || row).appendChild(unpark);
+    });
     if (cfg.readOnly) {
       copyButtons.forEach((copyButton) => copyButton.remove());
       return;
@@ -1172,6 +1267,7 @@ async function handle(req, res) {
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
       refs: refsFile ? refDisplayMap(refsFile) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
+      parked: parkedEntries(dashboard.html, refsFile),
       usage,
       degraded,
     });
@@ -1306,6 +1402,53 @@ async function handle(req, res) {
       if (priorVerdict) removePendingIfUnchanged(priorVerdict);
       log(`queued idea ${idea.id} ${verdict} as ${name} for ${record.requested_by}`);
       sendJson(res, 200, { status: priorVerdict ? "replaced" : "queued", pending: pendingRecords().length });
+      return;
+    }
+
+    // Unpark: the ref must be listed as parked by the currently served
+    // dashboard and resolve through the current-generation refs sidecar. The
+    // record only asks firstmate to lift the parked hold through the normal
+    // backlog lifecycle; the service never edits the backlog.
+    if (typeof body.unpark === "string") {
+      const ref = body.unpark;
+      if (!/^item-\d{2,}$/.test(ref)) {
+        sendJson(res, 400, { status: "refused", error: "unpark accepts a currently parked item reference only" });
+        return;
+      }
+      const currentDashboard = readDashboard();
+      if (!currentDashboard || !currentDashboard.html.includes(`data-parked-ref="${ref}"`)) {
+        sendJson(res, 409, { status: "refused", error: `${ref} is not in the current dashboard's parking lot; refresh first` });
+        return;
+      }
+      const currentRefs = readRefs(currentDashboard.generated);
+      const entry = currentRefs?.refs?.[ref];
+      if (!entry || entry.kind !== "item") {
+        sendJson(res, 409, { status: "refused", error: `${ref} cannot be resolved against the current dashboard generation; refresh first` });
+        return;
+      }
+      const separator = entry.value.indexOf("/");
+      const workHome = entry.value.slice(0, separator);
+      const workId = entry.value.slice(separator + 1);
+      const pending = pendingRecords();
+      if (pending.some((record) => record.kind === "unpark" && record.work_identity === entry.value)) {
+        sendJson(res, 200, { status: "already-queued", pending: pending.length });
+        return;
+      }
+      const record = {
+        schema: "fm-dash-command.v1",
+        kind: "unpark",
+        id: ref,
+        work_id: workId,
+        work_home: workHome,
+        work_identity: entry.value,
+        requested_by: requesterLogin(req),
+        requested_at: new Date().toISOString(),
+        dashboard_generated: currentDashboard.generated,
+        prompt: `Captain clicked UNPARK for parked work ${workId}${workHome === "main" ? "" : ` (owned by domain supervisor ${workHome})`}: lift its parked hold through the normal backlog lifecycle so it rejoins the active queue. This request lifts the hold only; dispatch still follows normal re-evaluation and authority checks.`,
+      };
+      const name = enqueueCommand(record);
+      log(`queued unpark ${workId} as ${name} for ${record.requested_by}`);
+      sendJson(res, 200, { status: "queued", pending: pending.length + 1 });
       return;
     }
 
