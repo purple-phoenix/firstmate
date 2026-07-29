@@ -237,6 +237,19 @@ gate: review
 EOF
 }
 
+run_parked_awaiting_running() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+EOF
+}
+
 run_parked_in_gate_block() {  # <branch>
   cat <<EOF
 run:
@@ -1337,8 +1350,9 @@ test_parked_run_unresolvable_head_does_not_attribute() {
   pass "parked run with unresolvable head does not attribute by branch alone"
 }
 
-# Coarse runs-list path: progressing row with nm-only short-sha still binds.
-test_coarse_running_unresolvable_head_still_attributes() {
+# Coarse runs-list rows cannot distinguish a genuinely progressing run from one
+# parked behind a gate, so an unresolvable short-sha must not bind.
+test_coarse_running_unresolvable_head_does_not_attribute() {
   reset_fakes
   local d out
   d=$(new_case coarse-nm-head)
@@ -1354,9 +1368,31 @@ test_coarse_running_unresolvable_head_still_attributes() {
 EOF
 )"
   out=$(run_crew_state "$d" coarse-nm)
-  assert_contains "$out" "source: run-step" "coarse progressing row with nm-only head must bind"
-  assert_contains "$out" "state: working" "coarse running row remains working"
-  pass "coarse running row with unresolvable head still attributes"
+  assert_not_contains "$out" "source: run-step" "ambiguous coarse running row with nm-only head must not bind"
+  assert_contains "$out" "source: none" "ambiguous coarse row falls through when no current source exists"
+  assert_contains "$out" "state: unknown" "ambiguous coarse row cannot claim current work"
+  pass "coarse running row with unresolvable head does not attribute"
+}
+
+test_running_gate_run_unresolvable_head_does_not_attribute() {
+  reset_fakes
+  local d out fixture
+  for fixture in run_parked_scalar_gate_running run_parked_in_gate_block run_parked_awaiting_running; do
+    d=$(new_case "parked-running-${fixture}")
+    make_repo_on_branch "$d/wt" fm/feat-parked-running
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/parked-running.meta" "window=fm:fm-parked-running" "worktree=$d/wt" "kind=ship"
+    printf 'needs-decision: review gate has ask-user findings\n' > "$d/state/parked-running.status"
+    FM_FAKE_BUSY=0
+    FM_FAKE_RUN_HEAD=cafebabe
+    FM_FAKE_AXI_STATUS="$($fixture fm/feat-parked-running)"
+    FM_FAKE_RUNS_LIST=""
+    out=$(run_crew_state "$d" parked-running)
+    assert_not_contains "$out" "source: run-step" "running status with a gate and unresolvable head must not bind"
+    assert_contains "$out" "source: status-log" "gated running status falls back to the current decision log"
+    assert_contains "$out" "state: parked" "gated running status remains parked"
+  done
+  pass "running runs with gate markers and unresolvable heads do not attribute"
 }
 
 # Coarse path: terminal row with unresolvable head must not bind by branch alone.
@@ -1435,7 +1471,8 @@ test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_active_run_unresolvable_head_still_attributes
 test_parked_run_unresolvable_head_does_not_attribute
-test_coarse_running_unresolvable_head_still_attributes
+test_coarse_running_unresolvable_head_does_not_attribute
+test_running_gate_run_unresolvable_head_does_not_attribute
 test_coarse_completed_unresolvable_head_does_not_attribute
 
 echo "all fm-crew-state tests passed"
