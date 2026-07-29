@@ -605,6 +605,7 @@ let refreshing = null;
 function runRefresh() {
   if (refreshing) return refreshing;
   const extraArgs = (process.env.FM_DASH_CAPACITY_ARGS || "").split(" ").filter(Boolean);
+  const startedAtMs = Date.now();
   refreshing = new Promise((resolve) => {
     const child = spawn(process.execPath, [CAPACITY, "--refs", REFS, ...extraArgs], {
       cwd: ROOT,
@@ -617,13 +618,13 @@ function runRefresh() {
     child.on("close", (code) => {
       clearTimeout(timer);
       refreshing = null;
-      if (code === 0) resolve({ ok: true });
-      else resolve({ ok: false, error: stderr.trim().slice(0, 500) || `capacity producer exited ${code}` });
+      if (code === 0) resolve({ ok: true, startedAtMs });
+      else resolve({ ok: false, startedAtMs, error: stderr.trim().slice(0, 500) || `capacity producer exited ${code}` });
     });
     child.on("error", (error) => {
       clearTimeout(timer);
       refreshing = null;
-      resolve({ ok: false, error: error.message });
+      resolve({ ok: false, startedAtMs, error: error.message });
     });
   });
   return refreshing;
@@ -1684,28 +1685,40 @@ function main() {
     // Prompt post-claim regeneration: bin/fm-dash-inbox.sh claim touches the
     // stale marker after archiving commands, so the model catches up with the
     // captain's handled clicks well before the next full auto-render interval.
-    // A marker older than the current dashboard is already satisfied.
     const staleCheck = async () => {
-      let markerMs;
+      let marker;
       try {
-        markerMs = fs.statSync(STALE_MARKER).mtimeMs;
+        const stat = fs.statSync(STALE_MARKER);
+        marker = {
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+          size: stat.size,
+          ino: stat.ino,
+        };
       } catch {
-        return;
-      }
-      let dashboardMs = 0;
-      try {
-        dashboardMs = fs.statSync(DASHBOARD).mtimeMs;
-      } catch { /* missing dashboard stays stale */ }
-      if (markerMs <= dashboardMs) {
-        try { fs.unlinkSync(STALE_MARKER); } catch { /* already gone */ }
         return;
       }
       log("claimed captain commands marked the model stale; regenerating");
       const result = await runRefresh();
-      if (result.ok) {
+      let currentMarker = null;
+      try {
+        const stat = fs.statSync(STALE_MARKER);
+        currentMarker = {
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+          size: stat.size,
+          ino: stat.ino,
+        };
+      } catch { /* already gone */ }
+      const markerUnchanged = currentMarker
+        && currentMarker.mtimeMs === marker.mtimeMs
+        && currentMarker.ctimeMs === marker.ctimeMs
+        && currentMarker.size === marker.size
+        && currentMarker.ino === marker.ino;
+      if (result.ok && markerUnchanged && result.startedAtMs >= marker.mtimeMs) {
         try { fs.unlinkSync(STALE_MARKER); } catch { /* already gone */ }
       } else {
-        log(`stale-marker refresh failed: ${result.error}`);
+        if (!result.ok) log(`stale-marker refresh failed: ${result.error}`);
       }
     };
     setInterval(staleCheck, STALE_POLL_MS).unref();

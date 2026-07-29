@@ -581,7 +581,8 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
     | .secondmate_current.records[0].holds = [
-      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"}
+      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"},
+      {"id":"mate-pr-held","title":"Wait for pull request approval","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-21","state":"paused","reason":"PR awaiting merge approval","pr_present":true,"source":"child-state"}
     ]
     | .secondmate_current.records[0].queued += [
       {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"},
@@ -590,17 +591,19 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"after-mate-held","title":"Continue after held work","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"mate-held","body_excerpt":"Acceptance criteria: held work clears."}
     ]
     | .secondmate_current.records[0].decisions_open[0].id = "mate-held"
-    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":1,"queued":5}
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":2,"queued":5}
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 9
-    and .measures.open_captain_actions == 4
+    (.pipeline.blocked | length) == 10
+    and .measures.open_captain_actions == 5
     and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
-    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 5
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 6
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .what_you_can_do] | all(type == "string" and length > 0))
+    and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true and .what_you_can_do == "Review and merge its open pull request - this wait is on you, not an automatic process.")] | length) == 1
+    and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true) | tostring] | all(contains("http") | not))
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .waits_on // [] | join(" ")] | map(select(contains("worker question"))) | length) == 2
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
   [ "$(grep -o 'class="verb verb-decide"' "$output" | wc -l | tr -d ' ')" = 4 ] ||

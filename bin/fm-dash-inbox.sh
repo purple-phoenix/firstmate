@@ -107,7 +107,11 @@ case "${1:-list}" in
       print_record "$f"
       delivered=$((delivered + 1))
       if mv -n -- "$f" "$dest" 2>/dev/null && [ ! -e "$f" ] && [ -e "$dest" ]; then
-        archived=$((archived + 1))
+        if touch "$dest"; then
+          archived=$((archived + 1))
+        else
+          mv -n -- "$dest" "$f" 2>/dev/null || true
+        fi
       fi
     done <<EOF
 $files

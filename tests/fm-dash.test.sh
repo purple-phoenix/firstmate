@@ -570,7 +570,7 @@ test_refresh_reruns_producer_server_side() {
 }
 
 test_inbox_list_claim_and_archive() {
-  local out stub_bin
+  local archived_file archived_mtime out pending_file stub_bin
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" pending-count)
   [ "$out" = 1 ] || fail "pending-count expected 1, got: $out"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" list)
@@ -588,8 +588,10 @@ EOF
   assert_contains "$out" 'delivered: 1' "failed archive did not report the delivered command"
   assert_contains "$out" 'archived: 0' "failed archive did not report its archive count"
   assert_contains "$out" 'idempotency checks' "failed archive omitted the replay handling reminder"
-  [ -n "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' 2>/dev/null)" ] \
+  pending_file=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*CAP-06.json' 2>/dev/null | head -1)
+  [ -n "$pending_file" ] \
     || fail "failed archive silently removed the delivered command"
+  touch -t 202001010000 "$pending_file"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
   assert_contains "$out" 'delivered: 1' "claim did not report the delivered command"
   assert_contains "$out" 'archived: 1' "claim did not report the archived command"
@@ -597,15 +599,19 @@ EOF
   assert_contains "$out" 'authority limits apply' "claim omits the authority boundary reminder"
   [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
     || fail "claim left the record pending"
-  [ -n "$(find "$HOME_DIR/state/dash-inbox/archive" -name '*CAP-06.json' 2>/dev/null)" ] \
+  archived_file=$(find "$HOME_DIR/state/dash-inbox/archive" -name '*CAP-06.json' 2>/dev/null | head -1)
+  [ -n "$archived_file" ] \
     || fail "claim did not archive the record"
+  archived_mtime=$(node -e 'console.log(require("node:fs").statSync(process.argv[1]).mtimeMs)' "$archived_file")
+  node -e 'if (Number(process.argv[1]) < Date.now() - 60000) process.exit(1)' "$archived_mtime" \
+    || fail "archive mtime retained enqueue time instead of recording claim time"
   out=$(FM_HOME="$HOME_DIR" "$INBOX_SH" claim)
   assert_contains "$out" 'no pending dashboard commands' "second claim re-surfaced the archived command"
   pass "inbox claim delivers before archive and safely permits replay"
 }
 
 test_click_ack_and_handled_states() {
-  local before_backlog ref detail_ref
+  local before_backlog marker_refreshes ref detail_ref tries
   before_backlog=$(cat "$HOME_DIR/data/backlog.md")
   # A record claimed under the currently served generation acknowledges as
   # received, with the claim time, straight from the archive.
@@ -697,6 +703,43 @@ test_click_ack_and_handled_states() {
   rm -f "$HOME_DIR/state/dash-inbox/.model-stale"
   # The acknowledgment layer only reads: fleet state is untouched.
   [ "$before_backlog" = "$(cat "$HOME_DIR/data/backlog.md")" ] || fail "serving acknowledgments mutated the backlog"
+  stop_server
+  cat > "$HOME_DIR/config/dash.json" <<EOF
+{"port": $PORT, "captain_logins": ["$CAPTAIN"], "auto_refresh_seconds": 3600}
+EOF
+  rm -f "$HOME_DIR/state/dash-inbox/.model-stale" "$TMP_ROOT/stale-snapshot.fifo"
+  mkfifo "$TMP_ROOT/stale-snapshot.fifo"
+  export FM_DASH_STALE_POLL_MS=50
+  start_server "$HOME_DIR" "$PORT" "--snapshot $TMP_ROOT/stale-snapshot.fifo --environment $ENVIRONMENT"
+  unset FM_DASH_STALE_POLL_MS
+  touch "$HOME_DIR/state/dash-inbox/.model-stale"
+  marker_refreshes=0
+  tries=0
+  while [ "$marker_refreshes" -lt 1 ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || fail "the stale marker did not start a regeneration"
+    sleep 0.05
+    marker_refreshes=$(grep -c 'claimed captain commands marked the model stale' "$TMP_ROOT/serve.log" 2>/dev/null || true)
+  done
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x","requested_at":"%s","dashboard_generated":"2026-07-28T10:00:00Z"}\n' \
+    "$(node -e 'console.log(new Date().toISOString())')" > "$HOME_DIR/state/dash-inbox/3-race-CAP-06.json"
+  FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "race claim failed"
+  cp "$SNAPSHOT" "$TMP_ROOT/stale-snapshot.fifo"
+  marker_refreshes=0
+  tries=0
+  while [ "$marker_refreshes" -lt 2 ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || fail "a claim during refresh did not schedule a post-claim regeneration"
+    sleep 0.05
+    marker_refreshes=$(grep -c 'claimed captain commands marked the model stale' "$TMP_ROOT/serve.log" 2>/dev/null || true)
+  done
+  cp "$SNAPSHOT" "$TMP_ROOT/stale-snapshot.fifo"
+  tries=0
+  while [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || fail "post-claim regeneration did not consume the unchanged marker"
+    sleep 0.05
+  done
   pass "clicks acknowledge instantly, survive reloads and claims, and re-emitted recent actions stay acknowledged"
 }
 

@@ -635,14 +635,15 @@ const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|me
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
 function captainGatedPause(task) {
   const prUrl = typeof task.pr?.url === "string" && task.pr.url !== "" ? task.pr.url : null;
+  const prPresent = prUrl !== null || task.pr_present === true;
   const reason = String(task.current_state?.detail ?? task.reason ?? task.doing ?? "");
-  const gated = CAPTAIN_GATE_REASON.test(reason) || (prUrl !== null && PR_GATE_REASON.test(reason));
+  const gated = CAPTAIN_GATE_REASON.test(reason) || (prPresent && PR_GATE_REASON.test(reason));
   if (!gated) return null;
   return {
-    wait: prUrl
+    wait: prPresent
       ? "paused for your decision on its open pull request"
       : "paused for your review or decision",
-    action: prUrl
+    action: prPresent
       ? "Review and merge its open pull request - this wait is on you, not an automatic process."
       : "Review and decide in chat - this wait is on you, not an automatic process.",
   };
