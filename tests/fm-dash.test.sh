@@ -519,7 +519,7 @@ test_parking_lot_enrichment_and_unpark() {
 }
 
 test_recurring_enrichment_and_run_now() {
-  local ref scout_ref record
+  local ref scout_ref mate_scout_ref record
   cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.recurring.bak"
   cp "$HOME_DIR/state/dash-refs.json" "$TMP_ROOT/refs.recurring.bak"
   cp "$HOME_DIR/data/backlog.md" "$TMP_ROOT/backlog.recurring.bak"
@@ -553,6 +553,21 @@ test_recurring_enrichment_and_run_now() {
   req GET "http://127.0.0.1:$PORT/api/detail?ref=$scout_ref" "$CAPTAIN"
   [ "$REQ_STATUS" = 200 ] || fail "completed scout detail failed (got $REQ_STATUS: $RESP)"
   assert_contains "$RESP" 'The recorded scout findings are available here.' "completed scout detail lacks its report excerpt"
+  mate_scout_ref=item-9999
+  mkdir -p "$HOME_DIR/design/data/mate-scout-r4"
+  printf 'home=%s\n' "$HOME_DIR/design" > "$HOME_DIR/state/design.meta"
+  printf '%s\n' '# Domain scout report' 'The domain supervisor recorded these scout findings.' > "$HOME_DIR/design/data/mate-scout-r4/report.md"
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const refs = JSON.parse(fs.readFileSync(file, "utf8"));
+    refs.refs[process.argv[2]] = { kind: "item", value: "design/mate-scout-r4" };
+    fs.writeFileSync(file, JSON.stringify(refs));
+  ' "$HOME_DIR/state/dash-refs.json" "$mate_scout_ref"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$mate_scout_ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "secondmate scout detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'The domain supervisor recorded these scout findings.' "secondmate scout detail lacks its bounded report excerpt"
+  assert_contains "$RESP" 'lives with a domain supervisor' "secondmate scout detail lost its ownership boundary"
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   assert_contains "$RESP" 'Run now' "recurring entry lacks the run-now control"
   ref=$(ref_for "main/research-w9") || fail "refs sidecar does not map the recurring item"
@@ -577,6 +592,8 @@ test_recurring_enrichment_and_run_now() {
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
   rm "$HOME_DIR/data/scout-r4/report.md"
   rmdir "$HOME_DIR/data/scout-r4"
+  rm "$HOME_DIR/design/data/mate-scout-r4/report.md"
+  rmdir "$HOME_DIR/design/data/mate-scout-r4"
   mv "$TMP_ROOT/dashboard.recurring.bak" "$HOME_DIR/data/capacity-dashboard.html"
   mv "$TMP_ROOT/refs.recurring.bak" "$HOME_DIR/state/dash-refs.json"
   mv "$TMP_ROOT/backlog.recurring.bak" "$HOME_DIR/data/backlog.md"

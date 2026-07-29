@@ -601,6 +601,10 @@ function assembleDetail(ref) {
     };
   }
   if (owner !== "main") {
+    const root = decisionHome(owner);
+    const report = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) && root
+      ? readText(path.join(root, "data", id, "report.md"), 8192)
+      : null;
     return {
       type: "work",
       ref,
@@ -608,6 +612,7 @@ function assembleDetail(ref) {
       owner,
       title: backlogItem ? backlogItem.title : id,
       note: "This work lives with a domain supervisor; its instructions and records are in that home.",
+      report_excerpt: report ? report.trim().slice(0, 1200) : null,
     };
   }
   const brief = briefSections(id);
