@@ -1249,8 +1249,62 @@ test_wait_history_estimates_and_overrun() {
   pass "recorded wait history yields labeled estimates, overruns degrade honestly, and completions roll into history"
 }
 
+test_parked_items_rest_in_the_parking_lot() {
+  local home="$TMP_ROOT/parked-home" mate_home="$TMP_ROOT/parked-mate" snapshot="$TMP_ROOT/parked-snapshot.json" environment="$TMP_ROOT/parked-environment.json" output="$TMP_ROOT/parked-home/data/parked.html" json mate_json
+  make_fixture "$home" "$snapshot" "$environment"
+  mkdir -p "$mate_home/data" "$mate_home/state" "$mate_home/config" "$mate_home/projects"
+  printf '%s\n' '- delta [direct-PR] - delta project (added 2026-07-17)' > "$mate_home/data/projects.md"
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] design-ready - Refresh the delta design tokens (repo: delta) (kind: ship)' \
+    '  Acceptance criteria: token snapshots pass.' \
+    '- [ ] mate-parked - Parked delta exploration (repo: delta) (kind: ship) (since 2026-07-12) (hold: Mate parked reason stays private) (hold-kind: parked)' \
+    '  Acceptance criteria: exploration is summarized.' > "$mate_home/data/backlog.md"
+  mate_json=$(FM_HOME="$mate_home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate parked summary fixture failed"
+  printf '%s' "$mate_json" | jq -e '
+    .counts.queued == 2
+    and (.queued | any(.id == "mate-parked" and .since == "2026-07-12" and .hold_kind == "parked"))
+  ' >/dev/null || fail "production secondmate projection omitted the parked since date: $mate_json"
+  jq --argjson mate "$mate_json" '
+    .backlog.records += [
+      {"order":10,"state":"queued","structured":true,"id":"parked-rest","title":"Refresh the omicron gateway","repo":"omicron","project_resolved":true,"kind":"ship","since":"2026-07-10","hold_kind":"parked","hold_reason":"Captain parked omicron work until the retreat","body_excerpt":"Acceptance criteria: omicron gateway upgraded."}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) = $mate.queued
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = $mate.counts.queued
+  ' "$snapshot" > "$snapshot.tmp" && mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "parked fixture run failed"
+  printf '%s' "$json" | jq -e '
+    (.parked | length) == 2
+    and ([.parked[].parked_since] | sort) == ["2026-07-10","2026-07-12"]
+    and (.parked | all(.reason == "Parked at your request - deliberately resting, not stuck"))
+    and ([.parked[].id] as $p | [.pipeline[][].id] | map(select(. as $x | $p | index($x))) | length) == 0
+    and (.pipeline.blocked | length) == 3
+    and (.pipeline.queued | length) == 2
+    and (.readiness.explicit_gates | length) == 3
+    and .readiness.queued_considered == 7
+    and .measures.open_captain_actions == 1
+    and (.omissions | any(contains("Park reasons are withheld")))
+  ' >/dev/null || fail "parked work was not kept out of the blocked band and counts: $json"
+  case "$json" in *omicron*) fail "parked project, title, or reason leaked into the model" ;; esac
+  assert_grep 'Parking lot (2)' "$output" "dashboard lacks the collapsed parking lot"
+  assert_grep '<details class="parking"' "$output" "parking lot is not a collapsed section"
+  [ "$(grep -o 'data-parked-ref=' "$output" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "parked items do not render exactly once each in the parking lot"
+  assert_no_grep 'until the retreat' "$output" "park reason leaked into the offline dashboard"
+  assert_no_grep 'stays private' "$output" "secondmate park reason leaked into the offline dashboard"
+  assert_no_grep 'Refresh the omicron gateway' "$output" "parked title leaked into the offline dashboard"
+  local empty_home="$TMP_ROOT/parked-empty" empty_snapshot="$TMP_ROOT/parked-empty-snapshot.json" empty_environment="$TMP_ROOT/parked-empty-environment.json" empty_output="$TMP_ROOT/parked-empty/data/empty.html"
+  make_fixture "$empty_home" "$empty_snapshot" "$empty_environment"
+  "$CAPACITY" --snapshot "$empty_snapshot" --environment "$empty_environment" --output "$empty_output" >/dev/null || fail "empty parking-lot run failed"
+  assert_no_grep 'Parking lot' "$empty_output" "an empty parking lot still rendered a section"
+  assert_no_grep 'data-parked-ref' "$empty_output" "an empty parking lot still rendered row anchors"
+  pass "captain-parked work rests in the collapsed parking lot, out of blocked bands, counts, and reasons stay withheld"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
+test_parked_items_rest_in_the_parking_lot
 test_cross_home_overlap_holds_supersession_and_active_count
 test_secondmate_readiness_uses_final_serialized_supply
 test_secondmate_readiness_uses_home_owned_runtime_lanes
