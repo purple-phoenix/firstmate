@@ -20,15 +20,16 @@
  * unpark click only asks firstmate to lift the parked hold through the normal
  * backlog lifecycle.
  *
- * Clicks acknowledge instantly and durably: the served page renders each
- * action's acknowledgment state straight from the command channel (pending
+ * Acknowledgeable actions and verdicts acknowledge instantly and durably: the
+ * served page renders their state straight from the command channel (pending
  * record = sent, archived record = received with its claim time, recent
- * archived record behind a regenerated model = previously approved), so an
- * already-approved action never looks undecided after a reload or a
- * regeneration re-emits the same stable action ID. The claim helper touches
- * state/dash-inbox/.model-stale after archiving; this service polls that
- * marker and reruns the producer promptly (when auto-render is enabled) so the
- * model catches up with handled clicks.
+ * archived record behind a regenerated model = previously approved or denied),
+ * so a recent action never looks undecided after a reload or a regeneration
+ * re-emits the same stable action ID. Idea suggestions stay additive and never
+ * acknowledge persistently, so they cannot disable a later verdict. The claim
+ * helper touches state/dash-inbox/.model-stale after archiving; this service
+ * polls that marker and reruns the producer promptly (when auto-render is
+ * enabled) so the model catches up with handled clicks.
  *
  * Identity fails closed: every route except /healthz requires the
  * Tailscale-User-Login header injected by tailscale serve to match a login in
@@ -116,7 +117,8 @@ promptly. Acknowledgment states rendered on the page come from the command
 channel itself: a pending inbox record renders its action as sent, an archived
 record renders it as received with the claim time, and an archived record
 whose click is within the last 6 hours keeps a re-emitted stable action ID
-rendered as previously approved instead of a bare Approve button. Routes:
+rendered as previously approved or denied instead of a bare verdict control.
+Idea suggestions stay additive and never acknowledge persistently. Routes:
   GET  /healthz       liveness, no identity required
   GET  /              dashboard with the interactive layer injected
   GET  /api/pending   pending command count
@@ -230,13 +232,14 @@ function removePendingIfUnchanged(record) {
 }
 
 // --- click acknowledgment ---------------------------------------------------
-// The captain's click must never disappear back into an undecided-looking
-// button. Source of truth is the durable command channel itself: a record
-// still pending in state/dash-inbox/ acknowledges as sent, a record claimed
-// into archive/ acknowledges as received (archive mtime is the claim time),
-// and a claimed record whose click is still within ACK_PRIOR_WINDOW_MS keeps
+// An acknowledgeable click must never disappear back into an undecided-looking
+// button. Source of truth is the durable command channel itself: a record still
+// pending in state/dash-inbox/ acknowledges as sent, a record claimed into
+// archive/ acknowledges as received (archive mtime is the claim time), and a
+// claimed record whose click is still within ACK_PRIOR_WINDOW_MS keeps
 // acknowledging a re-emitted stable action ID after the model regenerates.
-// This layer only reads records; it never executes or mutates fleet state.
+// Idea suggestions are the additive, non-acknowledgeable exception. This layer
+// only reads records; it never executes or mutates fleet state.
 
 function archivedRecords() {
   const archive = path.join(INBOX, "archive");
