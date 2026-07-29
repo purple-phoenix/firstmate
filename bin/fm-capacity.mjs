@@ -115,7 +115,8 @@ PARKING LOT
   hold reason; the authenticated dashboard service enriches them. The dashboard
   renders parked items only inside one collapsed low-key parking-lot section at
   the bottom, and renders no parking-lot section at all when nothing is parked.
-  Every other hold kind (captain, external, load, future) keeps its treatment.
+  Holds that match neither the parking nor recurring keys keep their normal
+  treatment.
 
 RECURRING
   The backlog schema has no first-class recurrence marker, so the honest v1

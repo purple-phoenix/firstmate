@@ -20,7 +20,7 @@
 #     retain the fail-safe no-mistakes mode while project_resolved stays false.
 #     blocked_by is the comma-compatible dependency string and blocked_by_all
 #     preserves every normalized dependency edge in source order.
-#     Structured rows preserve captain-hold metadata such as hold_kind,
+#     Structured rows preserve hold metadata such as hold_kind,
 #     hold_reason, and the hold_until date gate when tasks-axi emits it.
 #     They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
@@ -160,9 +160,10 @@ JSON is the stable machine-readable output contract.
 validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
-Actionable tasks-axi captain holds appear as decisions_open and stay visible in
-queued with hold_reason, hold_kind, hold_until, and plural blocker fields for downstream
-projections. A captain hold is actionable only when every blocker is Done.
+Structured queued rows carry hold_reason, hold_kind, hold_until, and plural
+blocker fields for downstream projections. Actionable tasks-axi captain holds
+also appear as decisions_open; a captain hold is actionable only when every
+blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
