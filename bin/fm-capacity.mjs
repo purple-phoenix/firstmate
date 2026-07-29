@@ -28,7 +28,7 @@
  * parking-lot section that disappears entirely when empty.
  * Items whose active hold is a date-gated schedule (kind=future with a future
  * --until date) are scheduled cadence work, not stuck work: they land in the
- * separate recurring collection with next_run and last-completed-run linkage,
+ * separate recurring collection with next_run and full-history last-run linkage,
  * stay out of the blocked band and counts the same way, and render in one calm
  * Recurring section that disappears entirely when empty. A hold whose --until
  * date has arrived is inactive (tasks-axi semantics), so the item re-enters
@@ -127,8 +127,8 @@ RECURRING
   blocked counts, waiting measures, attention summaries, aging, and wait
   treatments. Each entry carries next_run (the gate date), scheduled_since,
   and last_run: the most recent same-home Done record whose id shares the
-  item's cadence stem (the id with one trailing counter or date token
-  stripped, e.g. research-w4 matches done research-w3), with its completion
+  item's cadence stem (the id after removing exactly one trailing counter or
+  date token, e.g. research-w4 matches done research-w3), with its completion
   date, an opaque ref, and whether a delivered artifact is on the books.
   Schedule hold reasons are withheld from this privacy-bounded artifact like
   every other hold reason. The dashboard renders one calm bottom Recurring
@@ -143,9 +143,12 @@ RECURRING
 BOUNDS AND PROBES
   The canonical fm-fleet-snapshot.v1 producer owns snapshot completion; this wrapper
   does not impose a shorter aggregate timeout. Its normal defaults inspect at most 20
-  secondmate homes sequentially, bound each structured-home read to 8 seconds and
+  secondmate homes sequentially, request each included home's complete landed record
+  for recurring-history lookup, bound each structured-home read to 8 seconds and
   262144 bytes, and emit explicit per-home unavailable/truncated evidence instead of
-  aborting the fleet result. FM_SNAPSHOT_SECONDMATES,
+  aborting the fleet result. A complete landed record that exceeds the time or byte
+  bound makes that home unavailable rather than silently shortening history.
+  FM_SNAPSHOT_SECONDMATES,
   FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES are the
   canonical overrides; fm-fleet-snapshot.sh --help owns its remaining exact bounds.
   Backend, bootstrap credential, and dispatch probes share one 30-second fleet-wide
@@ -231,7 +234,10 @@ function run(command, args, options = {}) {
 
 function gatherSnapshot(file) {
   if (file) return readJson(file, "snapshot fixture");
-  const result = run(path.join(SCRIPT_DIR, "fm-fleet-snapshot.sh"), ["--json"], { timeout: null });
+  const result = run(path.join(SCRIPT_DIR, "fm-fleet-snapshot.sh"), ["--json"], {
+    timeout: null,
+    env: { ...process.env, FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME: "0" },
+  });
   if (result.status !== 0) {
     throw new Error(`fresh fleet snapshot failed: ${(result.stderr || result.stdout || "unknown error").trim()}`);
   }
@@ -675,14 +681,12 @@ function recurringNextRun(record, now) {
   return Number.isFinite(gate) && gate > now ? until : null;
 }
 
-// Deterministic cadence stem: the id with one trailing date or counter token
-// stripped ("research-w4" and "research-w3" share "research"), so successive
-// runs of one recurring item match while unrelated ids do not.
+// Deterministic cadence stem: the id with exactly one trailing date or counter
+// token stripped ("research-w4" and "research-w3" share "research"), so
+// successive runs of one recurring item match while unrelated ids do not.
 function recurringStem(id) {
   const text = String(id || "");
-  const stem = text
-    .replace(/[-_.]\d{4}-\d{2}-\d{2}$/, "")
-    .replace(/[-_.][a-z]{0,4}\d+$/i, "");
+  const stem = text.replace(/(?:[-_.]\d{4}-\d{2}-\d{2}|[-_.][a-z]{0,4}\d+)$/i, "");
   return stem !== text && stem.length >= 3 ? stem : null;
 }
 

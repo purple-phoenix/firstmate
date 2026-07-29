@@ -525,20 +525,26 @@ test_recurring_enrichment_and_run_now() {
   cp "$HOME_DIR/data/backlog.md" "$TMP_ROOT/backlog.recurring.bak"
   jq '.backlog.records += [
     {"order":9,"state":"queued","structured":true,"id":"research-w9","title":"Weekly gamma market research","repo":"gamma","project_resolved":true,"kind":"scout","since":"2026-07-14","hold_kind":"future","hold_reason":"weekly cadence while gamma ships","hold_until":"2026-08-04","body_excerpt":"Acceptance criteria: report is filed."},
-    {"order":10,"state":"done","structured":true,"id":"research-w8","title":"Weekly gamma market research","repo":"gamma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/purple-phoenix/firstmate/pull/900","links":["https://github.com/purple-phoenix/firstmate/pull/900"],"completion":{"verb":"merged","date":"2026-07-21"}}
+    {"order":10,"state":"queued","structured":true,"id":"scout-r5","title":"Weekly scout research","repo":"gamma","project_resolved":true,"kind":"scout","since":"2026-07-15","hold_kind":"future","hold_reason":"weekly scout cadence","hold_until":"2026-08-04","body_excerpt":"Acceptance criteria: report is filed."},
+    {"order":11,"state":"done","structured":true,"id":"research-w8","title":"Weekly gamma market research","repo":"gamma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/purple-phoenix/firstmate/pull/900","links":["https://github.com/purple-phoenix/firstmate/pull/900"],"completion":{"verb":"merged","date":"2026-07-21"}},
+    {"order":12,"state":"done","structured":true,"id":"scout-r4","title":"Weekly scout research","repo":"gamma","project_resolved":true,"kind":"scout","report_path":"data/scout-r4/report.md","completion":{"verb":"reported","date":"2026-07-22"}}
   ]' "$SNAPSHOT" > "$TMP_ROOT/recurring-snapshot.json"
   printf -- '- [ ] research-w9 - Weekly gamma market research (repo: gamma) (kind: scout) (since 2026-07-14) (hold: weekly cadence while gamma ships) (hold-kind: future) (hold-until: 2026-08-04)\n' >> "$HOME_DIR/data/backlog.md"
+  printf -- '- [ ] scout-r5 - Weekly scout research (repo: gamma) (kind: scout) (since 2026-07-15) (hold: weekly scout cadence) (hold-kind: future) (hold-until: 2026-08-04)\n' >> "$HOME_DIR/data/backlog.md"
   printf -- '- [x] research-w8 - Weekly gamma market research https://github.com/purple-phoenix/firstmate/pull/900 (merged 2026-07-21)\n' >> "$HOME_DIR/data/backlog.md"
+  printf -- '- [x] scout-r4 - Weekly scout research data/scout-r4/report.md (reported 2026-07-22)\n' >> "$HOME_DIR/data/backlog.md"
   FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/recurring-snapshot.json" --environment "$ENVIRONMENT" \
     --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
     || fail "could not render the recurring fixture dashboard"
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
-  assert_contains "$RESP" 'Recurring (1)' "served page lacks the recurring section"
+  assert_contains "$RESP" 'Recurring (2)' "served page lacks the recurring section"
   assert_contains "$RESP" 'next: Aug 4' "served page lacks the next-run date"
   assert_contains "$RESP" '"title":"Weekly gamma market research"' "recurring entry was not enriched with its real title"
   assert_contains "$RESP" '"reason":"weekly cadence while gamma ships"' "recurring entry was not enriched with the schedule reason"
   assert_contains "$RESP" '"next":"2026-08-04"' "recurring entry was not enriched with its next-run date"
   assert_contains "$RESP" '"link":"https://github.com/purple-phoenix/firstmate/pull/900"' "recurring entry was not enriched with the last run artifact link"
+  assert_contains "$RESP" '"title":"Weekly scout research"' "scout recurring entry was not enriched with its clean title"
+  assert_contains "$RESP" '"date":"2026-07-22","link":"data/scout-r4/report.md"' "scout recurring entry lost its reported date or report artifact"
   assert_contains "$RESP" 'Run now' "recurring entry lacks the run-now control"
   ref=$(ref_for "main/research-w9") || fail "refs sidecar does not map the recurring item"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"run_now":"item-99"}'

@@ -433,14 +433,14 @@ function recurringEntries(dashboardHtml, refsFile) {
     if (lastItem) {
       const doneRow = backlogFor(lastItem.owner).find((entry) => entry.id === lastItem.id) || null;
       const doneParsed = doneRow ? titleAnnotations(doneRow.title) : null;
-      const link = doneRow
-        ? (`${doneRow.title} ${doneRow.body.join(" ")}`.match(/https:\/\/[^\s"'`<>)\]]+/) || [null])[0]
+      const artifact = doneRow
+        ? (`${doneRow.title} ${doneRow.body.join(" ")}`.match(/https:\/\/[^\s"'`<>)\]]+|data\/[^\s"'`<>)\]]+\/report\.md/) || [null])[0]
         : null;
       lastRun = {
         id: lastItem.id,
-        title: (doneParsed ? doneParsed.title.replace(/https?:\/\/[^\s]+/g, "").trim() : "") || lastItem.id,
-        date: doneParsed?.fields["merged"] || doneParsed?.fields["done"] || null,
-        link,
+        title: (doneParsed ? doneParsed.title.replace(/https?:\/\/[^\s]+|data\/[^\s]+\/report\.md/g, "").trim() : "") || lastItem.id,
+        date: doneParsed?.fields["merged"] || doneParsed?.fields["reported"] || doneParsed?.fields["done"] || null,
+        link: artifact,
       };
     }
     entries.push({

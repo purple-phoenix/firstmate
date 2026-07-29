@@ -94,6 +94,10 @@ test_skill_discovery_and_read_mostly_contract() {
   assert_contains "$help" 'MODEL fm-capacity.v1' "capacity help omits the model contract"
   assert_contains "$help" 'at most 20' "capacity help omits the inherited home bound"
   assert_contains "$help" 'bound each structured-home read to 8 seconds' "capacity help omits the inherited probe timeout"
+  assert_contains "$help" "request each included home's complete landed record" "capacity help omits full recurring-history lookup"
+  assert_contains "$help" 'exceeds the time or byte' "capacity help hides the remaining full-history bound"
+  assert_contains "$help" 'bound makes that home unavailable' "capacity help hides the full-history bound consequence"
+  assert_grep 'FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME: "0"' "$CAPACITY" "capacity does not request complete secondmate landed history"
   assert_contains "$help" 'does not impose a shorter aggregate timeout' "capacity help permits wrapper timeout regression"
   assert_contains "$help" 'share one 30-second fleet-wide' "capacity help omits the environment deadline"
   assert_contains "$help" '10 CAP-02 credentials' "capacity help omits bottleneck priority"
@@ -1383,19 +1387,33 @@ test_recurring_items_get_their_own_section() {
     '- [ ] mate-research-r5 - Weekly delta research (repo: delta) (kind: scout) (since 2026-07-10) (hold: Mate cadence reason stays private) (hold-kind: future) (hold-until: 2026-08-04)' \
     '  Acceptance criteria: report is filed.' \
     '## Done' \
-    '- [x] mate-research-r4 - Weekly delta research data/mate-research-r4/report.md (done 2026-07-11)' > "$mate_home/data/backlog.md"
-  mate_json=$(FM_HOME="$mate_home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    '- [x] mate-research-r4 - Weekly delta research data/mate-research-r4/report.md (done 2026-07-11)' \
+    '- [x] unrelated-11 - Unrelated 11 (done 2026-07-23)' \
+    '- [x] unrelated-10 - Unrelated 10 (done 2026-07-22)' \
+    '- [x] unrelated-09 - Unrelated 09 (done 2026-07-21)' \
+    '- [x] unrelated-08 - Unrelated 08 (done 2026-07-20)' \
+    '- [x] unrelated-07 - Unrelated 07 (done 2026-07-19)' \
+    '- [x] unrelated-06 - Unrelated 06 (done 2026-07-18)' \
+    '- [x] unrelated-05 - Unrelated 05 (done 2026-07-17)' \
+    '- [x] unrelated-04 - Unrelated 04 (done 2026-07-16)' \
+    '- [x] unrelated-03 - Unrelated 03 (done 2026-07-15)' \
+    '- [x] unrelated-02 - Unrelated 02 (done 2026-07-14)' \
+    '- [x] unrelated-01 - Unrelated 01 (done 2026-07-13)' > "$mate_home/data/backlog.md"
+  mate_json=$(FM_HOME="$mate_home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
     || fail "secondmate recurring summary fixture failed"
   printf '%s' "$mate_json" | jq -e '
     .counts.queued == 2
     and (.queued | any(.id == "mate-research-r5" and .hold_kind == "future" and .hold_until == "2026-08-04"))
+    and (.landed | length) == 12
     and (.landed | any(.id == "mate-research-r4" and .report_path != null))
   ' >/dev/null || fail "production secondmate projection omitted the recurring date gate: $mate_json"
   jq --argjson mate "$mate_json" '
     .backlog.records += [
       {"order":10,"state":"queued","structured":true,"id":"sigma-research-w4","title":"Weekly sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","since":"2026-07-12","hold_kind":"future","hold_reason":"Weekly cadence reason stays private","hold_until":"2026-08-04","body_excerpt":"Acceptance criteria: report lands on the books."},
       {"order":11,"state":"queued","structured":true,"id":"expired-cadence-w2","title":"Run the rho refresh on its due date","repo":"rho","project_resolved":true,"kind":"ship","since":"2026-07-01","hold_kind":"future","hold_reason":"cadence gate already passed","hold_until":"2026-07-01","body_excerpt":"Acceptance criteria: refresh checks pass."},
-      {"order":12,"state":"done","structured":true,"id":"sigma-research-w3","title":"Weekly sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/example/sigma/pull/7","completion":{"verb":"merged","date":"2026-07-14"}}
+      {"order":12,"state":"queued","structured":true,"id":"sigma-research-w4-2026-08-04","title":"Weekly dated sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","since":"2026-07-12","hold_kind":"future","hold_reason":"Dated cadence stays private","hold_until":"2026-08-04","body_excerpt":"Acceptance criteria: report lands on the books."},
+      {"order":13,"state":"done","structured":true,"id":"sigma-research-w3","title":"Weekly sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/example/sigma/pull/7","completion":{"verb":"merged","date":"2026-07-14"}},
+      {"order":14,"state":"done","structured":true,"id":"sigma-research-w3-2026-08-04","title":"Unrelated dated sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/example/sigma/pull/8","completion":{"verb":"merged","date":"2026-07-15"}}
     ]
     | (.secondmate_current.records[] | select(.id == "design") | .queued) = $mate.queued
     | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = $mate.counts.queued
@@ -1403,7 +1421,7 @@ test_recurring_items_get_their_own_section() {
   ' "$snapshot" > "$snapshot.tmp" && mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "recurring fixture run failed"
   printf '%s' "$json" | jq -e '
-    (.recurring | length) == 2
+    (.recurring | length) == 3
     and (.recurring | all(.next_run == "2026-08-04"))
     and (.recurring | all(.reason == "Scheduled cadence work - healthy and waiting for its next run"))
     and (.recurring | all(.scheduled_since != null))
@@ -1412,17 +1430,19 @@ test_recurring_items_get_their_own_section() {
     and (.readiness.explicit_gates | length) == 3
     and .measures.waiting_work == 5
     and .readiness.queued_considered == 8
-    and ([.recurring[] | select(.owner == "main")] | length) == 1
-    and ([.recurring[] | select(.owner == "main")] | all(.last_run.date == "2026-07-14" and .last_run.artifact_recorded == true and (.last_run.ref | startswith("item-"))))
+    and ([.recurring[] | select(.owner == "main")] | length) == 2
+    and ([.recurring[] | select(.owner == "main" and .last_run != null)] | length) == 1
+    and ([.recurring[] | select(.owner == "main" and .last_run != null)] | all(.last_run.date == "2026-07-14" and .last_run.artifact_recorded == true and (.last_run.ref | startswith("item-"))))
+    and ([.recurring[] | select(.owner == "main" and .last_run == null)] | length) == 1
     and ([.recurring[] | select(.owner != "main")] | length) == 1
     and ([.recurring[] | select(.owner != "main")] | all(.last_run.artifact_recorded == true))
     and ([.pipeline.ready[].id] | length) == 3
     and (.omissions | any(contains("Recurring schedule reasons are withheld")))
   ' >/dev/null || fail "date-gated cadence work was not classified recurring, out of blocked bands and counts: $json"
   case "$json" in *sigma*|*"stays private"*) fail "recurring project, title, or schedule reason leaked into the model" ;; esac
-  assert_grep 'Recurring (2) · scheduled cadence work, healthy and on schedule' "$output" "dashboard lacks the calm recurring section"
+  assert_grep 'Recurring (3) · scheduled cadence work, healthy and on schedule' "$output" "dashboard lacks the calm recurring section"
   assert_grep 'next: Aug 4' "$output" "recurring row lacks its next-run date"
-  [ "$(grep -o 'data-recurring-ref=' "$output" | wc -l | tr -d ' ')" = 2 ] \
+  [ "$(grep -o 'data-recurring-ref=' "$output" | wc -l | tr -d ' ')" = 3 ] \
     || fail "recurring items do not render exactly once each in the recurring section"
   assert_grep 'data-last-run-ref=' "$output" "recurring row lacks its last completed run anchor"
   assert_no_grep 'Weekly sigma market research' "$output" "recurring title leaked into the offline dashboard"
