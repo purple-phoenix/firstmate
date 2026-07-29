@@ -97,7 +97,8 @@ Indented continuation lines extend the preceding impact.
 The service accepts at most 20 options and applies bounded text limits while rendering.
 Firstmate and workers author this document when filing a new decision, and `bin/fm-decision-hold.sh hold --options-file` publishes it under the originating work in the deciding home through the decision-hold lifecycle.
 Legacy decisions without the document remain visible but route the captain to answer in chat.
-In v1, a secondmate-owned work item deliberately shows only a limited ownership note because the main service does not ingest rich task records across home boundaries.
+In v1, an authenticated detail view may assemble only a bounded read-only excerpt from a resolved secondmate `data/<id>/report.md`, the sanctioned document return channel.
+Secondmate briefs, metadata, status tails, and chat remain prohibited, and everything else shows only the limited ownership note.
 
 Funnel is never acceptable for this surface.
 The installer only ever creates a plain `tailscale serve` mapping, verifies after configuring that no Funnel exposure exists for the served port, and tears the mapping back down and refuses if one is found.
