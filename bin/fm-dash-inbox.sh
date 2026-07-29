@@ -7,7 +7,8 @@
 # state/dash-inbox/archive/ (newest 50 kept), so an interruption can re-surface
 # a command but can never silently lose one. Delivery is at-least-once across
 # interruption, and the capacity skill requires idempotency checks before
-# handling re-surfaced CAP actions, decision answers, idea verdicts, or unpark requests.
+# handling re-surfaced CAP actions, decision answers, idea verdicts, unpark
+# requests, or recurring run-now requests.
 # Each claimed prompt carries the capacity skill's authority limits and never
 # grants destructive or merge authority.
 # After archiving at least one command, claim touches

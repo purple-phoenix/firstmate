@@ -15,7 +15,8 @@
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
- *   pipeline, parked, lanes, readiness, aging, recommendations, and omissions.
+ *   pipeline, parked, recurring, lanes, readiness, aging, recommendations,
+ *   and omissions.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
  * Blocked and self-clearing cards carry a wait treatment (wait.class, copy,
@@ -25,6 +26,13 @@
  * in the separate parked collection, stay out of every pipeline stage, count,
  * attention summary, and wait treatment, and render only in a collapsed
  * parking-lot section that disappears entirely when empty.
+ * Items whose active hold is a date-gated schedule (kind=future with a future
+ * --until date) are scheduled cadence work, not stuck work: they land in the
+ * separate recurring collection with next_run and last-completed-run linkage,
+ * stay out of the blocked band and counts the same way, and render in one calm
+ * Recurring section that disappears entirely when empty. A hold whose --until
+ * date has arrived is inactive (tasks-axi semantics), so the item re-enters
+ * normal readiness classification.
  * Run --help for the exact inherited snapshot bounds, environment-probe budget,
  * bottleneck order, CAP-01 through CAP-10 meanings, wait-progress honesty
  * rules, and output replacement rules.
@@ -92,7 +100,7 @@ The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
-  parked, lanes, readiness, aging, recommendations, omissions. Pipeline owns queued,
+  parked, recurring, lanes, readiness, aging, recommendations, omissions. Pipeline owns queued,
   ready, building, validating_fixing, pr_ci_approval, blocked, and recently_landed
   arrays. Each recommendation owns id, classification, priority, evidence,
   expected_throughput_consequence, safety_authority_boundary,
@@ -108,6 +116,29 @@ PARKING LOT
   renders parked items only inside one collapsed low-key parking-lot section at
   the bottom, and renders no parking-lot section at all when nothing is parked.
   Every other hold kind (captain, external, load, future) keeps its treatment.
+
+RECURRING
+  The backlog schema has no first-class recurrence marker, so the honest v1
+  recurrence key is a date-gated schedule hold: an active structured hold with
+  kind=future and an explicit --until date still in the future
+  ("(hold-kind: future) (hold-until: YYYY-MM-DD)"). Such an item is scheduled
+  cadence work - healthy and on schedule, not stuck. It is classified into the
+  top-level recurring array instead of the blocked stage and is excluded from
+  blocked counts, waiting measures, attention summaries, aging, and wait
+  treatments. Each entry carries next_run (the gate date), scheduled_since,
+  and last_run: the most recent same-home Done record whose id shares the
+  item's cadence stem (the id with one trailing counter or date token
+  stripped, e.g. research-w4 matches done research-w3), with its completion
+  date, an opaque ref, and whether a delivered artifact is on the books.
+  Schedule hold reasons are withheld from this privacy-bounded artifact like
+  every other hold reason. The dashboard renders one calm bottom Recurring
+  section with a "next: <date>" chip per item, renders no section at all when
+  nothing recurs, and leaves enrichment plus the RUN NOW control to the
+  authenticated dashboard service. Any hold whose --until date has arrived is
+  inactive (tasks-axi date-gate semantics), so the item re-enters normal
+  readiness classification instead of staying recurring or blocked, and a
+  future-dated hold that also has an explicit dependency keeps the blocked
+  treatment so its blocker chain stays visible.
 
 BOUNDS AND PROBES
   The canonical fm-fleet-snapshot.v1 producer owns snapshot completion; this wrapper
@@ -525,6 +556,11 @@ function definitionGaps(record, crossHome = false) {
 }
 
 function futureTimeGate(record, now) {
+  const until = isoDate(record.hold_until);
+  if (until && record.hold_reason != null) {
+    const holdGate = Date.parse(`${until}T00:00:00Z`);
+    if (Number.isFinite(holdGate) && holdGate > now) return until;
+  }
   const text = `${record.title || ""} ${record.blocked_reason || ""} ${record.body_excerpt || ""}`;
   const match = text.match(/\b(?:after|until|not before)\s+(20\d{2}-\d{2}-\d{2})/i);
   if (!match) return null;
@@ -607,6 +643,79 @@ function parkedCard(record, owner) {
   };
 }
 
+// Scheduled cadence work (an active hold with kind=future and a --until date
+// still in the future) is healthy, not stuck: it waits for its next run date
+// in the recurring collection, never a pipeline stage, count, attention
+// summary, aging signal, or wait treatment, and its hold reason stays out of
+// this privacy-bounded artifact. The backlog schema has no first-class
+// recurrence marker, so the date-gated future hold is the honest v1
+// recurrence key; see --help RECURRING.
+function isoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "")) ? value : null;
+}
+
+// tasks-axi date-gate semantics: a hold with --until is inactive on and after
+// that date, whatever its kind.
+function holdExpired(record, now) {
+  const until = isoDate(record.hold_until);
+  if (!until) return false;
+  const gate = Date.parse(`${until}T00:00:00Z`);
+  return Number.isFinite(gate) && gate <= now;
+}
+
+function activeHold(record, now) {
+  return record.hold_reason != null && !holdExpired(record, now);
+}
+
+function recurringNextRun(record, now) {
+  if (record.blocked_by || !activeHold(record, now) || record.hold_kind !== "future") return null;
+  const until = isoDate(record.hold_until);
+  if (!until) return null;
+  const gate = Date.parse(`${until}T00:00:00Z`);
+  return Number.isFinite(gate) && gate > now ? until : null;
+}
+
+// Deterministic cadence stem: the id with one trailing date or counter token
+// stripped ("research-w4" and "research-w3" share "research"), so successive
+// runs of one recurring item match while unrelated ids do not.
+function recurringStem(id) {
+  const text = String(id || "");
+  const stem = text
+    .replace(/[-_.]\d{4}-\d{2}-\d{2}$/, "")
+    .replace(/[-_.][a-z]{0,4}\d+$/i, "");
+  return stem !== text && stem.length >= 3 ? stem : null;
+}
+
+function lastCompletedRun(record, owner, doneRecords) {
+  const stem = recurringStem(record.id);
+  if (!stem) return null;
+  const latest = doneRecords
+    .filter((done) => done.id !== record.id && recurringStem(done.id) === stem)
+    .sort((a, b) => `${a.completion?.date || ""}/${a.id}`.localeCompare(`${b.completion?.date || ""}/${b.id}`))
+    .at(-1);
+  if (!latest) return null;
+  return {
+    ref: itemRef(owner, latest.id),
+    date: isoDate(latest.completion?.date),
+    artifact_recorded: Boolean(latest.pr_url || latest.report_path || (latest.links || []).length > 0),
+  };
+}
+
+function recurringCard(record, owner, nextRun, lastRun) {
+  return {
+    id: itemRef(owner, record.id || "unstructured"),
+    owner: ownerRef(owner),
+    repo: projectRef(record.repo),
+    kind: ["ship", "scout"].includes(record.kind) ? record.kind : null,
+    delivery_mode: safeDeliveryMode(record.delivery_mode),
+    next_run: nextRun,
+    scheduled_since: isoDate(record.since),
+    last_run: lastRun,
+    reason: "Scheduled cadence work - healthy and waiting for its next run",
+    provenance: owner === "main" ? "main structured backlog" : "validated structured-home backlog",
+  };
+}
+
 // Wait treatment: root kinds that clear with no actor at all, the captain
 // copy per measurable wait kind, and the observation plumbing that feeds
 // bin/fm-wait-progress.mjs. Only validation and CI are history-measurable;
@@ -679,7 +788,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   };
   const pipeline = Object.fromEntries(STAGES.map((stage) => [stage, []]));
   const parked = [];
+  const recurring = [];
+  const recurringIds = new Set();
   const mainRecords = snapshot.backlog?.records || [];
+  const mainDone = mainRecords.filter((record) => record.state === "done" && record.structured);
   const taskById = new Map((snapshot.tasks || []).map((task) => [task.id, task]));
   const activeProjects = new Set();
   const decisions = [];
@@ -964,7 +1076,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         }
         continue;
       }
-      if (blockerRecord?.hold_reason) {
+      if (blockerRecord && activeHold(blockerRecord, now)) {
         addRoot(`hold:${blockerId}`, nextSegments, "held by a structured hold", "Nothing yet - firstmate watches this hold and escalates if your input is needed.", "hold");
         continue;
       }
@@ -1040,11 +1152,18 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       continue;
     }
     if (isSuperseded(record)) continue;
-    if (record.hold_kind === "parked") {
+    const holdIsActive = activeHold(record, now);
+    if (holdIsActive && record.hold_kind === "parked") {
       parked.push(parkedCard(record, "main"));
       continue;
     }
-    if (record.kind === "captain" && record.hold_kind === "captain") {
+    const nextRun = recurringNextRun(record, now);
+    if (nextRun) {
+      recurring.push(recurringCard(record, "main", nextRun, lastCompletedRun(record, "main", mainDone)));
+      recurringIds.add(`main/${record.id}`);
+      continue;
+    }
+    if (holdIsActive && record.kind === "captain" && record.hold_kind === "captain") {
       const decision = backlogDecisionIdentity(record);
       const holdRef = decisionRef("main", decision.origin, decision.key);
       decisions.push({
@@ -1061,7 +1180,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       }));
       continue;
     }
-    if (record.blocked_by || record.hold_reason) {
+    if (record.blocked_by || holdIsActive) {
       const reason = record.blocked_by
         ? `Blocked by ${blockedByIds(record).map((id) => itemRef("main", id)).join(", ")}`
         : "Structured hold";
@@ -1146,12 +1265,16 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
           open_decisions: (mate.decisions_open || []).filter((decision) => decision.id === child.id),
         },
       }));
-    const parkedQueuedIds = new Set((mate.queued || []).filter((record) => record.hold_kind === "parked").map((record) => record.id));
+    const parkedQueuedIds = new Set((mate.queued || []).filter((record) => activeHold(record, now) && record.hold_kind === "parked").map((record) => record.id));
+    const recurringQueuedIds = new Set((mate.queued || []).filter((record) => recurringNextRun(record, now)).map((record) => record.id));
+    const inactiveHoldQueuedIds = new Set((mate.queued || []).filter((record) => !record.blocked_by && record.hold_reason != null && holdExpired(record, now)).map((record) => record.id));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
-      // A parked queued record can also project into holds through its
-      // dependency edge; the parked classification below wins.
-      if (parkedQueuedIds.has(hold.id)) continue;
+      // A parked, recurring, or expired-hold queued record can also project
+      // into holds through its hold or dependency edge; the queued-loop
+      // classification below wins for those (an expired hold is inactive and
+      // re-enters normal readiness classification).
+      if (parkedQueuedIds.has(hold.id) || recurringQueuedIds.has(hold.id) || inactiveHoldQueuedIds.has(hold.id)) continue;
       heldIds.add(hold.id);
       if (hold.source === "child-state") {
         if (requiresGithubAuth(hold.delivery_mode)) secondmateGithubBoundDelivery.add(mate.id);
@@ -1210,12 +1333,19 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
     for (const record of mate.queued || []) {
       if (isSuperseded(record) || heldIds.has(record.id)) continue;
-      if (record.hold_kind === "parked") {
+      const holdIsActive = activeHold(record, now);
+      if (holdIsActive && record.hold_kind === "parked") {
         parked.push(parkedCard(record, mate.id));
         continue;
       }
+      const nextRun = recurringNextRun(record, now);
+      if (nextRun) {
+        recurring.push(recurringCard(record, mate.id, nextRun, lastCompletedRun(record, mate.id, mate.landed || [])));
+        recurringIds.add(`${mate.id}/${record.id}`);
+        continue;
+      }
       secondmateQueuedConsidered += 1;
-      if (record.kind === "captain" && record.hold_kind === "captain") {
+      if (holdIsActive && record.kind === "captain" && record.hold_kind === "captain") {
         const identity = backlogDecisionIdentity(record);
         const ref = decisionRef(mate.id, identity.origin, identity.key);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
@@ -1226,7 +1356,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         }));
         continue;
       }
-      if (record.blocked_by || record.hold_reason) {
+      if (record.blocked_by || holdIsActive) {
         const reason = record.blocked_by
           ? `Blocked by ${blockedByIds(record).map((id) => itemRef(mate.id, id)).join(", ")}`
           : "Structured hold";
@@ -1549,6 +1679,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   }
 
   parked.sort((a, b) => `${a.owner}/${a.id}`.localeCompare(`${b.owner}/${b.id}`));
+  recurring.sort((a, b) => (a.next_run || "").localeCompare(b.next_run || "") || `${a.owner}/${a.id}`.localeCompare(`${b.owner}/${b.id}`));
   recommendations.sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   const primary = recommendations[0] || {
     id: null,
@@ -1586,6 +1717,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     primary_bottleneck: { id: primary.id, classification: primary.classification, evidence: primary.evidence },
     pipeline,
     parked,
+    recurring,
     lanes: {
       ephemeral_workers: {
         active: (snapshot.tasks || []).filter((task) => task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)).length,
@@ -1597,7 +1729,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       persistent_secondmates: mates,
     },
     readiness: {
-      queued_considered: queue.filter((record) => !isSuperseded(record) && record.hold_kind !== "parked").length + secondmateQueuedConsidered,
+      queued_considered: queue.filter((record) => !isSuperseded(record) && !(activeHold(record, now) && record.hold_kind === "parked") && !recurringIds.has(`main/${record.id}`)).length + secondmateQueuedConsidered,
       grounded_candidates: readinessComplete ? candidates.length : 0,
       independent_start_count: executableReady.length,
       available: readinessComplete,
@@ -1612,6 +1744,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       "Natural-language secondmate scopes and project names are withheld and not machine-guessed against main-home work.",
       "Backlog bodies are used only for bounded definition checks and are never rendered.",
       "Park reasons are withheld like every other hold reason; the authenticated dashboard service enriches them.",
+      "Recurring schedule reasons are withheld like every other hold reason; the authenticated dashboard service enriches them and owns the run-now control.",
       "Status tails, terminal chat, scout report contents, and visual artifacts are not consulted.",
       ...(recentLandingsComplete ? [] : [recentLandingsProvenance]),
     ],
@@ -1853,6 +1986,28 @@ function renderHtml(model, captainActions) {
   const gaps = model.readiness.definition_gaps.map((row) => `<li><strong>${h(`${row.owner}/${row.id}`)}</strong><span>${h(row.gaps.join("; "))}</span></li>`).join("") || `<li><strong>None</strong><span>No definition gaps detected in the bounded queue.</span></li>`;
   const landed = model.pipeline.recently_landed.map((card) => `<li><strong>${h(`${card.owner}/${card.id}`)}</strong><span>${h(card.reason)}</span>${card.artifact ? artifact(card.artifact) : ""}</li>`).join("") || `<li><strong>None</strong><span>No recent completions are in the bounded baseline.</span></li>`;
 
+  // Recurring: scheduled cadence work rendered once in one calm section -
+  // healthy and on schedule, never in the blocked band - and absent entirely
+  // when nothing recurs. Rows stay identity-opaque here; the authenticated
+  // service enriches them and adds the run-now control. data-recurring-ref is
+  // the service's validation anchor, data-next-run carries the gate date, and
+  // data-last-run-ref points at the prior completed run's record.
+  const monthDay = (date) => {
+    const parsed = new Date(`${date}T00:00:00Z`);
+    return Number.isNaN(parsed.getTime())
+      ? date
+      : `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][parsed.getUTCMonth()]} ${parsed.getUTCDate()}`;
+  };
+  const recurringRows = model.recurring.map((card) => `<li class="mrow" data-recurring-ref="${h(card.id)}" data-next-run="${h(card.next_run)}"${card.last_run ? ` data-last-run-ref="${h(card.last_run.ref)}"` : ""}>
+    <span class="mid"><span class="item-id">${h(card.id)}</span><span class="mowner">${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span></span>
+    <span class="mreason"><span class="recurring-copy">${h(card.reason)}.</span>${card.last_run ? `<small class="chain">Last run ${h(card.last_run.ref)}${card.last_run.date ? ` completed ${h(card.last_run.date)}` : " completed"}${card.last_run.artifact_recorded ? "; its delivered artifact is on the books" : ""}.</small>` : ""}</span>
+    <span class="mmeta"><span class="recurring-next">next: ${h(monthDay(card.next_run))}</span>${card.scheduled_since ? `<small class="recurring-since">on the books since ${h(card.scheduled_since)}</small>` : ""}</span>
+  </li>`).join("");
+  const recurringBand = model.recurring.length ? `<section class="band band-quiet band-recurring" aria-labelledby="recurring-title"><div class="wrap">
+      <h2 class="qhead" id="recurring-title">Recurring (${h(model.recurring.length)}) · scheduled cadence work, healthy and on schedule</h2>
+      <ul class="mlist">${recurringRows}</ul>
+    </div></section>` : "";
+
   // Parking lot: captain-parked work rendered once, low-key, collapsed by
   // default, and entirely absent when nothing is parked. Rows stay
   // identity-opaque here; the authenticated service enriches them and adds the
@@ -1980,6 +2135,10 @@ function renderHtml(model, captainActions) {
     .clean-list li>*{min-width:0}.clean-list span{color:var(--ink2)}
     .artifact,.path{font:500 .76rem ui-monospace,SFMono-Regular,Menlo,monospace;max-width:100%;overflow-wrap:anywhere}
     .empty{color:var(--muted);font-style:italic;border-top:1px solid var(--hair);padding-top:.45rem;margin-top:.4rem}
+    .band-recurring{padding-bottom:1.4rem}
+    .recurring-copy{color:var(--ink2)}
+    .recurring-next{display:inline-block;color:var(--blue);font:700 .78rem ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;border:1px solid color-mix(in srgb,var(--blue) 45%,var(--hair));padding:.1rem .5rem;white-space:nowrap}
+    .recurring-since{display:block;color:var(--muted);font-size:.72rem;margin-top:.25rem}
     .band-parking{padding-top:0}
     .parking summary{cursor:pointer;color:var(--muted);font-size:.74rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:.5rem 0;border-top:1px solid var(--hair)}
     .parking summary::marker{color:var(--muted)}
@@ -2035,6 +2194,7 @@ function renderHtml(model, captainActions) {
         <div><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
       </div>
     </div></section>
+    ${recurringBand}
     ${parkingLot}
   </main>
   <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>

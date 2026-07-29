@@ -12,13 +12,14 @@
  * The service never executes fleet commands, calls only the read-mostly capacity
  * producer and quota probe, and mutates only state/dash-inbox/ plus the
  * producer-owned dashboard and private refs sidecar. A clicked
- * CAP action, decision answer, idea verdict, or parking-lot unpark becomes one
- * durable fm-dash-command.v1 record in state/dash-inbox/;
+ * CAP action, decision answer, idea verdict, parking-lot unpark, or recurring
+ * run-now becomes one durable fm-dash-command.v1 record in state/dash-inbox/;
  * the running firstmate consumes it through its registered fm-dash watcher check
  * (bin/fm-dash-inbox.sh claim). Delivery therefore rides the sanctioned wake
  * path and inherits its cadence rather than any direct control channel; an
  * unpark click only asks firstmate to lift the parked hold through the normal
- * backlog lifecycle.
+ * backlog lifecycle, and a run-now click only asks firstmate to run the
+ * scheduled recurring item early through the same normal lifecycle.
  *
  * Acknowledgeable actions and verdicts acknowledge instantly and durably: the
  * served page renders their state straight from the command channel (pending
@@ -123,12 +124,13 @@ Idea suggestions stay additive and never acknowledge persistently. Routes:
   GET  /              dashboard with the interactive layer injected
   GET  /api/pending   pending command count
   POST /api/refresh   rerun bin/fm-capacity.mjs server-side (serialized)
-  POST /api/dispatch  validated CAP action, decision answer, idea verdict, or
-                      parking-lot unpark request
+  POST /api/dispatch  validated CAP action, decision answer, idea verdict,
+                      parking-lot unpark request, or recurring run-now request
 All routes except /healthz require a Tailscale-User-Login header matching a
 configured captain login and fail closed otherwise. Dispatch refuses IDs not in
-both the served dashboard and the fixed one-click allowlist, and refuses an
-unpark for any item the served dashboard does not currently list as parked.
+both the served dashboard and the fixed one-click allowlist, refuses an
+unpark for any item the served dashboard does not currently list as parked, and
+refuses a run-now for any item it does not currently list as recurring.
 Browser POSTs must also be same-origin.
 `);
   process.exit(exitCode);
@@ -391,6 +393,65 @@ function parkedEntries(dashboardHtml, refsFile) {
       title: parsed?.title || id,
       reason: parsed?.fields["hold"] || null,
       since: parsed?.fields["since"] || null,
+    });
+  }
+  return entries;
+}
+
+// Recurring enrichment for the authenticated captain: resolve each
+// data-recurring-ref the producer rendered through the current-generation refs
+// sidecar, then read the owning home's backlog for the real title, schedule
+// reason, and next-run date, plus the prior completed run's title, completion
+// date, and first recorded artifact link. Reads only; the offline artifact
+// itself stays opaque.
+function recurringEntries(dashboardHtml, refsFile) {
+  const entries = [];
+  if (!refsFile) return entries;
+  const backlogCache = new Map();
+  const backlogFor = (owner) => {
+    if (!backlogCache.has(owner)) {
+      const root = decisionHome(owner);
+      backlogCache.set(owner, root ? parseBacklog(path.join(root, "data", "backlog.md")) : []);
+    }
+    return backlogCache.get(owner);
+  };
+  const resolveItem = (ref) => {
+    const entry = refsFile.refs[ref];
+    if (!entry || entry.kind !== "item") return null;
+    const separator = entry.value.indexOf("/");
+    return { owner: entry.value.slice(0, separator), id: entry.value.slice(separator + 1) };
+  };
+  const rowPattern = /data-recurring-ref="(item-\d{2,})" data-next-run="(\d{4}-\d{2}-\d{2})"(?: data-last-run-ref="(item-\d{2,})")?/g;
+  for (const match of dashboardHtml.matchAll(rowPattern)) {
+    const [, ref, nextRun, lastRef] = match;
+    const item = resolveItem(ref);
+    if (!item) continue;
+    const row = backlogFor(item.owner).find((entry) => entry.id === item.id) || null;
+    const parsed = row ? titleAnnotations(row.title) : null;
+    let lastRun = null;
+    const lastItem = lastRef ? resolveItem(lastRef) : null;
+    if (lastItem) {
+      const doneRow = backlogFor(lastItem.owner).find((entry) => entry.id === lastItem.id) || null;
+      const doneParsed = doneRow ? titleAnnotations(doneRow.title) : null;
+      const link = doneRow
+        ? (`${doneRow.title} ${doneRow.body.join(" ")}`.match(/https:\/\/[^\s"'`<>)\]]+/) || [null])[0]
+        : null;
+      lastRun = {
+        id: lastItem.id,
+        title: (doneParsed ? doneParsed.title.replace(/https?:\/\/[^\s]+/g, "").trim() : "") || lastItem.id,
+        date: doneParsed?.fields["merged"] || doneParsed?.fields["done"] || null,
+        link,
+      };
+    }
+    entries.push({
+      ref,
+      id: item.id,
+      owner: item.owner,
+      title: parsed?.title || item.id,
+      reason: parsed?.fields["hold"] || null,
+      next: nextRun,
+      since: parsed?.fields["since"] || null,
+      last_run: lastRun,
     });
   }
   return entries;
@@ -757,6 +818,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     refs: extras?.refs || {},
     ideas: extras?.ideas || [],
     parked: extras?.parked || [],
+    recurring: extras?.recurring || [],
     usage: extras?.usage || { status: "unavailable", providers: [] },
     degraded: extras?.degraded === true,
     acks: extras?.acks || {},
@@ -796,7 +858,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-meter span{display:block;height:100%;background:var(--blue)}
   .fmdash-reset{font-size:.72rem;color:var(--muted);margin-top:.25rem}
   .fmdash-custom{width:100%;margin-top:.7rem;padding:.6rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair)}
-  .fmdash-unpark{margin-left:.8rem;padding:.3rem .7rem;font-size:.74rem}
+  .fmdash-unpark,.fmdash-runnow{margin-left:.8rem;padding:.3rem .7rem;font-size:.74rem}
   .fmdash-ack{display:inline-block;border:1px solid var(--good);color:var(--good);font-weight:700;font-size:.76rem;padding:.35rem .7rem;align-self:center;grid-column:2}
   .fmdash-ack-chip{margin-left:.6rem;padding:.15rem .5rem;font-size:.7rem;grid-column:auto}
   @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
@@ -1308,6 +1370,53 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       });
       (row.querySelector(".mreason") || row).appendChild(unpark);
     });
+    // Recurring: enrich each scheduled row with the real title, schedule
+    // reason, and last completed run (with its recorded artifact link), and
+    // add the run-now request control. Run now only queues a command record;
+    // firstmate re-resolves and dispatches through the normal lifecycle.
+    cfg.recurring.forEach((info) => {
+      const row = document.querySelector('[data-recurring-ref="' + info.ref + '"]');
+      if (!row) return;
+      const copy = row.querySelector(".recurring-copy");
+      if (copy) {
+        const reason = info.reason ? "Scheduled: " + info.reason : copy.textContent;
+        copy.textContent = (info.title && info.title !== info.id ? info.title + " - " : "") + reason;
+      }
+      const chain = row.querySelector(".chain");
+      if (chain && info.last_run) {
+        chain.textContent = "Last run " + (info.last_run.title || info.last_run.id)
+          + (info.last_run.date ? " completed " + info.last_run.date : "") + ". ";
+        if (info.last_run.link) {
+          const link = document.createElement("a");
+          link.href = info.last_run.link;
+          link.textContent = info.last_run.link;
+          chain.appendChild(link);
+        }
+      }
+      if (cfg.readOnly) return;
+      const runNow = document.createElement("button");
+      runNow.type = "button";
+      runNow.className = "fmdash-send fmdash-runnow";
+      runNow.textContent = "Run now";
+      runNow.setAttribute("aria-label", "Run " + (info.title || info.id) + " now");
+      runNow.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        runNow.disabled = true;
+        runNow.textContent = "Sending…";
+        try {
+          const res = await postJson({ run_now: info.ref });
+          const out = await res.json();
+          if (out.status === "queued" || out.status === "already-queued") {
+            runNow.textContent = "Run queued";
+            showPending(out.pending);
+            return;
+          }
+          runNow.textContent = "Refused";
+          runNow.disabled = false;
+        } catch { runNow.textContent = "Failed"; runNow.disabled = false; }
+      });
+      (row.querySelector(".mreason") || row).appendChild(runNow);
+    });
     if (cfg.readOnly) {
       copyButtons.forEach((copyButton) => copyButton.remove());
       return;
@@ -1429,6 +1538,7 @@ async function handle(req, res) {
       refs: refsFile ? refDisplayMap(refsFile, acks) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
       parked,
+      recurring: recurringEntries(dashboard.html, refsFile),
       usage,
       degraded,
       acks: capAcks,
@@ -1615,6 +1725,54 @@ async function handle(req, res) {
       };
       const name = enqueueCommand(record);
       log(`queued unpark ${workId} as ${name} for ${record.requested_by}`);
+      sendJson(res, 200, { status: "queued", pending: pending.length + 1 });
+      return;
+    }
+
+    // Run now: the ref must be listed as recurring by the currently served
+    // dashboard and resolve through the current-generation refs sidecar. The
+    // record only asks firstmate to run the scheduled item early through the
+    // normal lifecycle; the service never edits the backlog and never
+    // dispatches anything itself.
+    if (typeof body.run_now === "string") {
+      const ref = body.run_now;
+      if (!/^item-\d{2,}$/.test(ref)) {
+        sendJson(res, 400, { status: "refused", error: "run-now accepts a currently listed recurring item reference only" });
+        return;
+      }
+      const currentDashboard = readDashboard();
+      if (!currentDashboard || !currentDashboard.html.includes(`data-recurring-ref="${ref}"`)) {
+        sendJson(res, 409, { status: "refused", error: `${ref} is not in the current dashboard's recurring section; refresh first` });
+        return;
+      }
+      const currentRefs = readRefs(currentDashboard.generated);
+      const entry = currentRefs?.refs?.[ref];
+      if (!entry || entry.kind !== "item") {
+        sendJson(res, 409, { status: "refused", error: `${ref} cannot be resolved against the current dashboard generation; refresh first` });
+        return;
+      }
+      const separator = entry.value.indexOf("/");
+      const workHome = entry.value.slice(0, separator);
+      const workId = entry.value.slice(separator + 1);
+      const pending = pendingRecords();
+      if (pending.some((record) => record.kind === "run-now" && record.work_identity === entry.value)) {
+        sendJson(res, 200, { status: "already-queued", pending: pending.length });
+        return;
+      }
+      const record = {
+        schema: "fm-dash-command.v1",
+        kind: "run-now",
+        id: ref,
+        work_id: workId,
+        work_home: workHome,
+        work_identity: entry.value,
+        requested_by: requesterLogin(req),
+        requested_at: new Date().toISOString(),
+        dashboard_generated: currentDashboard.generated,
+        prompt: `Captain clicked RUN NOW for scheduled recurring work ${workId}${workHome === "main" ? "" : ` (owned by domain supervisor ${workHome})`}: lift its schedule hold through the normal backlog lifecycle, then dispatch it through normal re-evaluation, project resolution, and authority checks. This request asks for one early run only; it grants no authority beyond normal dispatch checks.`,
+      };
+      const name = enqueueCommand(record);
+      log(`queued run-now ${workId} as ${name} for ${record.requested_by}`);
       sendJson(res, 200, { status: "queued", pending: pending.length + 1 });
       return;
     }

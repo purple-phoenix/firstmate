@@ -1371,9 +1371,75 @@ test_parked_items_rest_in_the_parking_lot() {
   pass "captain-parked work rests in the collapsed parking lot, out of blocked bands, counts, and reasons stay withheld"
 }
 
+test_recurring_items_get_their_own_section() {
+  local home="$TMP_ROOT/recurring-home" mate_home="$TMP_ROOT/recurring-mate" snapshot="$TMP_ROOT/recurring-snapshot.json" environment="$TMP_ROOT/recurring-environment.json" output="$TMP_ROOT/recurring-home/data/recurring.html" json mate_json
+  make_fixture "$home" "$snapshot" "$environment"
+  mkdir -p "$mate_home/data" "$mate_home/state" "$mate_home/config" "$mate_home/projects"
+  printf '%s\n' '- delta [direct-PR] - delta project (added 2026-07-17)' > "$mate_home/data/projects.md"
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] design-ready - Refresh the delta design tokens (repo: delta) (kind: ship)' \
+    '  Acceptance criteria: token snapshots pass.' \
+    '- [ ] mate-research-r5 - Weekly delta research (repo: delta) (kind: scout) (since 2026-07-10) (hold: Mate cadence reason stays private) (hold-kind: future) (hold-until: 2026-08-04)' \
+    '  Acceptance criteria: report is filed.' \
+    '## Done' \
+    '- [x] mate-research-r4 - Weekly delta research data/mate-research-r4/report.md (done 2026-07-11)' > "$mate_home/data/backlog.md"
+  mate_json=$(FM_HOME="$mate_home" FM_SNAPSHOT_NOW=2026-07-17T16:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate recurring summary fixture failed"
+  printf '%s' "$mate_json" | jq -e '
+    .counts.queued == 2
+    and (.queued | any(.id == "mate-research-r5" and .hold_kind == "future" and .hold_until == "2026-08-04"))
+    and (.landed | any(.id == "mate-research-r4" and .report_path != null))
+  ' >/dev/null || fail "production secondmate projection omitted the recurring date gate: $mate_json"
+  jq --argjson mate "$mate_json" '
+    .backlog.records += [
+      {"order":10,"state":"queued","structured":true,"id":"sigma-research-w4","title":"Weekly sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","since":"2026-07-12","hold_kind":"future","hold_reason":"Weekly cadence reason stays private","hold_until":"2026-08-04","body_excerpt":"Acceptance criteria: report lands on the books."},
+      {"order":11,"state":"queued","structured":true,"id":"expired-cadence-w2","title":"Run the rho refresh on its due date","repo":"rho","project_resolved":true,"kind":"ship","since":"2026-07-01","hold_kind":"future","hold_reason":"cadence gate already passed","hold_until":"2026-07-01","body_excerpt":"Acceptance criteria: refresh checks pass."},
+      {"order":12,"state":"done","structured":true,"id":"sigma-research-w3","title":"Weekly sigma market research","repo":"sigma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/example/sigma/pull/7","completion":{"verb":"merged","date":"2026-07-14"}}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) = $mate.queued
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = $mate.counts.queued
+    | (.secondmate_current.records[] | select(.id == "design") | .landed) = $mate.landed
+  ' "$snapshot" > "$snapshot.tmp" && mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") || fail "recurring fixture run failed"
+  printf '%s' "$json" | jq -e '
+    (.recurring | length) == 2
+    and (.recurring | all(.next_run == "2026-08-04"))
+    and (.recurring | all(.reason == "Scheduled cadence work - healthy and waiting for its next run"))
+    and (.recurring | all(.scheduled_since != null))
+    and ([.recurring[].id] as $r | [.pipeline[][].id] | map(select(. as $x | $r | index($x))) | length) == 0
+    and (.pipeline.blocked | length) == 3
+    and (.readiness.explicit_gates | length) == 3
+    and .measures.waiting_work == 5
+    and .readiness.queued_considered == 8
+    and ([.recurring[] | select(.owner == "main")] | length) == 1
+    and ([.recurring[] | select(.owner == "main")] | all(.last_run.date == "2026-07-14" and .last_run.artifact_recorded == true and (.last_run.ref | startswith("item-"))))
+    and ([.recurring[] | select(.owner != "main")] | length) == 1
+    and ([.recurring[] | select(.owner != "main")] | all(.last_run.artifact_recorded == true))
+    and ([.pipeline.ready[].id] | length) == 3
+    and (.omissions | any(contains("Recurring schedule reasons are withheld")))
+  ' >/dev/null || fail "date-gated cadence work was not classified recurring, out of blocked bands and counts: $json"
+  case "$json" in *sigma*|*"stays private"*) fail "recurring project, title, or schedule reason leaked into the model" ;; esac
+  assert_grep 'Recurring (2) · scheduled cadence work, healthy and on schedule' "$output" "dashboard lacks the calm recurring section"
+  assert_grep 'next: Aug 4' "$output" "recurring row lacks its next-run date"
+  [ "$(grep -o 'data-recurring-ref=' "$output" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "recurring items do not render exactly once each in the recurring section"
+  assert_grep 'data-last-run-ref=' "$output" "recurring row lacks its last completed run anchor"
+  assert_no_grep 'Weekly sigma market research' "$output" "recurring title leaked into the offline dashboard"
+  assert_no_grep 'stays private' "$output" "recurring schedule reason leaked into the offline dashboard"
+  assert_no_grep 'github.com/example' "$output" "last-run artifact URL leaked into the offline dashboard"
+  local empty_home="$TMP_ROOT/recurring-empty" empty_snapshot="$TMP_ROOT/recurring-empty-snapshot.json" empty_environment="$TMP_ROOT/recurring-empty-environment.json" empty_output="$TMP_ROOT/recurring-empty/data/empty.html"
+  make_fixture "$empty_home" "$empty_snapshot" "$empty_environment"
+  "$CAPACITY" --snapshot "$empty_snapshot" --environment "$empty_environment" --output "$empty_output" >/dev/null || fail "empty recurring run failed"
+  assert_no_grep 'Recurring (' "$empty_output" "an empty recurring section still rendered"
+  assert_no_grep 'data-recurring-ref' "$empty_output" "an empty recurring section still rendered row anchors"
+  pass "date-gated cadence work rests in the calm recurring section with next-run and last-run linkage, and an expired date gate re-enters normal readiness"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_parked_items_rest_in_the_parking_lot
+test_recurring_items_get_their_own_section
 test_cross_home_overlap_holds_supersession_and_active_count
 test_secondmate_readiness_uses_final_serialized_supply
 test_secondmate_readiness_uses_home_owned_runtime_lanes
