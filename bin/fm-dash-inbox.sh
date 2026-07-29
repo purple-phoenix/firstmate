@@ -10,6 +10,10 @@
 # handling re-surfaced CAP actions, decision answers, idea verdicts, or unpark requests.
 # Each claimed prompt carries the capacity skill's authority limits and never
 # grants destructive or merge authority.
+# After archiving at least one command, claim touches
+# state/dash-inbox/.model-stale so the dashboard service regenerates the model
+# promptly and handled clicks stop rendering as undecided; the archived records
+# themselves keep acknowledging each click on the served page in the meantime.
 #
 # Usage: fm-dash-inbox.sh [list|claim|pending-count]
 #   list           print pending commands without consuming them
@@ -26,7 +30,7 @@ ARCHIVE="$INBOX/archive"
 ARCHIVE_KEEP=50
 
 usage() {
-  sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | sed -n '2,15p'
+  sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | sed -n '2,21p'
   exit "${1:-0}"
 }
 
@@ -103,7 +107,11 @@ case "${1:-list}" in
       print_record "$f"
       delivered=$((delivered + 1))
       if mv -n -- "$f" "$dest" 2>/dev/null && [ ! -e "$f" ] && [ -e "$dest" ]; then
-        archived=$((archived + 1))
+        if touch "$dest"; then
+          archived=$((archived + 1))
+        else
+          mv -n -- "$dest" "$f" 2>/dev/null || true
+        fi
       fi
     done <<EOF
 $files
@@ -111,6 +119,10 @@ EOF
     if [ "$delivered" -eq 0 ]; then
       echo "no pending dashboard commands"
       exit 0
+    fi
+    if [ "$archived" -gt 0 ]; then
+      touch "$INBOX/.model-stale"
+      chmod 600 "$INBOX/.model-stale" 2>/dev/null || true
     fi
     printf 'delivered: %s captain dashboard command(s)\n' "$delivered"
     printf 'archived: %s captain dashboard command(s)\n' "$archived"

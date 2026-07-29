@@ -581,7 +581,8 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"mate-choice","key":"mate-choice","verb":"captain-hold","summary":"Sensitive choice","source":"backlog"}
     ]
     | .secondmate_current.records[0].holds = [
-      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"}
+      {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"},
+      {"id":"mate-pr-held","title":"Wait for pull request approval","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-21","state":"paused","reason":"PR awaiting merge approval","pr_present":true,"source":"child-state"}
     ]
     | .secondmate_current.records[0].queued += [
       {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"},
@@ -590,17 +591,19 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
       {"id":"after-mate-held","title":"Continue after held work","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"mate-held","body_excerpt":"Acceptance criteria: held work clears."}
     ]
     | .secondmate_current.records[0].decisions_open[0].id = "mate-held"
-    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":1,"queued":5}
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":2,"queued":5}
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 9
-    and .measures.open_captain_actions == 4
+    (.pipeline.blocked | length) == 10
+    and .measures.open_captain_actions == 5
     and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
-    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 5
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 6
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .what_you_can_do] | all(type == "string" and length > 0))
+    and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true and .what_you_can_do == "Review and merge its open pull request - this wait is on you, not an automatic process.")] | length) == 1
+    and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true) | tostring] | all(contains("http") | not))
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .waits_on // [] | join(" ")] | map(select(contains("worker question"))) | length) == 2
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
   [ "$(grep -o 'class="verb verb-decide"' "$output" | wc -l | tr -d ' ')" = 4 ] ||
@@ -1111,11 +1114,19 @@ wp.observeWaits(history, new Map(), 2000, new Set(["main"]));
 assert.deepEqual(history.active["design/d:validation"], { kind: "validation", first_observed: 1000, last_observed: 1600 });
 assert.deepEqual(history.durations.validation, [600]);
 for (let index = 0; index < 30; index += 1) {
-  wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5000 + index * 300);
-  wp.observeWaits(history, new Map([["main/c:paused", "paused"]]), 5100 + index * 300);
+  wp.observeWaits(history, new Map([["main/c:ci", "ci"]]), 5000 + index * 300);
+  wp.observeWaits(history, new Map([["main/c:ci", "ci"]]), 5100 + index * 300);
   wp.observeWaits(history, new Map(), 5200 + index * 300);
 }
-assert.equal(history.durations.paused.length, wp.WAIT_HISTORY_LIMIT);
+assert.equal(history.durations.ci.length, wp.WAIT_HISTORY_LIMIT);
+// A declared external delay has no shared duration model: paused waits are
+// tracked for elapsed time but their durations are never recorded, and a
+// prior file carrying paused durations drops them on load.
+assert.equal(wp.WAIT_HISTORY_KINDS.has("paused"), false);
+wp.observeWaits(history, new Map([["main/p:paused", "paused"]]), 9000);
+wp.observeWaits(history, new Map([["main/p:paused", "paused"]]), 9600);
+wp.observeWaits(history, new Map(), 9900);
+assert.equal(history.durations.paused, undefined);
 
 // Corrupt, missing, or wrong-schema files start fresh instead of failing.
 const corrupt = path.join(path.dirname(process.argv[3]), "corrupt-history.json");
@@ -1124,6 +1135,8 @@ assert.deepEqual(wp.loadWaitHistory(corrupt).active, {});
 assert.deepEqual(wp.loadWaitHistory(path.join(path.dirname(corrupt), "absent.json")).durations, {});
 fs.writeFileSync(corrupt, JSON.stringify({ schema: "other", active: { x: { kind: "validation", first_observed: 1, last_observed: 2 } } }));
 assert.deepEqual(wp.loadWaitHistory(corrupt).active, {});
+fs.writeFileSync(corrupt, JSON.stringify({ schema: wp.WAIT_HISTORY_SCHEMA, active: {}, durations: { paused: [1200, 1800], validation: [600] } }));
+assert.deepEqual(wp.loadWaitHistory(corrupt).durations, { validation: [600] });
 process.stdout.write("estimator-unit-ok\n");
 EOF
   node "$unit" "$ROOT/bin/fm-wait-progress.mjs" "$unit" | grep -q 'estimator-unit-ok' ||
@@ -1199,6 +1212,62 @@ test_wait_classes_render_distinct_treatments() {
     *'% done'*) fail "a wait with no recorded history fabricated a percentage" ;;
   esac
   pass "self-clearing and needs-actor waits render distinct honest treatments"
+}
+
+test_captain_gated_pauses_need_action_without_eta() {
+  local home="$TMP_ROOT/captain-gate-home" snapshot="$TMP_ROOT/captain-gate-snapshot.json" environment="$TMP_ROOT/captain-gate-environment.json" output="$TMP_ROOT/captain-gate-home/data/captain-gate.html" json html
+  make_fixture "$home" "$snapshot" "$environment"
+  # Legacy paused history must never fabricate a percent for any pause again.
+  printf '%s\n' '{"schema":"fm-capacity-wait-history.v1","active":{},"durations":{"paused":[3600,3600,3500]}}' > "$home/data/capacity-wait-history.json"
+  jq '
+    .backlog.records += [
+      {"order":10,"state":"in_flight","structured":true,"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: pipeline hardened."},
+      {"order":11,"state":"in_flight","structured":true,"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: transits prefetched."},
+      {"order":12,"state":"in_flight","structured":true,"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: window observed."}
+    ]
+    | .tasks += [
+      {"id":"pr-pause","kind":"ship","project":"mu","current_state":{"state":"paused","source":"status-fold","detail":"PR 106 awaiting captain merge decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/106"},"paths":{"report":{"present":false}},"backlog":{"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
+      {"id":"review-pause","kind":"ship","project":"nu","current_state":{"state":"paused","source":"status-fold","detail":"planned batch under captain review, holding for approvals"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
+      {"id":"ambient-pause","kind":"ship","project":"xi","current_state":{"state":"paused","source":"status-fold","detail":"upstream rate limit window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$(FM_HOME="$home" "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "captain-gate capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | any(
+      .captain_gate == true
+      and .wait.class == "needs_actor"
+      and (.wait | has("progress") | not)
+      and ((.waits_on | join(" ")) | contains("paused for your decision on its open pull request"))
+      and (.what_you_can_do | contains("Review and merge its open pull request"))))
+    and (.pipeline.blocked | any(
+      .captain_gate == true
+      and .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("paused for your review or decision"))
+      and (.what_you_can_do | contains("Review and decide in chat"))))
+    and ([.pipeline.blocked[] | select(.captain_gate == true)] | length) == 2
+    and (.pipeline.blocked | any(
+      .wait.class == "self_clearing"
+      and .wait.kind == "paused"
+      and .wait.progress.basis == "none"
+      and .wait.progress.percent == null
+      and (.wait.progress.label | contains("time unknown"))))
+    and .measures.open_captain_actions >= 3
+  ' >/dev/null || fail "captain-gated pauses are misclassified: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'class="verb verb-review"' "captain-gated pauses are missing from the needs-you band"
+  assert_contains "$html" 'Paused work is waiting on you, not an automatic process.' "captain-gate rows lack the plain-language framing"
+  assert_contains "$html" 'Review and merge its open pull request' "the PR-gated pause lacks its what-you-can-do line"
+  assert_contains "$html" 'Review and decide in chat' "the review-gated pause lacks its what-you-can-do line"
+  assert_contains "$html" 'time unknown' "the ambiguous pause does not admit its unknown duration"
+  case "$html" in
+    *'% done'*) fail "a pause fabricated a percent from unrelated past waits" ;;
+  esac
+  case "$html" in
+    *'based on past runs'*) fail "a pause borrowed an ETA from unrelated past waits" ;;
+  esac
+  pass "captain-gated pauses render as needs-your-action with no fabricated ETA"
 }
 
 test_wait_history_estimates_and_overrun() {
@@ -1326,4 +1395,5 @@ test_unknown_project_is_a_definition_gap
 test_keyless_questions_and_blocker_chains
 test_wait_estimator_honesty
 test_wait_classes_render_distinct_treatments
+test_captain_gated_pauses_need_action_without_eta
 test_wait_history_estimates_and_overrun

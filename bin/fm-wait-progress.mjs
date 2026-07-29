@@ -27,9 +27,12 @@ export const WAIT_HISTORY_SCHEMA = "fm-capacity-wait-history.v1";
 // Rolling per-kind duration window: enough completed observations for a stable
 // median without letting ancient runs dominate a project whose waits changed.
 export const WAIT_HISTORY_LIMIT = 24;
-// Only kinds whose durations repeat meaningfully are recorded; dependency and
-// chain waits vary too widely for a median to be honest.
-export const WAIT_HISTORY_KINDS = new Set(["validation", "ci", "paused"]);
+// Only measurable machine waits are recorded: their durations repeat
+// meaningfully, so a median is honest. Declared external delays ("paused"),
+// dependency, and chain waits have no shared duration model - one pause's
+// length says nothing about another's - so they are never recorded and always
+// render elapsed time with "time unknown" instead of a borrowed estimate.
+export const WAIT_HISTORY_KINDS = new Set(["validation", "ci"]);
 
 function emptyHistory() {
   return { schema: WAIT_HISTORY_SCHEMA, active: {}, durations: {} };

@@ -740,6 +740,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
               project_resolved:($work.project_resolved == true),
               since:(($work.since // null) | if . == null then null else trunc(20) end),
               state:.current_state.state,
+              pr_present:((.pr.url // "") | length > 0),
               blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],blocked_by_all:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all

@@ -126,14 +126,23 @@ WAIT TREATMENT AND PROGRESS
   clear with no actor (its own test suite or validation, CI checks, a declared
   external delay, or a future time gate), or "needs_actor", where the blocker
   chain and what-you-can-do line stay authoritative. Working validation and CI
-  cards carry the same self-clearing treatment. Self-clearing waits carry
-  plain-language copy and, where measurable, wait.progress with basis "history"
-  (elapsed vs the recorded typical duration), "deadline" (exact time-gate
-  math), or "none". Progress never fabricates precision: with no recorded
-  history it shows elapsed time and "time unknown", an exceeded estimate shows
-  "running longer than usual" instead of a frozen percentage, and history-based
-  figures are labeled as estimates from past runs. bin/fm-wait-progress.mjs
-  owns the estimator and the fm-capacity-wait-history.v1 schema of
+  cards carry the same self-clearing treatment. A declared pause whose recorded
+  evidence shows the wait is on the captain (a pause reason naming the captain
+  or addressing them directly, or an open PR on the task's record plus a
+  merge/review/approval-shaped reason) is a captain gate: it classifies as
+  needs_actor with captain_gate=true, renders in the needs-you band with a
+  what-you-can-do line, and never gets a progress bar or ETA, because a human
+  decision has no duration model. Self-clearing waits carry plain-language copy
+  and, where measurable, wait.progress with basis "history" (elapsed vs the
+  recorded typical duration), "deadline" (exact time-gate math), or "none".
+  Percent and remaining-time estimates are reserved for measurable machine
+  waits (validation and CI); an ambiguous declared external delay shows elapsed
+  time and "time unknown" rather than a figure borrowed from unrelated past
+  waits. Progress never fabricates precision: with no recorded history it shows
+  elapsed time and "time unknown", an exceeded estimate shows "running longer
+  than usual" instead of a frozen percentage, and history-based figures are
+  labeled as estimates from past runs. bin/fm-wait-progress.mjs owns the
+  estimator and the fm-capacity-wait-history.v1 schema of
   data/capacity-wait-history.json, the private (mode 0600, gitignored)
   rolling observed-duration record this producer reads and replaces on every
   run alongside the dashboard.
@@ -600,8 +609,10 @@ function parkedCard(record, owner) {
 
 // Wait treatment: root kinds that clear with no actor at all, the captain
 // copy per measurable wait kind, and the observation plumbing that feeds
-// bin/fm-wait-progress.mjs. Only validation, CI, and declared external delays
-// are history-measurable; time gates get exact deadline math instead.
+// bin/fm-wait-progress.mjs. Only validation and CI are history-measurable;
+// time gates get exact deadline math, and a declared external delay shows
+// elapsed time with "time unknown" because one pause's length says nothing
+// about another's.
 const SELF_CLEARING_ROOTS = new Set(["gate", "paused", "finish"]);
 const WAIT_COPY = {
   validation: "Waiting on its test suite and validation - resumes by itself",
@@ -611,6 +622,31 @@ const WAIT_COPY = {
 
 function waitKindFromDetail(detail) {
   return /\bci\b/i.test(detail || "") ? "ci" : "validation";
+}
+
+// A declared pause is a captain gate when its recorded evidence shows the wait
+// is on the captain, not an external process: the pause reason names the
+// captain or addresses the captain directly, or the task's own record carries
+// an open PR and the reason names a merge/review/approval-shaped gate. A
+// captain gate is needs-your-action work and never gets a progress bar or ETA -
+// there is no duration model for a human decision. An ambiguous pause with no
+// captain signal stays self-clearing with elapsed-only, time-unknown progress.
+const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|merge|order|sign-?off)\b/i;
+const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
+function captainGatedPause(task) {
+  const prUrl = typeof task.pr?.url === "string" && task.pr.url !== "" ? task.pr.url : null;
+  const prPresent = prUrl !== null || task.pr_present === true;
+  const reason = String(task.current_state?.detail ?? task.reason ?? task.doing ?? "");
+  const gated = CAPTAIN_GATE_REASON.test(reason) || (prPresent && PR_GATE_REASON.test(reason));
+  if (!gated) return null;
+  return {
+    wait: prPresent
+      ? "paused for your decision on its open pull request"
+      : "paused for your review or decision",
+    action: prPresent
+      ? "Review and merge its open pull request - this wait is on you, not an automatic process."
+      : "Review and decide in chat - this wait is on you, not an automatic process.",
+  };
 }
 
 function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wait-history.v1", active: {}, durations: {} }) {
@@ -724,6 +760,15 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
     if (contexts.length > 0) return [...new Map(contexts.map((context) => [context.key, context])).values()];
     if (state === "paused") {
+      const captainGate = captainGatedPause(task);
+      if (captainGate) {
+        return [{
+          kind: "captain_gate",
+          key: `captain-gate:${task.id}`,
+          wait: captainGate.wait,
+          action: captainGate.action,
+        }];
+      }
       return [{
         kind: "paused",
         key: `paused:${task.id}`,
@@ -825,6 +870,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         attachMeasurable(taskCard, "main", task.id, "paused");
       } else {
         taskCard.wait = { class: taskContexts.every((context) => context.self_clearing === true) ? "self_clearing" : "needs_actor" };
+        if (taskContexts.some((context) => context.kind === "captain_gate")) taskCard.captain_gate = true;
       }
     } else if (stage === "validating_fixing" && (task.current_state?.state || "") === "working") {
       attachMeasurable(taskCard, "main", task.id, waitKindFromDetail(task.current_state?.detail));
@@ -886,7 +932,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         : `blocked by ${blockerRef}, which is ${blockerRecord.state === "in_flight" ? "under way" : "queued and not started"}`;
       const nextSegments = [...segments, prefix];
       const taskContexts = blockerTask ? taskRootContexts(blockerTask, owner, true) : [];
-      const applicableContexts = taskContexts.filter((context) => ["chat", "decision", "paused", "unknown"].includes(context.kind));
+      const applicableContexts = taskContexts.filter((context) => ["chat", "decision", "paused", "captain_gate", "unknown"].includes(context.kind));
       if (applicableContexts.length > 0) {
         for (const context of applicableContexts) addRoot(context.key, nextSegments, context.wait, context.action, context.kind);
         continue;
@@ -961,9 +1007,11 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   };
 
   // Wait treatment for a chain-derived blocked card. An all-gate chain gets
-  // exact deadline math; a declared external delay on the record's own state is
-  // history-measurable; other all-self-clearing chains are classed calm without
-  // invented numbers; everything else keeps the needs-actor treatment.
+  // exact deadline math; a declared external delay on the record's own state
+  // shows elapsed-only, time-unknown progress; other all-self-clearing chains
+  // are classed calm without invented numbers; a chain rooted entirely in a
+  // captain gate marks the card as waiting on the captain; everything else
+  // keeps the needs-actor treatment.
   const attachChainWait = (card, chain, owner, record) => {
     if (chain.gate_until) {
       attachTimeGate(card, chain.gate_until, record.since || null);
@@ -978,6 +1026,9 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     card.wait = selfClearing
       ? { class: "self_clearing", kind: "dependency", copy: "Waiting on work already under way - resumes by itself", progress: null }
       : { class: "needs_actor" };
+    if (kinds.length > 0 && kinds.every((kind) => kind === "captain_gate") && blockedByIds(record).length === 0) {
+      card.captain_gate = true;
+    }
   };
 
   const queue = mainRecords.filter((record) => record.state === "queued");
@@ -1363,6 +1414,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const laneMismatch = !environment.dispatch.valid || availableLanes.length === 0 || !environment.backend.available;
   const approvalReadyCards = pipeline.pr_ci_approval.filter((card) => card.approval_ready === true);
   const captainApprovalCards = approvalReadyCards.filter((card) => card.captain_approval_required === true);
+  const captainGateCards = pipeline.blocked.filter((card) => card.captain_gate === true);
   const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
   const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
     task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
@@ -1527,7 +1579,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       independent_tasks_safe_to_start_now: executableReady.length,
       active_independent_work: activeIndependentKeys.size,
       waiting_work: pipeline.queued.length + pipeline.blocked.length + pipeline.pr_ci_approval.length,
-      open_captain_actions: decisions.length + captainApprovalCards.length,
+      open_captain_actions: decisions.length + captainApprovalCards.length + captainGateCards.length,
       recently_landed: pipeline.recently_landed.length,
       recently_landed_complete: recentLandingsComplete,
     },
@@ -1729,7 +1781,8 @@ function renderHtml(model, captainActions) {
 
   const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
   const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
-  const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold" && card.wait?.class !== "self_clearing");
+  const captainGateCards = model.pipeline.blocked.filter((card) => card.captain_gate === true);
+  const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold" && card.wait?.class !== "self_clearing" && card.captain_gate !== true);
   const selfClearingBlocked = model.pipeline.blocked.filter((card) => card.wait?.class === "self_clearing");
   const selfWaitCards = [
     ...model.pipeline.validating_fixing.filter((card) => card.wait?.class === "self_clearing"),
@@ -1738,6 +1791,7 @@ function renderHtml(model, captainActions) {
   const needsYouCount = model.measures.open_captain_actions;
   const needsYouRows = [
     ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
+    ...captainGateCards.map((card) => `<li><span class="verb verb-review">Review</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Paused work is waiting on you, not an automatic process.${blockedContext(card)}</span></li>`),
     ...captainActions.map((action) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
   const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
@@ -1747,7 +1801,7 @@ function renderHtml(model, captainActions) {
     const reason = (card.reason || "unspecified gate").toLowerCase();
     blockedReasonCounts.set(reason, (blockedReasonCounts.get(reason) || 0) + 1);
   }
-  const captainHeldWaiting = captainDecisionCards.length;
+  const captainHeldWaiting = captainDecisionCards.length + captainGateCards.length;
   const approvalReadyCount = model.pipeline.pr_ci_approval.filter((card) => card.approval_ready === true).length;
   const whys = [
     ...(captainHeldWaiting ? [{ tone: "decide", count: captainHeldWaiting, label: "held for your decision", detail: "" }] : []),
@@ -1856,7 +1910,7 @@ function renderHtml(model, captainActions) {
     .rollcall li{display:grid;grid-template-columns:5.2rem minmax(0,.45fr) minmax(0,1fr);gap:.4rem 1.1rem;align-items:baseline;border-top:1px solid color-mix(in srgb,var(--sev) 30%,var(--hair));padding:.55rem 0;font-size:1.02rem;min-width:0}
     .rollcall li.empty{display:block}
     .verb{font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem}
-    .verb-approve{color:var(--blue)}.verb-decide{color:var(--serious)}.verb-blocked{color:var(--crit)}
+    .verb-approve{color:var(--blue)}.verb-decide{color:var(--serious)}.verb-review{color:var(--serious)}.verb-blocked{color:var(--crit)}
     .who{font-weight:650;min-width:0}.who .item-id{margin-right:.35rem}
     .why{color:var(--ink2);font-size:.92rem;min-width:0}
     .chain{display:block;color:var(--muted);font-size:.8rem;margin-top:.25rem}
