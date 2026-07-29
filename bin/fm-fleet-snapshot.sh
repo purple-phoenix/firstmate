@@ -20,8 +20,9 @@
 #     retain the fail-safe no-mistakes mode while project_resolved stays false.
 #     blocked_by is the comma-compatible dependency string and blocked_by_all
 #     preserves every normalized dependency edge in source order.
-#     Structured rows preserve captain-hold metadata such as hold_kind and
-#     hold_reason when tasks-axi emits it. They also carry normalized current_role,
+#     Structured rows preserve hold metadata such as hold_kind,
+#     hold_reason, and the hold_until date gate when tasks-axi emits it.
+#     They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
@@ -159,9 +160,10 @@ JSON is the stable machine-readable output contract.
 validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
-Actionable tasks-axi captain holds appear as decisions_open and stay visible in
-queued with hold_reason, hold_kind, and plural blocker fields for downstream
-projections. A captain hold is actionable only when every blocker is Done.
+Structured queued rows carry hold_reason, hold_kind, hold_until, and plural
+blocker fields for downstream projections. Actionable tasks-axi captain holds
+also appear as decisions_open; a captain hold is actionable only when every
+blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
@@ -286,7 +288,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def links($rest): [$rest | scan(url_pattern)];
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
@@ -354,6 +356,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              priority:metadata($rest; "priority"),
              hold_reason:metadata($rest; "hold"),
              hold_kind:metadata($rest; "hold-kind"),
+             hold_until:metadata($rest; "hold-until"),
              # Every blocker, comma-joined. bin/fm-capacity.mjs splits this scalar
              # on commas, so a row with several blocked-by fields must not collapse
              # to just the last one. blocked_by_ids and blocked_by_all carry the
@@ -781,6 +784,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
+          hold_until:((.hold_until // null) | if . == null then null else trunc(20) end),
           captain_actionable:(.captain_actionable // false),
           since:((.since // null) | if . == null then null else trunc(20) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
