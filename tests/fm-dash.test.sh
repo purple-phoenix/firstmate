@@ -604,6 +604,102 @@ EOF
   pass "inbox claim delivers before archive and safely permits replay"
 }
 
+test_click_ack_and_handled_states() {
+  local before_backlog ref detail_ref
+  before_backlog=$(cat "$HOME_DIR/data/backlog.md")
+  # A record claimed under the currently served generation acknowledges as
+  # received, with the claim time, straight from the archive.
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"acks":{"CAP-06":{"status":"claimed"' "claimed CAP click does not acknowledge as received"
+  assert_contains "$RESP" 'Received - being worked' "served layer lacks the received-state copy"
+  assert_contains "$RESP" 'Sent to firstmate - in progress' "served layer lacks the sent-state copy"
+  assert_contains "$RESP" 'Previously approved' "served layer lacks the previously-approved copy"
+  # Claiming marks the model stale, and the running service regenerates promptly.
+  rm -f "$HOME_DIR/state/dash-inbox/.model-stale"
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x","requested_at":"%s","dashboard_generated":"2026-07-28T10:00:00Z"}\n' \
+    "$(node -e 'console.log(new Date().toISOString())')" > "$HOME_DIR/state/dash-inbox/2-ack-CAP-06.json"
+  FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "ack-claim failed"
+  [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ] || fail "claim did not mark the model stale"
+  stop_server
+  export FM_DASH_STALE_POLL_MS=100
+  start_server "$HOME_DIR" "$PORT" "--snapshot $SNAPSHOT --environment $ENVIRONMENT"
+  unset FM_DASH_STALE_POLL_MS
+  local tries=0
+  while [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || fail "the stale marker did not trigger a prompt regeneration"
+    sleep 0.1
+  done
+  # A newly enqueued click acknowledges immediately as pending, and the
+  # acknowledgment persists across reloads because it reads the durable record.
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
+  [ "$REQ_STATUS" = 200 ] || fail "re-dispatch after claim failed (got $REQ_STATUS: $RESP)"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"acks":{"CAP-06":{"status":"pending"' "pending click does not acknowledge as sent"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"acks":{"CAP-06":{"status":"pending"' "pending acknowledgment did not survive a reload"
+  FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "cleanup claim failed"
+  # A regeneration that re-emits the same stable action ID within the recent
+  # window renders previously approved, not a bare Approve button.
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
+  node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const archive = process.argv[1];
+    for (const name of fs.readdirSync(archive)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(archive, name);
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      record.dashboard_generated = "a-previous-generation";
+      record.requested_at = new Date(Date.now() - 30 * 60000).toISOString();
+      fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+    }
+  ' "$HOME_DIR/state/dash-inbox/archive"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"acks":{"CAP-06":{"status":"prior"' "a recent click behind a regenerated model lost its acknowledgment"
+  # Beyond the window the same stable ID is a genuinely new context: fresh.
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
+  node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const archive = process.argv[1];
+    for (const name of fs.readdirSync(archive)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(archive, name);
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      record.requested_at = new Date(Date.now() - 10 * 3600000).toISOString();
+      fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+    }
+  ' "$HOME_DIR/state/dash-inbox/archive"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"acks":{}' "an old click outside the window still suppressed a fresh action"
+  # A pending decision answer acknowledges in its detail view and on its
+  # de-anonymized reference chip; a different decision stays fresh.
+  ref=$(ref_for "decision/main/active-task/runtime-policy") || fail "refs sidecar does not map the decision"
+  detail_ref=$(ref_for "decision/main/active-task/rollout-policy") || fail "refs sidecar does not map the second decision"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "decision approval failed (got $REQ_STATUS: $RESP)"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  assert_contains "$RESP" '"ack":{"status":"pending"' "an approved decision still renders as undecided in its detail view"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$detail_ref" "$CAPTAIN"
+  assert_contains "$RESP" '"ack":null' "a genuinely different decision inherited another decision's acknowledgment"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"label":"active-task/runtime-policy","ack":{"status":"pending"' "the decision reference chip does not carry its acknowledgment"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
+  # Idea suggestions stay additive: they never acknowledge or suppress a verdict.
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-02","verdict":"suggest","suggestion":"only weekdays"}'
+  [ "$REQ_STATUS" = 200 ] || fail "idea suggestion failed (got $REQ_STATUS: $RESP)"
+  req GET "http://127.0.0.1:$PORT/api/detail?idea=IDEA-02" "$CAPTAIN"
+  assert_contains "$RESP" '"ack":null' "an additive suggestion wrongly acknowledged the idea verdict"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
+  rm -f "$HOME_DIR/state/dash-inbox/.model-stale"
+  # The acknowledgment layer only reads: fleet state is untouched.
+  [ "$before_backlog" = "$(cat "$HOME_DIR/data/backlog.md")" ] || fail "serving acknowledgments mutated the backlog"
+  pass "clicks acknowledge instantly, survive reloads and claims, and re-emitted recent actions stay acknowledged"
+}
+
 test_read_only_mode_fails_safe() {
   stop_server
   cat > "$HOME_DIR/config/dash.json" <<EOF
@@ -947,6 +1043,7 @@ test_dispatch_writes_one_durable_record
 test_dispatch_refuses_unknown_and_uncurrent_actions
 test_refresh_reruns_producer_server_side
 test_inbox_list_claim_and_archive
+test_click_ack_and_handled_states
 test_read_only_mode_fails_safe
 test_check_shim_wakes_only_when_pending
 test_installer_plist_and_funnel_stance

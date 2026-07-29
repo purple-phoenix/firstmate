@@ -20,6 +20,16 @@
  * unpark click only asks firstmate to lift the parked hold through the normal
  * backlog lifecycle.
  *
+ * Clicks acknowledge instantly and durably: the served page renders each
+ * action's acknowledgment state straight from the command channel (pending
+ * record = sent, archived record = received with its claim time, recent
+ * archived record behind a regenerated model = previously approved), so an
+ * already-approved action never looks undecided after a reload or a
+ * regeneration re-emits the same stable action ID. The claim helper touches
+ * state/dash-inbox/.model-stale after archiving; this service polls that
+ * marker and reruns the producer promptly (when auto-render is enabled) so the
+ * model catches up with handled clicks.
+ *
  * Identity fails closed: every route except /healthz requires the
  * Tailscale-User-Login header injected by tailscale serve to match a login in
  * config/dash.json. Requests without a matching identity get 403 and cause no
@@ -62,6 +72,16 @@ const REFRESH_TIMEOUT_MS = 180000;
 const QUOTA_TIMEOUT_MS = 8000;
 const QUOTA_CACHE_MS = 60000;
 const MAX_BODY_BYTES = 16384;
+// A claimed command keeps acknowledging its action across regenerations for
+// this long after the click. Within the window a re-emitted stable action ID
+// (CAP-NN can legitimately reappear in a fresh snapshot) renders as previously
+// approved instead of a bare Approve button; past it, a re-emitted action is a
+// genuinely new decision context and renders fresh.
+const ACK_PRIOR_WINDOW_MS = 6 * 60 * 60 * 1000;
+// Claim-marker poll cadence for prompt post-claim regeneration.
+// FM_DASH_STALE_POLL_MS is for tests ONLY and must stay unset in real deployments.
+const STALE_POLL_MS = Number(process.env.FM_DASH_STALE_POLL_MS) > 0 ? Number(process.env.FM_DASH_STALE_POLL_MS) : 30000;
+const STALE_MARKER = path.join(INBOX, ".model-stale");
 
 // One-click eligible action IDs. Every current CAP action only requests
 // lifecycle-safe guidance or work that re-enters normal authority checks
@@ -87,7 +107,15 @@ tailscale serve proxy. Config lives in config/dash.json:
 serves the page without send buttons, for running the service before command
 consumption is wired up. auto_refresh_seconds reruns the producer on that
 interval (and at startup when the dashboard is missing or stale); 0 disables
-auto-render. Routes:
+auto-render and the stale-marker poll. While auto-render is enabled the
+service also polls state/dash-inbox/.model-stale (touched by
+bin/fm-dash-inbox.sh claim) every 30 seconds and reruns the producer when the
+marker is newer than the dashboard, so a claimed click regenerates the model
+promptly. Acknowledgment states rendered on the page come from the command
+channel itself: a pending inbox record renders its action as sent, an archived
+record renders it as received with the claim time, and an archived record
+whose click is within the last 6 hours keeps a re-emitted stable action ID
+rendered as previously approved instead of a bare Approve button. Routes:
   GET  /healthz       liveness, no identity required
   GET  /              dashboard with the interactive layer injected
   GET  /api/pending   pending command count
@@ -198,6 +226,72 @@ function removePendingIfUnchanged(record) {
   } catch {
     return false;
   }
+}
+
+// --- click acknowledgment ---------------------------------------------------
+// The captain's click must never disappear back into an undecided-looking
+// button. Source of truth is the durable command channel itself: a record
+// still pending in state/dash-inbox/ acknowledges as sent, a record claimed
+// into archive/ acknowledges as received (archive mtime is the claim time),
+// and a claimed record whose click is still within ACK_PRIOR_WINDOW_MS keeps
+// acknowledging a re-emitted stable action ID after the model regenerates.
+// This layer only reads records; it never executes or mutates fleet state.
+
+function archivedRecords() {
+  const archive = path.join(INBOX, "archive");
+  let names;
+  try {
+    names = fs.readdirSync(archive);
+  } catch {
+    return [];
+  }
+  const records = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const file = path.join(archive, name);
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (record && typeof record.id === "string") records.push({ record, claimedAtMs: fs.statSync(file).mtimeMs });
+    } catch {
+      // An unreadable archived record simply provides no acknowledgment.
+    }
+  }
+  return records;
+}
+
+// One durable identity per acknowledgeable action. Idea suggestions stay
+// additive and never acknowledge (they must not disable a later verdict).
+function ackKey(record) {
+  if (record.kind === "decision") return typeof record.decision_identity === "string" ? `decision:${record.decision_identity}` : null;
+  if (record.kind === "idea") return record.verdict === "suggest" ? null : `idea:${record.idea}`;
+  if (record.kind === "unpark") return typeof record.work_identity === "string" ? `unpark:${record.work_identity}` : null;
+  return /^CAP-\d{2}$/.test(record.id) ? `cap:${record.id}` : null;
+}
+
+function ackStates(generated) {
+  const acks = new Map();
+  const now = Date.now();
+  for (const { record, claimedAtMs } of archivedRecords()) {
+    const key = ackKey(record);
+    if (!key) continue;
+    const requestedAtMs = Date.parse(record.requested_at || "");
+    if (record.dashboard_generated === generated) {
+      acks.set(key, {
+        status: "claimed",
+        requested_at: record.requested_at || null,
+        claimed_at: new Date(claimedAtMs).toISOString(),
+        verdict: record.verdict || null,
+      });
+    } else if (Number.isFinite(requestedAtMs) && now - requestedAtMs <= ACK_PRIOR_WINDOW_MS) {
+      acks.set(key, { status: "prior", requested_at: record.requested_at, verdict: record.verdict || null });
+    }
+  }
+  for (const record of pendingRecords()) {
+    const key = ackKey(record);
+    if (!key) continue;
+    acks.set(key, { status: "pending", requested_at: record.requested_at || null, verdict: record.verdict || null });
+  }
+  return acks;
 }
 
 // --- read-only detail assembly -------------------------------------------
@@ -389,7 +483,7 @@ function decisionDocument(home, origin, key) {
   };
 }
 
-function refDisplayMap(refsFile) {
+function refDisplayMap(refsFile, acks = null) {
   const display = {};
   for (const [ref, entry] of Object.entries(refsFile.refs)) {
     if (entry.kind === "project") display[ref] = { t: "project", label: entry.value };
@@ -402,6 +496,10 @@ function refDisplayMap(refsFile) {
       display[ref] = owner === "decision"
         ? { t: "decision", label: id }
         : { t: "work", label: id, owner };
+      if (decision && acks) {
+        const ack = acks.get(`decision:${decision.home}/${decision.origin || ""}/${decision.key}`);
+        if (ack) display[ref].ack = ack;
+      }
     }
   }
   return display;
@@ -656,6 +754,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     parked: extras?.parked || [],
     usage: extras?.usage || { status: "unavailable", providers: [] },
     degraded: extras?.degraded === true,
+    acks: extras?.acks || {},
   });
   return `<style>
   .fmdash-bar{display:flex;justify-content:space-between;align-items:center;gap:.6rem 1.5rem;flex-wrap:wrap;padding:.6rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
@@ -693,6 +792,8 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-reset{font-size:.72rem;color:var(--muted);margin-top:.25rem}
   .fmdash-custom{width:100%;margin-top:.7rem;padding:.6rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair)}
   .fmdash-unpark{margin-left:.8rem;padding:.3rem .7rem;font-size:.74rem}
+  .fmdash-ack{display:inline-block;border:1px solid var(--good);color:var(--good);font-weight:700;font-size:.76rem;padding:.35rem .7rem;align-self:center;grid-column:2}
+  .fmdash-ack-chip{margin-left:.6rem;padding:.15rem .5rem;font-size:.7rem;grid-column:auto}
   @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
   </style>
   <script>
@@ -740,6 +841,29 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    // Acknowledged-action presentation: a clicked action never falls back to an
+    // undecided-looking control. States mirror the durable command channel:
+    // pending record = sent, claimed record = received, recent claim behind a
+    // regenerated model = previously approved.
+    const ackLabel = (ack) => {
+      if (!ack || ack.status === "pending") return "Sent to firstmate - in progress";
+      if (ack.status === "claimed") {
+        return "Received - being worked" + (ack.claimed_at ? " since " + new Date(ack.claimed_at).toLocaleString() : "");
+      }
+      const verb = ack.verdict === "deny" ? "Previously denied" : "Previously approved";
+      return verb + (ack.requested_at ? " " + new Date(ack.requested_at).toLocaleString() : "") + " - in progress";
+    };
+    const ackNode = (ack, extraClass) => {
+      const note = document.createElement("span");
+      note.className = "fmdash-ack" + (extraClass ? " " + extraClass : "");
+      note.textContent = ackLabel(ack);
+      return note;
+    };
+    const acknowledge = (button) => {
+      button.disabled = true;
+      button.classList.add("fmdash-ack");
+      button.textContent = ackLabel(null);
+    };
     const usageSection = document.createElement("section");
     usageSection.className = "band fmdash-usage";
     usageSection.setAttribute("aria-label", "Subscription usage");
@@ -805,6 +929,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         const entry = cfg.refs[token];
         if (!entry) return;
         chip.textContent = entry.label;
+        if (entry.ack) chip.after(ackNode(entry.ack, "fmdash-ack-chip"));
         if (clickableTypes[entry.t]) {
           chip.classList.add("fmdash-click");
           chip.setAttribute("role", "button");
@@ -857,7 +982,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         const res = await postJson({ ref, option: index });
         const out = await res.json();
         if (out.status === "queued" || out.status === "already-queued") {
-          button.textContent = "Approved · queued";
+          acknowledge(button);
           showPending(out.pending);
           return;
         }
@@ -872,13 +997,13 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         const res = await postJson({ ref, answer });
         const out = await res.json();
         if (out.status === "queued" || out.status === "already-queued") {
-          button.textContent = "Answer queued";
+          acknowledge(button);
           showPending(out.pending);
           return;
         }
         button.textContent = "Refused";
-      } catch { button.textContent = "Failed"; }
-      button.disabled = false;
+        button.disabled = false;
+      } catch { button.textContent = "Failed"; button.disabled = false; }
     }
     async function openDetail(ref, entry) {
       const overlay = document.createElement("div");
@@ -945,7 +1070,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
             body.appendChild(impact);
           }
           row.appendChild(body);
-          if (!cfg.readOnly) {
+          if (!cfg.readOnly && !detail.ack) {
             const approve = document.createElement("button");
             approve.type = "button";
             approve.className = "fmdash-send";
@@ -956,8 +1081,12 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           }
           panel.appendChild(row);
         });
-        if (!cfg.readOnly) panel.appendChild(textBlock("p", "An approval here is your routine decision only; anything destructive or irreversible still gets re-confirmed with you in chat."));
-        if (!cfg.readOnly) {
+        if (detail.ack) {
+          panel.appendChild(ackNode(detail.ack));
+          panel.appendChild(textBlock("p", "Your answer is already with firstmate; anything further can go through chat."));
+        }
+        if (!cfg.readOnly && !detail.ack) panel.appendChild(textBlock("p", "An approval here is your routine decision only; anything destructive or irreversible still gets re-confirmed with you in chat."));
+        if (!cfg.readOnly && !detail.ack) {
           const custom = document.createElement("textarea");
           custom.className = "fmdash-custom";
           custom.rows = 4;
@@ -1030,7 +1159,8 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         const res = await postJson({ idea: id, verdict, suggestion });
         const out = await res.json();
         if (out.status === "queued" || out.status === "replaced" || out.status === "already-queued") {
-          button.textContent = verdict === "suggest" ? "Suggestions sent" : (verdict === "approve" ? "Approved · queued" : "Denied · queued");
+          if (verdict === "suggest") button.textContent = "Suggestions sent";
+          else acknowledge(button);
           showPending(out.pending);
           return true;
         }
@@ -1076,31 +1206,38 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       const pitchText = detail && (detail.pitch || detail.description);
       panel.appendChild(textBlock("pre", pitchText || "No pitch or concept summary is on file for this idea."));
       if (cfg.readOnly) return;
+      const ideaAck = detail && detail.ack;
       const controls = document.createElement("div");
       controls.className = "fmdash-option";
       const buttons = document.createElement("div");
-      const approve = document.createElement("button");
-      approve.type = "button";
-      approve.className = "fmdash-send";
-      approve.textContent = "Approve";
-      approve.addEventListener("click", () => sendIdeaVerdict(idea.id, "approve", null, approve));
-      const deny = document.createElement("button");
-      deny.type = "button";
-      deny.className = "fmdash-send";
-      deny.textContent = "Deny";
-      deny.style.marginLeft = ".6rem";
-      deny.addEventListener("click", () => sendIdeaVerdict(idea.id, "deny", null, deny));
+      if (ideaAck) {
+        buttons.appendChild(ackNode(ideaAck, "fmdash-ack-chip"));
+      } else {
+        const approve = document.createElement("button");
+        approve.type = "button";
+        approve.className = "fmdash-send";
+        approve.textContent = "Approve";
+        approve.addEventListener("click", () => sendIdeaVerdict(idea.id, "approve", null, approve));
+        const deny = document.createElement("button");
+        deny.type = "button";
+        deny.className = "fmdash-send";
+        deny.textContent = "Deny";
+        deny.style.marginLeft = ".6rem";
+        deny.addEventListener("click", () => sendIdeaVerdict(idea.id, "deny", null, deny));
+        buttons.appendChild(approve);
+        buttons.appendChild(deny);
+      }
       const suggest = document.createElement("button");
       suggest.type = "button";
       suggest.className = "fmdash-send";
       suggest.textContent = "Add suggestions";
       suggest.style.marginLeft = ".6rem";
-      buttons.appendChild(approve);
-      buttons.appendChild(deny);
       buttons.appendChild(suggest);
       controls.appendChild(buttons);
       panel.appendChild(controls);
-      panel.appendChild(textBlock("p", "Approving asks firstmate to create the work item(s) through the normal backlog lifecycle; nothing runs from this page."));
+      panel.appendChild(textBlock("p", ideaAck
+        ? "Your verdict is already with firstmate; suggestions stay welcome and additive."
+        : "Approving asks firstmate to create the work item(s) through the normal backlog lifecycle; nothing runs from this page."));
       suggest.addEventListener("click", () => {
         if (panel.querySelector("textarea")) return;
         const box = document.createElement("textarea");
@@ -1139,6 +1276,10 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       const meta = row.querySelector(".mmeta");
       if (meta && info.since) meta.textContent = "on the books since " + info.since;
       if (cfg.readOnly) return;
+      if (info.ack) {
+        (row.querySelector(".mreason") || row).appendChild(ackNode(info.ack, "fmdash-ack-chip"));
+        return;
+      }
       const unpark = document.createElement("button");
       unpark.type = "button";
       unpark.className = "fmdash-send fmdash-unpark";
@@ -1152,7 +1293,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           const res = await postJson({ unpark: info.ref });
           const out = await res.json();
           if (out.status === "queued" || out.status === "already-queued") {
-            unpark.textContent = "Unpark queued";
+            acknowledge(unpark);
             showPending(out.pending);
             return;
           }
@@ -1176,6 +1317,11 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         copyButton.replaceWith(note);
         return;
       }
+      const capAck = cfg.acks[id];
+      if (capAck) {
+        copyButton.replaceWith(ackNode(capAck));
+        return;
+      }
       const send = document.createElement("button");
       send.type = "button";
       send.className = "fmdash-send";
@@ -1188,7 +1334,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           const res = await postJson({ id });
           const out = await res.json();
           if (out.status === "queued" || out.status === "already-queued") {
-            send.textContent = "Approved · queued";
+            acknowledge(send);
             showPending(out.pending);
             return;
           }
@@ -1264,12 +1410,23 @@ async function handle(req, res) {
     const authoritativeStates = (dashboard.html.match(/Authoritative current state:/g) || []).length;
     const degraded = authoritativeStates > 0 && unknownStates * 2 >= authoritativeStates;
     if (degraded) log(`degraded render detected: ${unknownStates} of ${authoritativeStates} authoritative worker states read unknown; check the service environment (PATH/tools)`);
+    const acks = ackStates(dashboard.generated);
+    const parked = parkedEntries(dashboard.html, refsFile);
+    for (const info of parked) {
+      const ack = acks.get(`unpark:${info.owner}/${info.id}`);
+      if (ack) info.ack = ack;
+    }
+    const capAcks = {};
+    for (const [key, ack] of acks) {
+      if (key.startsWith("cap:")) capAcks[key.slice(4)] = ack;
+    }
     const layer = interactiveLayer(dispatchable, pendingRecords().length, dashboard.generated, config.readOnly, {
-      refs: refsFile ? refDisplayMap(refsFile) : {},
+      refs: refsFile ? refDisplayMap(refsFile, acks) : {},
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
-      parked: parkedEntries(dashboard.html, refsFile),
+      parked,
       usage,
       degraded,
+      acks: capAcks,
     });
     sendHtml(res, 200, dashboard.html.replace("</body>", `${layer}</body>`));
     return;
@@ -1284,6 +1441,9 @@ async function handle(req, res) {
       sendJson(res, 404, { status: "not-found" });
       return;
     }
+    const detailAcks = ackStates(readDashboard()?.generated ?? "never");
+    if (detail.type === "decision") detail.ack = detailAcks.get(`decision:${detail.decision_identity}`) || null;
+    else if (detail.type === "idea") detail.ack = detailAcks.get(`idea:${detail.id}`) || null;
     sendJson(res, 200, detail);
     return;
   }
@@ -1349,6 +1509,7 @@ async function handle(req, res) {
         custom_answer: option ? null : customAnswer,
         requested_by: requesterLogin(req),
         requested_at: new Date().toISOString(),
+        dashboard_generated: readDashboard()?.generated ?? null,
         prompt: option
           ? `Captain approved decision ${detail.id} for ${detail.decision_origin || "legacy"} in ${detail.decision_home}: choose "${option.text}". Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`
           : `Captain answered decision ${detail.id} for ${detail.decision_origin || "legacy"} in ${detail.decision_home}: ${customAnswer}. Route it through the normal decision lifecycle; a destructive or irreversible consequence still needs chat confirmation.`,
@@ -1396,6 +1557,7 @@ async function handle(req, res) {
         suggestion,
         requested_by: requesterLogin(req),
         requested_at: new Date().toISOString(),
+        dashboard_generated: readDashboard()?.generated ?? null,
         prompt: `Captain ${verbs[verdict]} idea ${idea.id} (${idea.title}).${suggestion ? ` Captain suggestion text: ${suggestion}` : ""}${verdict === "approve" ? " Create the follow-up work item(s) through the normal backlog lifecycle." : ""}`,
       };
       const name = enqueueCommand(record);
@@ -1519,6 +1681,34 @@ function main() {
     } catch { /* missing dashboard is stale */ }
     if (stale) autoRender();
     setInterval(autoRender, config.autoRefreshSeconds * 1000).unref();
+    // Prompt post-claim regeneration: bin/fm-dash-inbox.sh claim touches the
+    // stale marker after archiving commands, so the model catches up with the
+    // captain's handled clicks well before the next full auto-render interval.
+    // A marker older than the current dashboard is already satisfied.
+    const staleCheck = async () => {
+      let markerMs;
+      try {
+        markerMs = fs.statSync(STALE_MARKER).mtimeMs;
+      } catch {
+        return;
+      }
+      let dashboardMs = 0;
+      try {
+        dashboardMs = fs.statSync(DASHBOARD).mtimeMs;
+      } catch { /* missing dashboard stays stale */ }
+      if (markerMs <= dashboardMs) {
+        try { fs.unlinkSync(STALE_MARKER); } catch { /* already gone */ }
+        return;
+      }
+      log("claimed captain commands marked the model stale; regenerating");
+      const result = await runRefresh();
+      if (result.ok) {
+        try { fs.unlinkSync(STALE_MARKER); } catch { /* already gone */ }
+      } else {
+        log(`stale-marker refresh failed: ${result.error}`);
+      }
+    };
+    setInterval(staleCheck, STALE_POLL_MS).unref();
   }
   const stop = () => server.close(() => process.exit(0));
   process.on("SIGTERM", stop);
