@@ -883,7 +883,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       const warn = document.createElement("div");
       warn.className = "fmdash-degraded";
       warn.setAttribute("role", "alert");
-      warn.textContent = "RENDER DEGRADED - most worker states read as unknown, so this page may not reflect reality. The service environment is likely missing its state-reader tools; fix the environment and refresh.";
+      warn.textContent = "RENDER DEGRADED - most worker states read as unknown, so this page may not reflect reality. That usually means the state reader could not resolve a current source for those workers (for example an active validation run was not attributed), or the service environment is missing tools such as git, tmux, or no-mistakes. Refresh after tools and fleet state are healthy; if unknowns persist, raise it in chat rather than assuming only a PATH problem.";
       bar.after(warn);
     }
     // Zero copy-prompt affordances on the served page: every producer copy
@@ -1536,13 +1536,13 @@ async function handle(req, res) {
     const refsFile = readRefs(dashboard.generated);
     const usage = await probeUsage();
     // Degraded-render self-check: when most worker states rendered as unknown,
-    // the generator likely ran without its state-reader tools (for example a
-    // stripped launchd environment). Say so loudly rather than presenting
-    // degraded data as truth.
+    // either the state reader failed to resolve a current source (run-step /
+    // pane / status-log) or the service environment is missing tools. Say so
+    // honestly rather than presenting degraded data as truth or blaming only PATH.
     const unknownStates = (dashboard.html.match(/Authoritative current state: unknown/g) || []).length;
     const authoritativeStates = (dashboard.html.match(/Authoritative current state:/g) || []).length;
     const degraded = authoritativeStates > 0 && unknownStates * 2 >= authoritativeStates;
-    if (degraded) log(`degraded render detected: ${unknownStates} of ${authoritativeStates} authoritative worker states read unknown; check the service environment (PATH/tools)`);
+    if (degraded) log(`degraded render detected: ${unknownStates} of ${authoritativeStates} authoritative worker states read unknown; state source unresolved and/or service tools missing`);
     const acks = ackStates(dashboard.generated);
     const parked = parkedEntries(dashboard.html, refsFile);
     for (const info of parked) {
