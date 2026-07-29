@@ -82,6 +82,7 @@ const ACK_PRIOR_WINDOW_MS = 6 * 60 * 60 * 1000;
 // FM_DASH_STALE_POLL_MS is for tests ONLY and must stay unset in real deployments.
 const STALE_POLL_MS = Number(process.env.FM_DASH_STALE_POLL_MS) > 0 ? Number(process.env.FM_DASH_STALE_POLL_MS) : 30000;
 const STALE_MARKER = path.join(INBOX, ".model-stale");
+const STALE_REFRESH_MARKER = path.join(INBOX, ".model-stale.refreshing");
 
 // One-click eligible action IDs. Every current CAP action only requests
 // lifecycle-safe guidance or work that re-enters normal authority checks
@@ -1685,40 +1686,47 @@ function main() {
     // Prompt post-claim regeneration: bin/fm-dash-inbox.sh claim touches the
     // stale marker after archiving commands, so the model catches up with the
     // captain's handled clicks well before the next full auto-render interval.
-    const staleCheck = async () => {
-      let marker;
+    let staleCheckRunning = false;
+    const requeueStaleRefresh = () => {
       try {
-        const stat = fs.statSync(STALE_MARKER);
-        marker = {
-          mtimeMs: stat.mtimeMs,
-          ctimeMs: stat.ctimeMs,
-          size: stat.size,
-          ino: stat.ino,
-        };
+        fs.linkSync(STALE_REFRESH_MARKER, STALE_MARKER);
+        fs.unlinkSync(STALE_REFRESH_MARKER);
+        return true;
+      } catch (error) {
+        if (error.code === "ENOENT") return true;
+        if (error.code !== "EEXIST") return false;
+        try {
+          fs.unlinkSync(STALE_REFRESH_MARKER);
+          return true;
+        } catch (unlinkError) {
+          return unlinkError.code === "ENOENT";
+        }
+      }
+    };
+    const staleCheck = async () => {
+      if (staleCheckRunning || !requeueStaleRefresh()) return;
+      let markerMs;
+      try {
+        fs.renameSync(STALE_MARKER, STALE_REFRESH_MARKER);
+        markerMs = fs.statSync(STALE_REFRESH_MARKER).mtimeMs;
       } catch {
         return;
       }
+      staleCheckRunning = true;
       log("claimed captain commands marked the model stale; regenerating");
-      const result = await runRefresh();
-      let currentMarker = null;
       try {
-        const stat = fs.statSync(STALE_MARKER);
-        currentMarker = {
-          mtimeMs: stat.mtimeMs,
-          ctimeMs: stat.ctimeMs,
-          size: stat.size,
-          ino: stat.ino,
-        };
-      } catch { /* already gone */ }
-      const markerUnchanged = currentMarker
-        && currentMarker.mtimeMs === marker.mtimeMs
-        && currentMarker.ctimeMs === marker.ctimeMs
-        && currentMarker.size === marker.size
-        && currentMarker.ino === marker.ino;
-      if (result.ok && markerUnchanged && result.startedAtMs >= marker.mtimeMs) {
-        try { fs.unlinkSync(STALE_MARKER); } catch { /* already gone */ }
-      } else {
-        if (!result.ok) log(`stale-marker refresh failed: ${result.error}`);
+        const result = await runRefresh();
+        if (result.ok && result.startedAtMs >= markerMs) {
+          try { fs.unlinkSync(STALE_REFRESH_MARKER); } catch { /* already gone */ }
+        } else {
+          requeueStaleRefresh();
+          if (!result.ok) log(`stale-marker refresh failed: ${result.error}`);
+        }
+      } catch (error) {
+        requeueStaleRefresh();
+        log(`stale-marker refresh failed: ${error.message}`);
+      } finally {
+        staleCheckRunning = false;
       }
     };
     setInterval(staleCheck, STALE_POLL_MS).unref();

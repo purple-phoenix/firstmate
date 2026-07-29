@@ -721,9 +721,12 @@ EOF
     sleep 0.05
     marker_refreshes=$(grep -c 'claimed captain commands marked the model stale' "$TMP_ROOT/serve.log" 2>/dev/null || true)
   done
+  [ -f "$HOME_DIR/state/dash-inbox/.model-stale.refreshing" ] || fail "the stale refresh did not atomically claim its marker"
+  [ ! -e "$HOME_DIR/state/dash-inbox/.model-stale" ] || fail "the live stale marker remained aliased to the in-progress refresh"
   printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x","requested_at":"%s","dashboard_generated":"2026-07-28T10:00:00Z"}\n' \
     "$(node -e 'console.log(new Date().toISOString())')" > "$HOME_DIR/state/dash-inbox/3-race-CAP-06.json"
   FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "race claim failed"
+  [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ] || fail "a claim during refresh did not create a distinct live marker"
   cp "$SNAPSHOT" "$TMP_ROOT/stale-snapshot.fifo"
   marker_refreshes=0
   tries=0
@@ -735,7 +738,7 @@ EOF
   done
   cp "$SNAPSHOT" "$TMP_ROOT/stale-snapshot.fifo"
   tries=0
-  while [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ]; do
+  while [ -e "$HOME_DIR/state/dash-inbox/.model-stale" ] || [ -e "$HOME_DIR/state/dash-inbox/.model-stale.refreshing" ]; do
     tries=$((tries + 1))
     [ "$tries" -lt 100 ] || fail "post-claim regeneration did not consume the unchanged marker"
     sleep 0.05
