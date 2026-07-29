@@ -630,8 +630,8 @@ test_click_ack_and_handled_states() {
   export FM_DASH_STALE_POLL_MS=100
   start_server "$HOME_DIR" "$PORT" "--snapshot $SNAPSHOT --environment $ENVIRONMENT"
   unset FM_DASH_STALE_POLL_MS
-  local tries=0
-  while [ -f "$HOME_DIR/state/dash-inbox/.model-stale" ]; do
+  tries=0
+  while [ -e "$HOME_DIR/state/dash-inbox/.model-stale" ] || [ -e "$HOME_DIR/state/dash-inbox/.model-stale.refreshing" ]; do
     tries=$((tries + 1))
     [ "$tries" -lt 100 ] || fail "the stale marker did not trigger a prompt regeneration"
     sleep 0.1
