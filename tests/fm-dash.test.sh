@@ -519,7 +519,7 @@ test_parking_lot_enrichment_and_unpark() {
 }
 
 test_recurring_enrichment_and_run_now() {
-  local ref record
+  local ref scout_ref record
   cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.recurring.bak"
   cp "$HOME_DIR/state/dash-refs.json" "$TMP_ROOT/refs.recurring.bak"
   cp "$HOME_DIR/data/backlog.md" "$TMP_ROOT/backlog.recurring.bak"
@@ -533,6 +533,8 @@ test_recurring_enrichment_and_run_now() {
   printf -- '- [ ] scout-r5 - Weekly scout research (repo: gamma) (kind: scout) (since 2026-07-15) (hold: weekly scout cadence) (hold-kind: future) (hold-until: 2026-08-04)\n' >> "$HOME_DIR/data/backlog.md"
   printf -- '- [x] research-w8 - Weekly gamma market research https://github.com/purple-phoenix/firstmate/pull/900 (merged 2026-07-21)\n' >> "$HOME_DIR/data/backlog.md"
   printf -- '- [x] scout-r4 - Weekly scout research data/scout-r4/report.md (reported 2026-07-22)\n' >> "$HOME_DIR/data/backlog.md"
+  mkdir -p "$HOME_DIR/data/scout-r4"
+  printf '%s\n' '# Weekly scout report' 'The recorded scout findings are available here.' > "$HOME_DIR/data/scout-r4/report.md"
   FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/recurring-snapshot.json" --environment "$ENVIRONMENT" \
     --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
     || fail "could not render the recurring fixture dashboard"
@@ -544,7 +546,14 @@ test_recurring_enrichment_and_run_now() {
   assert_contains "$RESP" '"next":"2026-08-04"' "recurring entry was not enriched with its next-run date"
   assert_contains "$RESP" '"link":"https://github.com/purple-phoenix/firstmate/pull/900"' "recurring entry was not enriched with the last run artifact link"
   assert_contains "$RESP" '"title":"Weekly scout research"' "scout recurring entry was not enriched with its clean title"
-  assert_contains "$RESP" '"date":"2026-07-22","link":"data/scout-r4/report.md"' "scout recurring entry lost its reported date or report artifact"
+  scout_ref=$(ref_for "main/scout-r4") || fail "refs sidecar does not map the completed scout run"
+  assert_contains "$RESP" "\"date\":\"2026-07-22\",\"link\":null,\"detail_ref\":\"$scout_ref\"" "scout recurring entry did not route its report through completed-run detail"
+  assert_contains "$RESP" 'link.href = "/api/detail?ref=" + encodeURIComponent(detailRef)' "scout report control does not target the existing detail endpoint"
+  assert_not_contains "$RESP" '"link":"data/scout-r4/report.md"' "scout report still exposes a dead relative href"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$scout_ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "completed scout detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'The recorded scout findings are available here.' "completed scout detail lacks its report excerpt"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   assert_contains "$RESP" 'Run now' "recurring entry lacks the run-now control"
   ref=$(ref_for "main/research-w9") || fail "refs sidecar does not map the recurring item"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"run_now":"item-99"}'
@@ -566,6 +575,8 @@ test_recurring_enrichment_and_run_now() {
   [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
     || fail "repeated run-now clicks wrote duplicate records"
   find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
+  rm "$HOME_DIR/data/scout-r4/report.md"
+  rmdir "$HOME_DIR/data/scout-r4"
   mv "$TMP_ROOT/dashboard.recurring.bak" "$HOME_DIR/data/capacity-dashboard.html"
   mv "$TMP_ROOT/refs.recurring.bak" "$HOME_DIR/state/dash-refs.json"
   mv "$TMP_ROOT/backlog.recurring.bak" "$HOME_DIR/data/backlog.md"

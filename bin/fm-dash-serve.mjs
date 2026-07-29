@@ -436,11 +436,13 @@ function recurringEntries(dashboardHtml, refsFile) {
       const artifact = doneRow
         ? (`${doneRow.title} ${doneRow.body.join(" ")}`.match(/https:\/\/[^\s"'`<>)\]]+|data\/[^\s"'`<>)\]]+\/report\.md/) || [null])[0]
         : null;
+      const reportArtifact = artifact?.startsWith("data/") === true;
       lastRun = {
         id: lastItem.id,
         title: (doneParsed ? doneParsed.title.replace(/https?:\/\/[^\s]+|data\/[^\s]+\/report\.md/g, "").trim() : "") || lastItem.id,
         date: doneParsed?.fields["merged"] || doneParsed?.fields["reported"] || doneParsed?.fields["done"] || null,
-        link: artifact,
+        link: reportArtifact ? null : artifact,
+        detail_ref: reportArtifact ? lastRef : null,
       };
     }
     entries.push({
@@ -1390,6 +1392,18 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           const link = document.createElement("a");
           link.href = info.last_run.link;
           link.textContent = info.last_run.link;
+          chain.appendChild(link);
+        } else if (info.last_run.detail_ref) {
+          const detailRef = info.last_run.detail_ref;
+          const detailEntry = cfg.refs[detailRef] || { t: "work", label: info.last_run.title || info.last_run.id };
+          const link = document.createElement("a");
+          link.href = "/api/detail?ref=" + encodeURIComponent(detailRef);
+          link.textContent = "Open report";
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openDetail(detailRef, detailEntry);
+          });
           chain.appendChild(link);
         }
       }
