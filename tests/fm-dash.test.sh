@@ -529,10 +529,12 @@ test_recurring_enrichment_and_run_now() {
     {"order":11,"state":"done","structured":true,"id":"research-w8","title":"Weekly gamma market research","repo":"gamma","project_resolved":true,"kind":"scout","pr_url":"https://github.com/purple-phoenix/firstmate/pull/900","links":["https://github.com/purple-phoenix/firstmate/pull/900"],"completion":{"verb":"merged","date":"2026-07-21"}},
     {"order":12,"state":"done","structured":true,"id":"scout-r4","title":"Weekly scout research","repo":"gamma","project_resolved":true,"kind":"scout","report_path":"data/scout-r4/report.md","completion":{"verb":"reported","date":"2026-07-22"}}
   ]' "$SNAPSHOT" > "$TMP_ROOT/recurring-snapshot.json"
-  printf -- '- [ ] research-w9 - Weekly gamma market research (repo: gamma) (kind: scout) (since 2026-07-14) (hold: weekly cadence while gamma ships) (hold-kind: future) (hold-until: 2026-08-04)\n' >> "$HOME_DIR/data/backlog.md"
-  printf -- '- [ ] scout-r5 - Weekly scout research (repo: gamma) (kind: scout) (since 2026-07-15) (hold: weekly scout cadence) (hold-kind: future) (hold-until: 2026-08-04)\n' >> "$HOME_DIR/data/backlog.md"
-  printf -- '- [x] research-w8 - Weekly gamma market research https://github.com/purple-phoenix/firstmate/pull/900 (merged 2026-07-21)\n' >> "$HOME_DIR/data/backlog.md"
-  printf -- '- [x] scout-r4 - Weekly scout research data/scout-r4/report.md (reported 2026-07-22)\n' >> "$HOME_DIR/data/backlog.md"
+  {
+    printf -- '- [ ] research-w9 - Weekly gamma market research (repo: gamma) (kind: scout) (since 2026-07-14) (hold: weekly cadence while gamma ships) (hold-kind: future) (hold-until: 2026-08-04)\n'
+    printf -- '- [ ] scout-r5 - Weekly scout research (repo: gamma) (kind: scout) (since 2026-07-15) (hold: weekly scout cadence) (hold-kind: future) (hold-until: 2026-08-04)\n'
+    printf -- '- [x] research-w8 - Weekly gamma market research https://github.com/purple-phoenix/firstmate/pull/900 (merged 2026-07-21)\n'
+    printf -- '- [x] scout-r4 - Weekly scout research data/scout-r4/report.md (reported 2026-07-22)\n'
+  } >> "$HOME_DIR/data/backlog.md"
   mkdir -p "$HOME_DIR/data/scout-r4"
   printf '%s\n' '# Weekly scout report' 'The recorded scout findings are available here.' > "$HOME_DIR/data/scout-r4/report.md"
   FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/recurring-snapshot.json" --environment "$ENVIRONMENT" \
@@ -1155,6 +1157,8 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
   assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
   assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
+  # The single-quoted assertion is intentionally literal.
+  # shellcheck disable=SC2016
   assert_grep 'bounded read-only excerpt from a resolved secondmate `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
   assert_grep 'Secondmate briefs, metadata, status tails, and chat remain prohibited' "$ROOT/docs/dashboard-service.md" "service doc broadens secondmate detail ingestion"
   assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
