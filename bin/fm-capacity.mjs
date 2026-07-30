@@ -521,7 +521,7 @@ function safeSource(source) {
     : "authoritative current-state owner";
 }
 
-function agentActivity(state, detail, decisions = 0, stage = null) {
+function agentActivity(state, detail, decisions = 0, stage = null, captainApproval = false) {
   const normalized = safeState(state);
   const doing = String(detail || "");
   if (normalized === "unknown") {
@@ -536,11 +536,16 @@ function agentActivity(state, detail, decisions = 0, stage = null) {
   if (normalized === "no_active_work") {
     return { activity: "idle", label: "Idle", detail: "No active work is assigned in this home." };
   }
-  if (/(?:waiting|awaiting|running|pending).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:waiting|awaiting|running|pending)/i.test(doing)) {
+  if (/(?:running).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:running)/i.test(doing)) {
     return { activity: "waiting_on_ci", label: "Waiting on checks", detail: "Automated checks are running." };
   }
+  if (/(?:waiting|awaiting|pending).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:waiting|awaiting|pending)/i.test(doing)) {
+    return { activity: "waiting_on_ci", label: "Waiting on checks", detail: "Automated checks are pending." };
+  }
   if (/(?:waiting|awaiting|pending|ready).{0,30}(?:captain|review|approvals?|merge)|(?:captain|review|approvals?|merge).{0,30}(?:waiting|awaiting|pending|ready)/i.test(doing)) {
-    return { activity: "waiting_on_review", label: "Waiting for your review or merge", detail: "Review or merge is needed before work can continue." };
+    return captainApproval
+      ? { activity: "waiting_on_review", label: "Waiting for your review or merge", detail: "Your review or merge is needed before work can continue." }
+      : { activity: "waiting", label: "Waiting", detail: "Review or merge is pending." };
   }
   if (stage === "validating_fixing" || /validat|fixing|review|\btest(?:ing)?\b|lint|document|rebase|pre-push/i.test(doing)) {
     return { activity: "validating", label: "Validating", detail: "Review and checks are under way." };
@@ -563,7 +568,10 @@ function liveAgentRollCall(snapshot) {
       ? task.hints.open_decisions.length
       : Number(task.decisions || 0);
     const stage = task.current_state ? taskStage(task) : null;
-    const activity = agentActivity(state, task.current_state?.detail || task.doing, decisions, stage);
+    const captainApproval = task.approval_authority === "captain"
+      || task.captain_approval_required === true
+      || (task.yolo === "off" && task.approval_authority !== "firstmate" && task.captain_approval_required !== false);
+    const activity = agentActivity(state, task.current_state?.detail || task.doing, decisions, stage, captainApproval);
     records.push({
       agent: `Worker ${workerNumber}`,
       role: "worker",
@@ -614,6 +622,26 @@ function liveAgentRollCall(snapshot) {
       label: "Unavailable",
       detail: "This registered home was outside the bounded reading.",
       as_of: snapshot.generated,
+    });
+  }
+  const registry = snapshot.secondmate_current?.registry;
+  if (registry?.input_truncated === true || registry?.records_truncated === true) {
+    const retained = Array.isArray(registry.records) ? registry.records.length : 0;
+    const inWindow = Number.isInteger(registry.records_in_window) ? registry.records_in_window : null;
+    const omitted = registry.input_truncated === false && inWindow !== null && inWindow > retained
+      ? inWindow - retained
+      : null;
+    records.push({
+      agent: omitted === null ? "Additional supervisors" : `${omitted} additional supervisor${omitted === 1 ? "" : "s"}`,
+      role: "supervisor",
+      home: "Registered homes outside reading",
+      task: "Current home details unavailable",
+      activity: "unavailable",
+      label: "Unavailable",
+      detail: omitted === null
+        ? "The bounded registry reading omitted additional identities; their count is unavailable."
+        : `${omitted} registered home ${omitted === 1 ? "identity was" : "identities were"} outside the bounded registry reading.`,
+      as_of: registry.freshness?.observed_at || snapshot.generated,
     });
   }
   return { generated: snapshot.generated, records };
