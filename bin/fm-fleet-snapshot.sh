@@ -734,6 +734,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | {id:$task.id,
             title:(($work.title // $task.id) | trunc(160)),
             kind:(($task.kind // $work.kind // null) | if . == null then null else trunc(40) end),
+            yolo:(($task.yolo // "") | if . == "on" or . == "off" then . else null end),
+            approval_authority:(if $task.yolo == "on" then "firstmate" elif $task.yolo == "off" then "captain" else null end),
             state:$task.current_state.state,
             source:$task.current_state.source,
             doing:(($task.current_state.detail // "") | trunc(160)),

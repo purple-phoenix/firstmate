@@ -1557,6 +1557,10 @@ test_live_agents_render_working_idle_and_unavailable_states() {
     | .secondmate_current.registry.input_truncated = true
     | .secondmate_current.registry.records_truncated = false
     | .secondmate_current.registry.reasons = ["line_limit"]
+    | (.secondmate_current.records[] | select(.id == "design") | .agents) = [
+      {"id":"mate-review-wait","title":"Wait for domain review","kind":"ship","yolo":"off","approval_authority":"captain","state":"parked","source":"run-step","doing":"PR awaiting captain merge approval","decisions":0,"observed_at":"2026-07-17T16:00:00Z"}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.agents) = 1
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs") ||
@@ -1566,7 +1570,7 @@ test_live_agents_render_working_idle_and_unavailable_states() {
     and (.live_agents.records | any(.role == "worker" and .activity == "working"))
     and (.live_agents.records | any(.role == "worker" and .activity == "validating"))
     and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_ci" and .label == "Waiting on checks" and .detail == "Automated checks are pending.")] | length) == 1
-    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_review" and .label == "Waiting for your review or merge")] | length) == 1
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_review" and .label == "Waiting for your review or merge")] | length) == 2
     and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting" and .label == "Waiting" and .detail == "Review or merge is pending.")] | length) == 1
     and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting" and .label == "Waiting" and .detail == "Waiting for the recorded condition to clear.")] | length) == 1
     and (.live_agents.records | any(.role == "supervisor" and .activity == "idle"))
@@ -1586,6 +1590,24 @@ test_live_agents_render_working_idle_and_unavailable_states() {
   assert_grep 'Reading generated 2026-07-17T16:00:00Z' "$output" "live-agents section lacks its observation time"
   assert_grep '>As of<' "$output" "live-agents section lacks per-row freshness labeling"
   assert_no_grep 'Build the alpha subsystem' "$output" "offline live-agents section leaked a private task title"
+  jq '
+    .secondmate_current.registry.available = false
+    | .secondmate_current.registry.complete = false
+    | .secondmate_current.registry.input_truncated = false
+    | .secondmate_current.registry.records_truncated = false
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.registry.reason = "registered secondmate table is unreadable"
+    | .secondmate_current.registry.reasons = ["registered secondmate table is unreadable"]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unavailable-registry live-agents run failed"
+  printf '%s' "$json" | jq -e '
+    [.live_agents.records[]
+      | select(.role == "supervisor" and .agent == "Additional supervisors")
+      | select(.detail == "The registered supervisor table could not be read; supervisor count is unavailable.")]
+    | length == 1
+  ' >/dev/null || fail "unavailable registry omitted its unknown-count supervisor rollup: $json"
   pass "live agents render current workers plus idle and unavailable supervisor states with explicit freshness"
 }
 

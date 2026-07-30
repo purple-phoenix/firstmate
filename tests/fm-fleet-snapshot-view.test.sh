@@ -775,10 +775,11 @@ EOF
   cat > "$healthy/data/backlog.md" <<'EOF'
 ## Queued
 - [ ] queued-ship-task - Continue a queued delivery (repo: alpha) (kind: ship) (since 2026-07-30)
+- [ ] review-task - Review a completed delivery (repo: alpha) (kind: ship) (since 2026-07-30)
 
 ## Done
 EOF
-  mkdir -p "$healthy/projects/queued-ship-task"
+  mkdir -p "$healthy/projects/queued-ship-task" "$healthy/projects/review-task"
   fm_write_meta "$healthy/state/queued-ship-task.meta" \
     "window=firstmate:fm-queued-ship-task" \
     "worktree=$healthy/projects/queued-ship-task" \
@@ -787,6 +788,15 @@ EOF
     "kind=ship" \
     "mode=ship"
   printf 'working: implementation under way\n' > "$healthy/state/queued-ship-task.status"
+  fm_write_meta "$healthy/state/review-task.meta" \
+    "window=firstmate:fm-review-task" \
+    "worktree=$healthy/projects/review-task" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'paused: PR awaiting captain merge approval\n' > "$healthy/state/review-task.status"
   printf 'unreadable backlog\n' > "$unreadable/data/backlog.md"
   chmod 000 "$unreadable/data/backlog.md"
   fakebin=$(make_fakebin "$home")
@@ -797,8 +807,9 @@ EOF
       | .current.state == "active_child_work"
         and .provenance.selected == "structured-home"
         and .counts.active_children == 1
-        and .counts.agents == 1
-        and (.agents | any(.id == "queued-ship-task" and .title == "Continue a queued delivery" and .state == "working")))
+        and .counts.agents == 2
+        and (.agents | any(.id == "queued-ship-task" and .title == "Continue a queued delivery" and .state == "working"))
+        and (.agents | any(.id == "review-task" and .state == "paused" and .yolo == "off" and .approval_authority == "captain")))
     and
     (.secondmate_current.records[] | select(.id == "unreadable")
       | .current.state == "unknown"

@@ -625,10 +625,11 @@ function liveAgentRollCall(snapshot) {
     });
   }
   const registry = snapshot.secondmate_current?.registry;
-  if (registry?.input_truncated === true || registry?.records_truncated === true) {
+  if (registry?.available === false || registry?.input_truncated === true || registry?.records_truncated === true) {
+    const unavailable = registry.available === false;
     const retained = Array.isArray(registry.records) ? registry.records.length : 0;
     const inWindow = Number.isInteger(registry.records_in_window) ? registry.records_in_window : null;
-    const omitted = registry.input_truncated === false && inWindow !== null && inWindow > retained
+    const omitted = !unavailable && registry.input_truncated === false && inWindow !== null && inWindow > retained
       ? inWindow - retained
       : null;
     records.push({
@@ -638,9 +639,11 @@ function liveAgentRollCall(snapshot) {
       task: "Current home details unavailable",
       activity: "unavailable",
       label: "Unavailable",
-      detail: omitted === null
-        ? "The bounded registry reading omitted additional identities; their count is unavailable."
-        : `${omitted} registered home ${omitted === 1 ? "identity was" : "identities were"} outside the bounded registry reading.`,
+      detail: unavailable
+        ? "The registered supervisor table could not be read; supervisor count is unavailable."
+        : omitted === null
+          ? "The bounded registry reading omitted additional identities; their count is unavailable."
+          : `${omitted} registered home ${omitted === 1 ? "identity was" : "identities were"} outside the bounded registry reading.`,
       as_of: registry.freshness?.observed_at || snapshot.generated,
     });
   }
