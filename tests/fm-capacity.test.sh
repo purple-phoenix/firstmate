@@ -624,6 +624,8 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
     fail "captain decisions were collapsed or duplicated in the needs-you roll call"
   [ "$(grep -o '<span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">item-' "$output" | wc -l | tr -d ' ')" = 4 ] ||
     fail "captain decision rows do not each expose an opaque item ID"
+  [ "$(grep -o 'data-your-go-kind="decision"' "$output" | wc -l | tr -d ' ')" = 4 ] ||
+    fail "captain decision rows lack the service's your-go interaction anchor"
   assert_grep 'Open decision raised by work already under way.' "$output" "open captain decisions lack a privacy-safe reason"
   assert_grep 'A queued choice is held for your decision.' "$output" "queued captain hold lacks a privacy-safe reason"
   assert_no_grep '>4 more<' "$output" "captain decisions were replaced by an anonymous aggregate"
@@ -660,6 +662,7 @@ test_approval_signal_and_max_effort_survive_safe_normalization() {
   case "$json" in
     *"Jane Doe"*) fail "privacy-safe approval signal leaked raw status detail" ;;
   esac
+  assert_grep 'data-your-go-kind="approval"' "$output" "approval-ready rows lack the service's your-go interaction anchor"
 
   jq '
     .tasks[0].mode = "direct-PR"
@@ -1289,6 +1292,7 @@ test_captain_gated_pauses_need_action_without_eta() {
   ' >/dev/null || fail "captain-gated pauses are misclassified: $json"
   html=$(cat "$output")
   assert_contains "$html" 'class="verb verb-review"' "captain-gated pauses are missing from the needs-you band"
+  assert_contains "$html" 'data-your-go-kind="review"' "captain-gated pause rows lack the service's your-go interaction anchor"
   assert_contains "$html" 'Paused work is waiting on you, not an automatic process.' "captain-gate rows lack the plain-language framing"
   assert_contains "$html" 'Review and merge its open pull request' "the PR-gated pause lacks its what-you-can-do line"
   assert_contains "$html" 'PR merged; awaiting captain canary decision' "the merged-PR captain pause lacks its declared reason"
@@ -1342,6 +1346,8 @@ test_captain_kind_idea_hold_is_your_go_not_stuck() {
   ' >/dev/null || fail "captain-kind idea hold misclassified as stuck: $json"
   html=$(cat "$output")
   assert_contains "$html" 'class="verb verb-review"' "captain idea hold is missing from the needs-you band"
+  assert_contains "$html" 'data-your-go-ref="item-' "captain idea hold lacks the service's your-go interaction anchor"
+  assert_contains "$html" 'data-your-go-kind="review"' "captain idea hold row is not anchored as a your-go review row"
   assert_contains "$html" 'Prioritize or give your go on item-' "captain idea hold lacks an opaque choice reference"
   case "$html" in
     *'verb-blocked">Stuck'*)

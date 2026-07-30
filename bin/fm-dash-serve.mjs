@@ -12,14 +12,17 @@
  * The service never executes fleet commands, calls only the read-mostly capacity
  * producer and quota probe, and mutates only state/dash-inbox/ plus the
  * producer-owned dashboard and private refs sidecar. A clicked
- * CAP action, decision answer, idea verdict, parking-lot unpark, or recurring
- * run-now becomes one durable fm-dash-command.v1 record in state/dash-inbox/;
+ * CAP action, decision answer, idea verdict, parking-lot unpark, recurring
+ * run-now, or needs-you your-go becomes one durable fm-dash-command.v1 record
+ * in state/dash-inbox/;
  * the running firstmate consumes it through its registered fm-dash watcher check
  * (bin/fm-dash-inbox.sh claim). Delivery therefore rides the sanctioned wake
  * path and inherits its cadence rather than any direct control channel; an
  * unpark click only asks firstmate to lift the parked hold through the normal
- * backlog lifecycle, and a run-now click only asks firstmate to run the
- * scheduled recurring item early through the same normal lifecycle.
+ * backlog lifecycle, a run-now click only asks firstmate to run the
+ * scheduled recurring item early through the same normal lifecycle, and a
+ * your-go click only routes the captain's go-ahead, not-now, or bounded
+ * guidance text for an item awaiting them back through the normal lifecycle.
  *
  * Acknowledgeable actions and verdicts acknowledge instantly and durably: the
  * served page renders their state straight from the command channel (pending
@@ -38,7 +41,8 @@
  * writes. Dispatch accepts only known CAP-NN identifiers that are present in
  * the currently served dashboard AND in the fixed one-click allowlist below.
  * The only free text accepted anywhere is bounded captain-authored content: an
- * idea suggestion or decision custom answer delivered to firstmate as data,
+ * idea suggestion, decision custom answer, or needs-you guidance note
+ * delivered to firstmate as data,
  * never interpreted or executed by this service. Unknown or future action IDs
  * are refused (route those through captain chat). The server binds 127.0.0.1
  * only, so the only remote path in is the tailnet proxy.
@@ -125,13 +129,15 @@ Idea suggestions stay additive and never acknowledge persistently. Routes:
   GET  /api/pending   pending command count
   POST /api/refresh   rerun bin/fm-capacity.mjs server-side (serialized)
   POST /api/dispatch  validated CAP action, decision answer, idea verdict,
-                      parking-lot unpark request, or recurring run-now request
+                      parking-lot unpark request, recurring run-now request,
+                      or needs-you your-go request (go, park, or guidance)
 All routes except /healthz require a Tailscale-User-Login header matching a
 configured captain login and fail closed otherwise. Dispatch refuses IDs not in
 both the served dashboard and the fixed one-click allowlist, refuses an
-unpark for any item the served dashboard does not currently list as parked, and
-refuses a run-now for any item it does not currently list as recurring.
-Browser POSTs must also be same-origin.
+unpark for any item the served dashboard does not currently list as parked,
+refuses a run-now for any item it does not currently list as recurring, and
+refuses a your-go for any item it does not currently list as awaiting the
+captain. Browser POSTs must also be same-origin.
 `);
   process.exit(exitCode);
 }
@@ -271,6 +277,12 @@ function ackKey(record) {
   if (record.kind === "decision") return typeof record.decision_identity === "string" ? `decision:${record.decision_identity}` : null;
   if (record.kind === "idea") return record.verdict === "suggest" ? null : `idea:${record.idea}`;
   if (record.kind === "unpark") return typeof record.work_identity === "string" ? `unpark:${record.work_identity}` : null;
+  if (record.kind === "your-go") {
+    // A your-go answer for a decision shares the decision's durable ack
+    // identity, so answering through either path acknowledges the same item.
+    if (typeof record.decision_identity === "string") return `decision:${record.decision_identity}`;
+    return typeof record.work_identity === "string" ? `yourgo:${record.work_identity}` : null;
+  }
   return /^CAP-\d{2}$/.test(record.id) ? `cap:${record.id}` : null;
 }
 
@@ -454,6 +466,73 @@ function recurringEntries(dashboardHtml, refsFile) {
       next: nextRun,
       since: parsed?.fields["since"] || null,
       last_run: lastRun,
+    });
+  }
+  return entries;
+}
+
+// Needs-you enrichment for the authenticated captain: resolve each
+// data-your-go-ref anchor the producer rendered through the current-generation
+// refs sidecar so every row awaiting the captain carries real interaction
+// controls. A decision ref reports whether its structured options document
+// exists (per-option approval stays the canonical path when it does); a work
+// ref reads the owning home's backlog for the real title and hold reason. A
+// hold reason that asks the captain to furnish something concrete (the
+// deliverable-ask verbs below) becomes a prefilled guidance ask. Reads only.
+const DELIVERABLE_ASK = /\b(?:supply|provide|send|share|upload|paste|deliver|furnish)\b/i;
+
+function yourGoEntries(dashboardHtml, refsFile) {
+  const entries = [];
+  if (!refsFile) return entries;
+  const backlogCache = new Map();
+  const backlogFor = (owner) => {
+    if (!backlogCache.has(owner)) {
+      const root = decisionHome(owner);
+      backlogCache.set(owner, root ? parseBacklog(path.join(root, "data", "backlog.md")) : []);
+    }
+    return backlogCache.get(owner);
+  };
+  const seen = new Set();
+  const rowPattern = /data-your-go-ref="(item-\d{2,})" data-your-go-kind="(approval|review|decision)"/g;
+  for (const match of dashboardHtml.matchAll(rowPattern)) {
+    const [, ref, rowKind] = match;
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    const entry = refsFile.refs[ref];
+    if (!entry || entry.kind !== "item") continue;
+    const decision = decisionRef(entry);
+    if (decision) {
+      const holdId = decision.origin ? `${decision.origin}-decision-${decision.key}` : decision.key;
+      const row = backlogFor(decision.home).find((item) => item.id === holdId) || null;
+      const parsed = row ? titleAnnotations(row.title) : null;
+      const reason = parsed?.fields["hold"] || null;
+      entries.push({
+        ref,
+        row_kind: rowKind,
+        target: "decision",
+        identity: `${decision.home}/${decision.origin || ""}/${decision.key}`,
+        title: parsed?.title || decision.key,
+        reason,
+        has_options: Boolean(decisionDocument(decision.home, decision.origin, decision.key)),
+        ask: reason && DELIVERABLE_ASK.test(reason) ? reason : null,
+      });
+      continue;
+    }
+    const separator = entry.value.indexOf("/");
+    const owner = entry.value.slice(0, separator);
+    const id = entry.value.slice(separator + 1);
+    const row = backlogFor(owner).find((item) => item.id === id) || null;
+    const parsed = row ? titleAnnotations(row.title) : null;
+    const reason = parsed?.fields["hold"] || null;
+    entries.push({
+      ref,
+      row_kind: rowKind,
+      target: "work",
+      identity: entry.value,
+      title: parsed?.title || id,
+      reason,
+      has_options: false,
+      ask: reason && DELIVERABLE_ASK.test(reason) ? reason : null,
     });
   }
   return entries;
@@ -826,6 +905,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     ideas: extras?.ideas || [],
     parked: extras?.parked || [],
     recurring: extras?.recurring || [],
+    yourGo: extras?.yourGo || [],
     usage: extras?.usage || { status: "unavailable", providers: [] },
     degraded: extras?.degraded === true,
     acks: extras?.acks || {},
@@ -866,6 +946,10 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-reset{font-size:.72rem;color:var(--muted);margin-top:.25rem}
   .fmdash-custom{width:100%;margin-top:.7rem;padding:.6rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair)}
   .fmdash-unpark,.fmdash-runnow{margin-left:.8rem;padding:.3rem .7rem;font-size:.74rem}
+  .fmdash-yourgo{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-top:.5rem}
+  .fmdash-yourgo .fmdash-send{grid-column:auto;padding:.35rem .7rem;font-size:.76rem}
+  .fmdash-yourgo .fmdash-primary{background:var(--ink);color:var(--bg)}
+  .fmdash-guide{width:100%;margin-top:.5rem;padding:.5rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair);font-size:.85rem}
   .fmdash-ack{display:inline-block;border:1px solid var(--good);color:var(--good);font-weight:700;font-size:.76rem;padding:.35rem .7rem;align-self:center;grid-column:2}
   .fmdash-ack-chip{margin-left:.6rem;padding:.15rem .5rem;font-size:.7rem;grid-column:auto}
   @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
@@ -1436,6 +1520,89 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       });
       (row.querySelector(".mreason") || row).appendChild(runNow);
     });
+    // Needs-you rows: every item awaiting the captain gets real controls.
+    // A decision with a structured options document keeps its per-option flow
+    // (Choose opens the existing detail view with one Approve per option plus
+    // the custom answer); everything else gets generic go-ahead, not-now, and
+    // send-guidance controls, and a concrete captain-deliverable ask leads
+    // with a prefilled provide control. Every click only enqueues one durable
+    // command record; firstmate re-resolves it through the normal lifecycle.
+    async function sendYourGo(ref, action, text, button) {
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "Sending…";
+      try {
+        const res = await postJson({ your_go: ref, action, text });
+        const out = await res.json();
+        if (out.status === "queued" || out.status === "replaced" || out.status === "already-queued") {
+          acknowledge(button);
+          showPending(out.pending);
+          return;
+        }
+        button.textContent = "Refused";
+        button.disabled = false;
+      } catch { button.textContent = original; button.disabled = false; }
+    }
+    cfg.yourGo.forEach((info) => {
+      const row = document.querySelector('[data-your-go-ref="' + info.ref + '"]');
+      if (!row || cfg.readOnly) return;
+      const cell = row.querySelector(".why") || row;
+      if (info.ack) {
+        // Decision refs already acknowledge on their de-anonymized chip.
+        if (info.target !== "decision") cell.appendChild(ackNode(info.ack, "fmdash-ack-chip"));
+        return;
+      }
+      const controls = document.createElement("div");
+      controls.className = "fmdash-yourgo";
+      const makeButton = (label, aria, primary) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "fmdash-send" + (primary ? " fmdash-primary" : "");
+        button.textContent = label;
+        button.setAttribute("aria-label", aria);
+        return button;
+      };
+      const openGuidance = (prefill, sendLabel) => {
+        const existing = cell.querySelector("textarea");
+        if (existing) { existing.focus(); return; }
+        const box = document.createElement("textarea");
+        box.className = "fmdash-guide";
+        box.rows = 3;
+        box.maxLength = 2000;
+        box.value = prefill || "";
+        box.placeholder = "Your guidance for firstmate…";
+        box.setAttribute("aria-label", "Guidance for " + (info.title || info.ref));
+        const send = makeButton(sendLabel, sendLabel + " for " + (info.title || info.ref));
+        send.addEventListener("click", () => {
+          if (box.value.trim()) sendYourGo(info.ref, "guidance", box.value.trim(), send);
+        });
+        cell.appendChild(box);
+        cell.appendChild(send);
+        box.focus();
+      };
+      if (info.has_options) {
+        const entry = cfg.refs[info.ref] || { t: "decision", label: info.title || info.ref };
+        const choose = makeButton("Choose…", "Open options for " + (info.title || info.ref), true);
+        choose.addEventListener("click", (event) => { event.stopPropagation(); openDetail(info.ref, entry); });
+        controls.appendChild(choose);
+      } else {
+        if (info.ask) {
+          const provide = makeButton("Provide it…", "Provide what is asked: " + info.ask, true);
+          provide.addEventListener("click", () => openGuidance(info.ask + ": ", "Send"));
+          controls.appendChild(provide);
+        }
+        const go = makeButton("Go ahead", "Go ahead with " + (info.title || info.ref), !info.ask);
+        go.addEventListener("click", () => sendYourGo(info.ref, "go", null, go));
+        const park = makeButton("Not now", "Not now - park " + (info.title || info.ref));
+        park.addEventListener("click", () => sendYourGo(info.ref, "park", null, park));
+        const guide = makeButton("Send guidance…", "Send guidance for " + (info.title || info.ref));
+        guide.addEventListener("click", () => openGuidance("", "Send guidance"));
+        controls.appendChild(go);
+        controls.appendChild(park);
+        controls.appendChild(guide);
+      }
+      cell.appendChild(controls);
+    });
     if (cfg.readOnly) {
       copyButtons.forEach((copyButton) => copyButton.remove());
       return;
@@ -1549,6 +1716,11 @@ async function handle(req, res) {
       const ack = acks.get(`unpark:${info.owner}/${info.id}`);
       if (ack) info.ack = ack;
     }
+    const yourGo = yourGoEntries(dashboard.html, refsFile);
+    for (const info of yourGo) {
+      const ack = acks.get(info.target === "decision" ? `decision:${info.identity}` : `yourgo:${info.identity}`);
+      if (ack) info.ack = ack;
+    }
     const capAcks = {};
     for (const [key, ack] of acks) {
       if (key.startsWith("cap:")) capAcks[key.slice(4)] = ack;
@@ -1558,6 +1730,7 @@ async function handle(req, res) {
       ideas: parseIdeas().map((idea) => ({ id: idea.id, title: idea.title })),
       parked,
       recurring: recurringEntries(dashboard.html, refsFile),
+      yourGo,
       usage,
       degraded,
       acks: capAcks,
@@ -1793,6 +1966,80 @@ async function handle(req, res) {
       const name = enqueueCommand(record);
       log(`queued run-now ${workId} as ${name} for ${record.requested_by}`);
       sendJson(res, 200, { status: "queued", pending: pending.length + 1 });
+      return;
+    }
+
+    // Your-go: generic captain interaction for any item the served dashboard
+    // currently lists as awaiting the captain (a data-your-go-ref anchor),
+    // resolved through the current-generation refs sidecar. The record only
+    // routes the captain's verdict - go ahead, not now, or bounded guidance
+    // text - to firstmate, which re-resolves it through the normal lifecycle;
+    // the service never edits the backlog and the click grants no authority
+    // beyond normal lifecycle checks. A newer verdict for the same item
+    // replaces its pending predecessor so the newest captain intent wins.
+    if (typeof body.your_go === "string") {
+      const ref = body.your_go;
+      const action = body.action;
+      if (!/^item-\d{2,}$/.test(ref) || !["go", "park", "guidance"].includes(action)) {
+        sendJson(res, 400, { status: "refused", error: "your-go accepts a currently listed captain-awaiting item and a go, park, or guidance action" });
+        return;
+      }
+      const text = typeof body.text === "string" ? body.text.trim() : "";
+      if (action === "guidance" && (!text || text.length > 2000)) {
+        sendJson(res, 400, { status: "refused", error: "guidance needs bounded text" });
+        return;
+      }
+      const currentDashboard = readDashboard();
+      if (!currentDashboard || !currentDashboard.html.includes(`data-your-go-ref="${ref}"`)) {
+        sendJson(res, 409, { status: "refused", error: `${ref} is not awaiting the captain on the current dashboard; refresh first` });
+        return;
+      }
+      const currentRefs = readRefs(currentDashboard.generated);
+      const entry = currentRefs?.refs?.[ref];
+      if (!entry || entry.kind !== "item") {
+        sendJson(res, 409, { status: "refused", error: `${ref} cannot be resolved against the current dashboard generation; refresh first` });
+        return;
+      }
+      const decision = decisionRef(entry);
+      const separator = entry.value.indexOf("/");
+      const workHome = decision ? decision.home : entry.value.slice(0, separator);
+      const workId = decision ? decision.key : entry.value.slice(separator + 1);
+      const decisionIdentity = decision ? `${decision.home}/${decision.origin || ""}/${decision.key}` : null;
+      const identityKey = decision ? `decision:${decisionIdentity}` : `yourgo:${entry.value}`;
+      const pending = pendingRecords();
+      const prior = pending.find((record) => record.kind === "your-go" && ackKey(record) === identityKey);
+      if (prior && prior.action === action && (prior.guidance || null) === (action === "guidance" ? text : null)) {
+        sendJson(res, 200, { status: "already-queued", pending: pending.length });
+        return;
+      }
+      const subject = decision
+        ? `decision ${decision.key} for ${decision.origin || "legacy"} in ${decision.home}`
+        : `work ${workId}${workHome === "main" ? "" : ` (owned by domain supervisor ${workHome})`}`;
+      const prompts = {
+        go: `Captain clicked GO AHEAD for ${subject}: re-resolve its current wait, lift a captain hold through the normal backlog lifecycle where one is set, and proceed through normal re-evaluation, project resolution, and authority checks. This grants no authority beyond those checks; a PR merge, destructive, or irreversible consequence still needs chat confirmation.`,
+        park: `Captain clicked NOT NOW for ${subject}: park it through the normal backlog lifecycle so it rests outside the active queue until the captain returns to it. This changes scheduling only and grants no other authority.`,
+        guidance: `Captain sent guidance for ${subject}: ${text}. Treat it as captain input on that waiting item${decision ? " and route any resulting answer through the normal decision lifecycle" : " through the normal lifecycle"}; a destructive or irreversible consequence still needs chat confirmation.`,
+      };
+      const record = {
+        schema: "fm-dash-command.v1",
+        kind: "your-go",
+        id: ref,
+        action,
+        guidance: action === "guidance" ? text : null,
+        work_id: workId,
+        work_home: workHome,
+        work_identity: decision ? null : entry.value,
+        decision_identity: decisionIdentity,
+        decision_origin: decision ? decision.origin : null,
+        requested_by: requesterLogin(req),
+        requested_at: new Date().toISOString(),
+        dashboard_generated: currentDashboard.generated,
+        prompt: prompts[action],
+      };
+      const name = enqueueCommand(record);
+      if (prior) removePendingIfUnchanged(prior);
+      log(`queued your-go ${action} for ${workId} as ${name} for ${record.requested_by}`);
+      sendJson(res, 200, { status: prior ? "replaced" : "queued", pending: pendingRecords().length });
       return;
     }
 
