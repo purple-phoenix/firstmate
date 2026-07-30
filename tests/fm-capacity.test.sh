@@ -586,27 +586,37 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
     ]
     | .secondmate_current.records[0].holds = [
       {"id":"mate-held","title":"Wait for external completion","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-20","state":"blocked","source":"child-state"},
-      {"id":"mate-pr-held","title":"Wait for pull request approval","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-21","state":"paused","reason":"PR awaiting merge approval","pr_present":true,"source":"child-state"}
+      {"id":"mate-pr-held","title":"Wait for pull request approval","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-21","state":"paused","reason":"PR awaiting merge approval","pr_present":true,"source":"child-state"},
+      {"id":"mate-audit-idea","title":"Feature (queued): shared review workspace","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-22","reason":"Audit feature opportunity","source":"backlog"}
     ]
     | .secondmate_current.records[0].queued += [
       {"id":"mate-choice","title":"Choose the secondmate rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"Sensitive reason"},
+      {"id":"mate-audit-idea","title":"Feature (queued): shared review workspace","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-22","hold_kind":"captain","hold_reason":"Audit feature opportunity - queued for captain prioritization","body_excerpt":"Acceptance criteria: workspace carries context."},
       {"id":"mate-structured","title":"Wait on a structured hold","repo":"delta","project_resolved":true,"kind":"ship","hold_reason":"Sensitive reason"},
       {"id":"mate-time","title":"Resume after 2026-08-15","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: resume safely."},
       {"id":"after-mate-held","title":"Continue after held work","repo":"delta","project_resolved":true,"kind":"ship","blocked_by":"mate-held","body_excerpt":"Acceptance criteria: held work clears."}
     ]
     | .secondmate_current.records[0].decisions_open[0].id = "mate-held"
-    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":2,"queued":5}
+    | .secondmate_current.records[0].counts = {"active_children":0,"decisions_open":2,"holds":3,"queued":6}
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "secondmate captain-hold capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.blocked | length) == 10
-    and .measures.open_captain_actions == 5
+    (.pipeline.blocked | length) == 11
+    and .measures.open_captain_actions == 6
     and (.recommendations[] | select(.id == "CAP-01") | .evidence | startswith("4 structured captain"))
-    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 6
+    and ([.pipeline.blocked[] | select(.owner | contains("persistent"))] | length) == 7
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .what_you_can_do] | all(type == "string" and length > 0))
     and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true and .what_you_can_do == "Review and merge its open pull request - this wait is on you, not an automatic process.")] | length) == 1
+    and (.pipeline.blocked | any(
+      (.owner | contains("persistent"))
+      and .captain_gate == true
+      and .reason == "Waiting on your go"
+      and .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("held for your prioritization"))
+      and (. as $card | $card.what_you_can_do | contains($card.id))
+      and ((.what_you_can_do | test("Nothing yet"; "i")) | not)))
     and ([.pipeline.blocked[] | select((.owner | contains("persistent")) and .captain_gate == true) | tostring] | all(contains("http") | not))
     and ([.pipeline.blocked[] | select(.owner | contains("persistent")) | .waits_on // [] | join(" ")] | map(select(contains("worker question"))) | length) == 2
   ' >/dev/null || fail "secondmate captain hold was missing or double-counted: $json"
@@ -1227,12 +1237,16 @@ test_captain_gated_pauses_need_action_without_eta() {
     .backlog.records += [
       {"order":10,"state":"in_flight","structured":true,"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: pipeline hardened."},
       {"order":11,"state":"in_flight","structured":true,"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: transits prefetched."},
-      {"order":12,"state":"in_flight","structured":true,"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: window observed."}
+      {"order":12,"state":"in_flight","structured":true,"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: window observed."},
+      {"order":13,"state":"in_flight","structured":true,"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: canary order given."},
+      {"order":14,"state":"in_flight","structured":true,"id":"closed-pr-pause","title":"Hold after a closed PR","repo":"tau","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: retry decision given."}
     ]
     | .tasks += [
       {"id":"pr-pause","kind":"ship","project":"mu","current_state":{"state":"paused","source":"status-fold","detail":"PR 106 awaiting captain merge decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/106"},"paths":{"report":{"present":false}},"backlog":{"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
       {"id":"review-pause","kind":"ship","project":"nu","current_state":{"state":"paused","source":"status-fold","detail":"planned batch under captain review, holding for approvals"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
-      {"id":"ambient-pause","kind":"ship","project":"xi","current_state":{"state":"paused","source":"status-fold","detail":"upstream rate limit window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
+      {"id":"ambient-pause","kind":"ship","project":"xi","current_state":{"state":"paused","source":"status-fold","detail":"upstream rate limit window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
+      {"id":"stale-pr-pause","kind":"ship","project":"astro","current_state":{"state":"paused","source":"status-fold","detail":"PR merged; awaiting captain canary decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"paths":{"report":{"present":false}},"backlog":{"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
+      {"id":"closed-pr-pause","kind":"ship","project":"tau","current_state":{"state":"paused","source":"status-fold","detail":"PR closed; awaiting captain retry decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/tau/pull/12"},"paths":{"report":{"present":false}},"backlog":{"id":"closed-pr-pause","title":"Hold after a closed PR","repo":"tau","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -1248,22 +1262,38 @@ test_captain_gated_pauses_need_action_without_eta() {
     and (.pipeline.blocked | any(
       .captain_gate == true
       and .wait.class == "needs_actor"
-      and ((.waits_on | join(" ")) | contains("paused for your review or decision"))
-      and (.what_you_can_do | contains("Review and decide in chat"))))
-    and ([.pipeline.blocked[] | select(.captain_gate == true)] | length) == 2
+      and ((.waits_on | join(" ")) | contains("paused: planned batch under captain review, holding for approvals"))
+      and (.what_you_can_do | contains("Give your go or decision on: planned batch under captain review, holding for approvals"))
+      and ((.what_you_can_do | test("open pull request"; "i")) | not)
+      and ((.waits_on | join(" ") | test("open pull request"; "i")) | not)))
+    and (.pipeline.blocked | any(
+      .captain_gate == true
+      and ((.waits_on | join(" ")) | contains("paused: PR merged; awaiting captain canary decision"))
+      and (.what_you_can_do | contains("captain canary decision"))
+      and ((.what_you_can_do | test("open pull request"; "i")) | not)
+      and ((.waits_on | join(" ") | test("open pull request"; "i")) | not)))
+    and (.pipeline.blocked | any(
+      .captain_gate == true
+      and ((.waits_on | join(" ")) | contains("paused: PR closed; awaiting captain retry decision"))
+      and (.what_you_can_do | contains("captain retry decision"))
+      and ((.what_you_can_do | test("open pull request"; "i")) | not)
+      and ((.waits_on | join(" ") | test("open pull request"; "i")) | not)))
+    and ([.pipeline.blocked[] | select(.captain_gate == true)] | length) == 4
     and (.pipeline.blocked | any(
       .wait.class == "self_clearing"
       and .wait.kind == "paused"
       and .wait.progress.basis == "none"
       and .wait.progress.percent == null
       and (.wait.progress.label | contains("time unknown"))))
-    and .measures.open_captain_actions >= 3
+    and .measures.open_captain_actions >= 5
   ' >/dev/null || fail "captain-gated pauses are misclassified: $json"
   html=$(cat "$output")
   assert_contains "$html" 'class="verb verb-review"' "captain-gated pauses are missing from the needs-you band"
   assert_contains "$html" 'Paused work is waiting on you, not an automatic process.' "captain-gate rows lack the plain-language framing"
   assert_contains "$html" 'Review and merge its open pull request' "the PR-gated pause lacks its what-you-can-do line"
-  assert_contains "$html" 'Review and decide in chat' "the review-gated pause lacks its what-you-can-do line"
+  assert_contains "$html" 'PR merged; awaiting captain canary decision' "the merged-PR captain pause lacks its declared reason"
+  assert_contains "$html" 'PR closed; awaiting captain retry decision' "the closed-PR captain pause lacks its declared reason"
+  assert_contains "$html" 'Give your go or decision on:' "the non-PR captain pause lacks its what-you-can-do line"
   assert_contains "$html" 'time unknown' "the ambiguous pause does not admit its unknown duration"
   case "$html" in
     *'% done'*) fail "a pause fabricated a percent from unrelated past waits" ;;
@@ -1271,7 +1301,56 @@ test_captain_gated_pauses_need_action_without_eta() {
   case "$html" in
     *'based on past runs'*) fail "a pause borrowed an ETA from unrelated past waits" ;;
   esac
+  # A stale pr= must not invent open-PR language for non-PR captain-gated pauses.
+  # Exactly one captain_gate card may mention an open pull request (the real PR).
+  printf '%s' "$json" | jq -e '
+    ([.pipeline.blocked[]
+      | select(.captain_gate == true)
+      | select(((.waits_on | join(" ")) + " " + (.what_you_can_do // "")) | test("open pull request"; "i"))]
+     | length) == 1
+    and ([.pipeline.blocked[]
+      | select(.captain_gate == true)
+      | select((.waits_on | join(" ")) | test("PR (merged|closed)"))
+      | select(((.waits_on | join(" ")) + " " + (.what_you_can_do // "")) | test("open pull request"; "i"))]
+     | length) == 0
+  ' >/dev/null || fail "open pull request language leaked onto non-PR captain gates: $json"
   pass "captain-gated pauses render as needs-your-action with no fabricated ETA"
+}
+
+test_captain_kind_idea_hold_is_your_go_not_stuck() {
+  local home="$TMP_ROOT/idea-hold-home" snapshot="$TMP_ROOT/idea-hold-snapshot.json" environment="$TMP_ROOT/idea-hold-environment.json" output="$TMP_ROOT/idea-hold-home/data/idea-hold.html" json html
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records += [
+      {"order":20,"state":"queued","structured":true,"id":"audit-idea-w6","title":"Feature (queued): unified workspace","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-29","hold_kind":"captain","hold_reason":"Audit feature opportunity - queued for captain prioritization","body_excerpt":"Acceptance criteria: workspace carries context."}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$(FM_HOME="$home" "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "captain idea-hold capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | any(
+      .captain_gate == true
+      and .reason == "Waiting on your go"
+      and .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("held for your prioritization"))
+      and (.what_you_can_do | contains("Prioritize or give your go on"))
+      and (. as $card | $card.what_you_can_do | contains($card.id))
+      and ((.what_you_can_do | test("Nothing yet"; "i")) | not)
+      and (.reason != "Structured hold")))
+    and ([.pipeline.blocked[] | select(.reason == "Structured hold" and (.what_you_can_do | test("Nothing yet"; "i")))] | length) == 0
+  ' >/dev/null || fail "captain-kind idea hold misclassified as stuck: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'class="verb verb-review"' "captain idea hold is missing from the needs-you band"
+  assert_contains "$html" 'Prioritize or give your go on item-' "captain idea hold lacks an opaque choice reference"
+  case "$html" in
+    *'verb-blocked">Stuck'*)
+      # Stuck may still exist for other fixture rows; the idea hold must not be one.
+      printf '%s' "$html" | grep -F 'verb-blocked">Stuck' | grep -q 'held for your prioritization' &&
+        fail "captain idea hold rendered as STUCK" || true
+      ;;
+  esac
+  pass "captain-kind idea holds render as waiting-on-your-go, not STUCK"
 }
 
 test_wait_history_estimates_and_overrun() {
@@ -1482,4 +1561,5 @@ test_keyless_questions_and_blocker_chains
 test_wait_estimator_honesty
 test_wait_classes_render_distinct_treatments
 test_captain_gated_pauses_need_action_without_eta
+test_captain_kind_idea_hold_is_your_go_not_stuck
 test_wait_history_estimates_and_overrun

@@ -163,11 +163,18 @@ WAIT TREATMENT AND PROGRESS
   chain and what-you-can-do line stay authoritative. Working validation and CI
   cards carry the same self-clearing treatment. A declared pause whose recorded
   evidence shows the wait is on the captain (a pause reason naming the captain
-  or addressing them directly, or an open PR on the task's record plus a
-  merge/review/approval-shaped reason) is a captain gate: it classifies as
-  needs_actor with captain_gate=true, renders in the needs-you band with a
-  what-you-can-do line, and never gets a progress bar or ETA, because a human
-  decision has no duration model. Self-clearing waits carry plain-language copy
+  or addressing them directly, or an open PR plus a merge/review/approval-shaped
+  reason) is a captain gate: it classifies as needs_actor with captain_gate=true,
+  renders in the needs-you band with a what-you-can-do line, and never gets a
+  progress bar or ETA, because a human decision has no duration model. A PR wait
+  is claimed only when an open PR is honestly evidenced (recorded pr= plus no
+  merged signal, or equivalent positive open evidence such as the pause reason
+  affirmatively saying the pull request is open or awaiting review/merge); a stale pr= from an already-merged delivery
+  never invents "open pull request" copy - the pause's own declared reason is
+  the wait description instead. A queued hold with hold-kind=captain (including
+  ship/scout prioritization holds, not only kind=captain decision rows) is the
+  same needs-your-go treatment rather than a stuck structured hold. Self-clearing
+  waits carry plain-language copy
   and, where measurable, wait.progress with basis "history" (elapsed vs the
   recorded typical duration), "deadline" (exact time-gate math), or "none".
   Percent and remaining-time estimates are reserved for measurable machine
@@ -740,26 +747,93 @@ function waitKindFromDetail(detail) {
 
 // A declared pause is a captain gate when its recorded evidence shows the wait
 // is on the captain, not an external process: the pause reason names the
-// captain or addresses the captain directly, or the task's own record carries
-// an open PR and the reason names a merge/review/approval-shaped gate. A
-// captain gate is needs-your-action work and never gets a progress bar or ETA -
-// there is no duration model for a human decision. An ambiguous pause with no
-// captain signal stays self-clearing with elapsed-only, time-unknown progress.
+// captain or addresses the captain directly, or an honestly open PR is present
+// and the reason names a merge/review/approval-shaped gate. A captain gate is
+// needs-your-action work and never gets a progress bar or ETA - there is no
+// duration model for a human decision. An ambiguous pause with no captain
+// signal stays self-clearing with elapsed-only, time-unknown progress.
+//
+// Open-PR evidence: a recorded pr= (or pr_present) is necessary but never
+// sufficient on its own - meta keeps pr= after merge. Claim a PR wait only
+// when that record is still open: no explicit merged/not-open signal, and a
+// positive open signal (explicit open flag, armed merge poll, or the pause
+// reason affirmatively saying the pull request is open or awaiting its
+// review/merge). Otherwise render the pause's own declared reason and never
+// invent open-PR language.
 const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|merge|order|sign-?off)\b/i;
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
-function captainGatedPause(task) {
+const PR_TERMINAL_REASON = /(?:\b(?:pull\s+requests?|PRs?)\b[^\n.!?;]{0,80}\b(?:merged|closed)\b|\b(?:merged|closed)\b[^\n.!?;]{0,80}\b(?:pull\s+requests?|PRs?)\b)/i;
+const PR_OPEN_REASON = /(?:\bopen\s+(?:pull\s+requests?|PRs?)\b|\b(?:pull\s+requests?|PRs?)(?:\s*#?\d+)?\s+(?:is\s+)?(?:open|pending|awaiting|ready\s+for)\b|\b(?:awaiting|pending)\b[^\n.!?;]{0,60}\b(?:review|approval|merge)\b[^\n.!?;]{0,30}\b(?:pull\s+requests?|PRs?)\b)/i;
+
+function pauseReasonText(task) {
+  return String(task.current_state?.detail ?? task.reason ?? task.doing ?? "").trim();
+}
+
+function prRecorded(task) {
   const prUrl = typeof task.pr?.url === "string" && task.pr.url !== "" ? task.pr.url : null;
-  const prPresent = prUrl !== null || task.pr_present === true;
-  const reason = String(task.current_state?.detail ?? task.reason ?? task.doing ?? "");
-  const gated = CAPTAIN_GATE_REASON.test(reason) || (prPresent && PR_GATE_REASON.test(reason));
+  return prUrl !== null || task.pr_present === true;
+}
+
+function hasOpenPrEvidence(task) {
+  if (!prRecorded(task)) return false;
+  const reason = pauseReasonText(task);
+  if (task.pr?.merged === true || task.pr_merged === true || task.pr?.open === false || task.pr_open === false) {
+    return false;
+  }
+  if (task.pr?.merge_poll === "merged" || task.pr_merge_poll === "merged") return false;
+  if (PR_TERMINAL_REASON.test(reason)) return false;
+  if (task.pr?.open === true || task.pr_open === true) return true;
+  if (task.pr?.merge_poll_armed === true || task.pr_merge_poll_armed === true) return true;
+  return PR_OPEN_REASON.test(reason);
+}
+
+function captainGatedPause(task) {
+  const reason = pauseReasonText(task);
+  const openPr = hasOpenPrEvidence(task);
+  const gated = CAPTAIN_GATE_REASON.test(reason) || (openPr && PR_GATE_REASON.test(reason));
   if (!gated) return null;
+  if (openPr) {
+    return {
+      wait: "paused for your decision on its open pull request",
+      action: "Review and merge its open pull request - this wait is on you, not an automatic process.",
+    };
+  }
+  // Captain-gated but no open PR: keep the declared pause reason as the wait
+  // description and derive a go/decision CTA from it - never invent a PR.
+  const declared = reason || "your review or decision";
   return {
-    wait: prPresent
-      ? "paused for your decision on its open pull request"
-      : "paused for your review or decision",
-    action: prPresent
-      ? "Review and merge its open pull request - this wait is on you, not an automatic process."
-      : "Review and decide in chat - this wait is on you, not an automatic process.",
+    wait: reason ? `paused: ${reason}` : "paused for your review or decision",
+    action: `Give your go or decision on: ${declared} - this wait is on you, not an automatic process.`,
+  };
+}
+
+// Queued backlog hold-kind=captain is captain prioritization / go-ahead work,
+// whether the row is kind=captain (a keyed decision) or ship/scout (e.g. an
+// audit feature idea held for the captain's prioritization). Never treat it as
+// a stuck structured hold with "Nothing yet".
+function captainPrioritizationHold(record, now) {
+  return activeHold(record, now) && record.hold_kind === "captain";
+}
+
+function captainPrioritizationCopy(record, owner) {
+  if (record.kind === "captain") {
+    const decision = backlogDecisionIdentity(record);
+    const ref = decisionRef(owner, decision.origin, decision.key);
+    return {
+      reason: "Captain hold",
+      waits_on: [`waiting on your decision ${ref}`],
+      what_you_can_do: `Answer decision ${ref} - it is the root cause.`,
+      decision_ref: ref,
+      decision,
+    };
+  }
+  const ref = itemRef(owner, record.id || "unstructured");
+  return {
+    reason: "Waiting on your go",
+    waits_on: ["held for your prioritization"],
+    what_you_can_do: `Prioritize or give your go on ${ref} - this wait is on you, not an automatic process.`,
+    decision_ref: null,
+    decision: null,
   };
 }
 
@@ -1054,10 +1128,13 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         for (const context of applicableContexts) addRoot(context.key, nextSegments, context.wait, context.action, context.kind);
         continue;
       }
-      if (blockerRecord?.kind === "captain" && blockerRecord.hold_kind === "captain") {
-        const identity = backlogDecisionIdentity(blockerRecord);
-        const ref = decisionRef(owner, identity.origin, identity.key);
-        addRoot(`decision:${ref}`, nextSegments, `waiting on your decision ${ref}`, `Answer decision ${ref} - it is the root cause.`, "decision");
+      if (blockerRecord && captainPrioritizationHold(blockerRecord, now)) {
+        const copy = captainPrioritizationCopy(blockerRecord, owner);
+        if (copy.decision_ref) {
+          addRoot(`decision:${copy.decision_ref}`, nextSegments, copy.waits_on[0], copy.what_you_can_do, "decision");
+        } else {
+          addRoot(`captain-go:${blockerId}`, nextSegments, copy.waits_on[0], copy.what_you_can_do, "captain_gate");
+        }
         continue;
       }
       const gate = blockerRecord && futureTimeGate(blockerRecord, now);
@@ -1102,6 +1179,15 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (blockerIds.length === 0) {
       const gate = futureTimeGate(startRecord, now);
       if (gate) return { waits: [`waiting until ${gate}`], action: `Nothing - this unblocks itself when the ${gate} time gate passes.`, root_kinds: ["gate"], gate_until: gate };
+      if (captainPrioritizationHold(startRecord, now)) {
+        const copy = captainPrioritizationCopy(startRecord, owner);
+        return {
+          waits: copy.waits_on,
+          action: copy.what_you_can_do,
+          root_kinds: [copy.decision_ref ? "decision" : "captain_gate"],
+          gate_until: null,
+        };
+      }
       return { waits: ["held by a structured wait gate"], action: "Nothing yet - firstmate watches this hold and escalates if your input is needed.", root_kinds: ["hold"], gate_until: null };
     }
     const resolvedRoots = [...roots.values()];
@@ -1168,21 +1254,24 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       recurringIds.add(`main/${record.id}`);
       continue;
     }
-    if (holdIsActive && record.kind === "captain" && record.hold_kind === "captain") {
-      const decision = backlogDecisionIdentity(record);
-      const holdRef = decisionRef("main", decision.origin, decision.key);
-      decisions.push({
-        owner: "main",
-        task: itemRef("main", record.id),
-        key: holdRef,
-        reason: "A queued choice is held for your decision.",
-      });
+    if (captainPrioritizationHold(record, now)) {
+      const copy = captainPrioritizationCopy(record, "main");
+      if (copy.decision_ref) {
+        decisions.push({
+          owner: "main",
+          task: itemRef("main", record.id),
+          key: copy.decision_ref,
+          reason: "A queued choice is held for your decision.",
+        });
+      }
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason: "captain hold" });
-      pipeline.blocked.push(Object.assign(cardFromBacklog(record, "main", "blocked", "Captain hold"), {
-        waits_on: [`waiting on your decision ${holdRef}`],
-        what_you_can_do: `Answer decision ${holdRef} - it is the root cause.`,
+      const holdCard = Object.assign(cardFromBacklog(record, "main", "blocked", copy.reason), {
+        waits_on: copy.waits_on,
+        what_you_can_do: copy.what_you_can_do,
         wait: { class: "needs_actor" },
-      }));
+      });
+      if (!copy.decision_ref) holdCard.captain_gate = true;
+      pipeline.blocked.push(holdCard);
       continue;
     }
     if (record.blocked_by || holdIsActive) {
@@ -1273,6 +1362,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const parkedQueuedIds = new Set((mate.queued || []).filter((record) => activeHold(record, now) && record.hold_kind === "parked").map((record) => record.id));
     const recurringQueuedIds = new Set((mate.queued || []).filter((record) => recurringNextRun(record, now)).map((record) => record.id));
     const inactiveHoldQueuedIds = new Set((mate.queued || []).filter((record) => !record.blocked_by && record.hold_reason != null && holdExpired(record, now)).map((record) => record.id));
+    const mateQueuedById = new Map((mate.queued || []).map((record) => [record.id, record]));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       // A parked, recurring, or expired-hold queued record can also project
@@ -1281,6 +1371,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       // re-enters normal readiness classification).
       if (parkedQueuedIds.has(hold.id) || recurringQueuedIds.has(hold.id) || inactiveHoldQueuedIds.has(hold.id)) continue;
       heldIds.add(hold.id);
+      const queuedHold = mateQueuedById.get(hold.id);
+      const holdRecord = queuedHold && captainPrioritizationHold(queuedHold, now) ? queuedHold : hold;
       if (hold.source === "child-state") {
         if (requiresGithubAuth(hold.delivery_mode)) secondmateGithubBoundDelivery.add(mate.id);
         if (hold.repo) {
@@ -1290,14 +1382,21 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         }
       }
       const ageDays = dateAgeDays(hold.since, now);
-      blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
-      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
-      const holdCard = Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
-        waits_on: chain.waits,
-        what_you_can_do: chain.action,
+      const captainHold = captainPrioritizationHold(holdRecord, now);
+      const copy = captainHold ? captainPrioritizationCopy(holdRecord, mate.id) : null;
+      blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: captainHold ? "captain hold" : "structured wait gate" });
+      const chain = captainHold ? null : describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
+      const holdCard = Object.assign(cardFromBacklog(holdRecord, mate.id, "blocked", copy?.reason || "Structured wait gate"), {
+        waits_on: copy?.waits_on || chain.waits,
+        what_you_can_do: copy?.what_you_can_do || chain.action,
       });
       pipeline.blocked.push(holdCard);
-      attachChainWait(holdCard, chain, mate.id, hold);
+      if (captainHold) {
+        holdCard.wait = { class: "needs_actor" };
+        if (!copy.decision_ref) holdCard.captain_gate = true;
+      } else {
+        attachChainWait(holdCard, chain, mate.id, hold);
+      }
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
       }
@@ -1350,15 +1449,19 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         continue;
       }
       secondmateQueuedConsidered += 1;
-      if (holdIsActive && record.kind === "captain" && record.hold_kind === "captain") {
-        const identity = backlogDecisionIdentity(record);
-        const ref = decisionRef(mate.id, identity.origin, identity.key);
+      if (captainPrioritizationHold(record, now)) {
+        // Secondmate decisions_open already supplies CAP-01 Decide rows for
+        // kind=captain holds; do not double-count them here. Ship/scout
+        // prioritization holds become captain_gate Review rows instead.
+        const copy = captainPrioritizationCopy(record, mate.id);
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
-        pipeline.blocked.push(Object.assign(cardFromBacklog(record, mate.id, "blocked", "Captain hold"), {
-          waits_on: [`waiting on your decision ${ref}`],
-          what_you_can_do: `Answer decision ${ref} - it is the root cause.`,
+        const mateHoldCard = Object.assign(cardFromBacklog(record, mate.id, "blocked", copy.reason), {
+          waits_on: copy.waits_on,
+          what_you_can_do: copy.what_you_can_do,
           wait: { class: "needs_actor" },
-        }));
+        });
+        if (!copy.decision_ref) mateHoldCard.captain_gate = true;
+        pipeline.blocked.push(mateHoldCard);
         continue;
       }
       if (record.blocked_by || holdIsActive) {
