@@ -1542,6 +1542,16 @@ test_live_agents_render_working_idle_and_unavailable_states() {
   jq '
     (.secondmate_current.records[] | select(.id == "unknown-mate") | .current) = {"state":"unknown","reason":"structured home snapshot failed"}
     | (.secondmate_current.records[] | select(.id == "unknown-mate") | .provenance.selected) = "unknown"
+    | .tasks += [
+      {"id":"checks-wait","kind":"ship","project":"alpha","current_state":{"state":"parked","source":"run-step","detail":"waiting for CI checks"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/checks"},"backlog":{"id":"checks-wait","title":"Wait for alpha checks"}},
+      {"id":"review-wait","kind":"ship","project":"beta","current_state":{"state":"parked","source":"run-step","detail":"PR awaiting captain merge approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/review"},"backlog":{"id":"review-wait","title":"Wait for beta review"}},
+      {"id":"ambiguous-wait","kind":"ship","project":"gamma","current_state":{"state":"parked","source":"run-step","detail":"PR status unavailable"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/ambiguous"},"backlog":{"id":"ambiguous-wait","title":"Wait for gamma status"}}
+    ]
+    | .secondmate_current.registry.records += [
+      {"id":"bounded-out","scope":"testing","projects":["tests"]}
+    ]
+    | .secondmate_current.total = 4
+    | .secondmate_current.truncated = 1
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs") ||
@@ -1550,8 +1560,13 @@ test_live_agents_render_working_idle_and_unavailable_states() {
     .live_agents.generated == "2026-07-17T16:00:00Z"
     and (.live_agents.records | any(.role == "worker" and .activity == "working"))
     and (.live_agents.records | any(.role == "worker" and .activity == "validating"))
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_ci" and .label == "Waiting on checks")] | length) == 1
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_review" and .label == "Waiting for your review or merge")] | length) == 1
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting" and .label == "Waiting")] | length) == 1
     and (.live_agents.records | any(.role == "supervisor" and .activity == "idle"))
-    and (.live_agents.records | any(.role == "supervisor" and .activity == "unavailable"))
+    and ([.live_agents.records[] | select(.role == "supervisor")] | length) == 4
+    and ([.live_agents.records[] | select(.role == "supervisor" and .activity == "unavailable")] | length) == 2
+    and (.live_agents.records | any(.role == "supervisor" and .detail == "This registered home was outside the bounded reading."))
     and (.live_agents.records | all(.as_of == "2026-07-17T16:00:00Z"))
   ' >/dev/null || fail "live-agents model omitted a current worker or honest supervisor state: $json"
   jq -e '

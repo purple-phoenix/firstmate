@@ -530,23 +530,23 @@ function agentActivity(state, detail, decisions = 0, stage = null) {
   if (decisions > 0) {
     return { activity: "waiting_on_decision", label: "Waiting on a decision", detail: "A decision is needed before work can continue." };
   }
+  if (normalized === "captain_decision") {
+    return { activity: "waiting_on_decision", label: "Waiting on a decision", detail: "Work in this home needs a decision." };
+  }
+  if (normalized === "no_active_work") {
+    return { activity: "idle", label: "Idle", detail: "No active work is assigned in this home." };
+  }
   if (/(?:waiting|awaiting|running|pending).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:waiting|awaiting|running|pending)/i.test(doing)) {
-    return { activity: "waiting_on_ci", label: "Waiting on CI", detail: "Automated checks are running." };
+    return { activity: "waiting_on_ci", label: "Waiting on checks", detail: "Automated checks are running." };
+  }
+  if (/(?:waiting|awaiting|pending|ready).{0,30}(?:captain|review|approvals?|merge)|(?:captain|review|approvals?|merge).{0,30}(?:waiting|awaiting|pending|ready)/i.test(doing)) {
+    return { activity: "waiting_on_review", label: "Waiting for your review or merge", detail: "Review or merge is needed before work can continue." };
   }
   if (stage === "validating_fixing" || /validat|fixing|review|\btest(?:ing)?\b|lint|document|rebase|pre-push/i.test(doing)) {
     return { activity: "validating", label: "Validating", detail: "Review and checks are under way." };
   }
   if (normalized === "working" || normalized === "active_child_work") {
     return { activity: "working", label: "Working", detail: "Actively working on the task." };
-  }
-  if (stage === "pr_ci_approval") {
-    return { activity: "waiting_on_ci", label: "Waiting on CI", detail: "Automated checks are running." };
-  }
-  if (normalized === "captain_decision") {
-    return { activity: "waiting_on_decision", label: "Waiting on a decision", detail: "Work in this home needs a decision." };
-  }
-  if (normalized === "no_active_work") {
-    return { activity: "idle", label: "Idle", detail: "No active work is assigned in this home." };
   }
   return { activity: "waiting", label: "Waiting", detail: "Waiting for the recorded condition to clear." };
 }
@@ -601,6 +601,20 @@ function liveAgentRollCall(snapshot) {
     const byId = new Map();
     for (const task of projected) if (task?.id && !byId.has(task.id)) byId.set(task.id, task);
     for (const task of byId.values()) addWorker(mate.id, task, mate.freshness?.observed_at || snapshot.generated);
+  }
+  const observedHomes = new Set((snapshot.secondmate_current?.records || []).map((mate) => mate.id));
+  for (const mate of snapshot.secondmate_current?.registry?.records || []) {
+    if (!mate?.id || observedHomes.has(mate.id)) continue;
+    records.push({
+      agent: "Supervisor",
+      role: "supervisor",
+      home: `Domain ${opaqueRef("home", mate.id)}`,
+      task: "Current home details unavailable",
+      activity: "unavailable",
+      label: "Unavailable",
+      detail: "This registered home was outside the bounded reading.",
+      as_of: snapshot.generated,
+    });
   }
   return { generated: snapshot.generated, records };
 }
