@@ -9,6 +9,7 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 
 - Every current one-click-eligible `CAP-NN` action gets an "Approve & send" button.
 - A "Refresh capacity" button reruns `bin/fm-capacity.mjs` server-side and reloads the page; the service also reruns the producer automatically on the configured interval.
+- A Live Agents section shows each current worker and each registered domain supervisor, the task, a captain-language activity label, and the observation time; readable secondmate homes contribute their bounded structured worker inventory, while an unreadable home stays visible as an unavailable supervisor rollup rather than disappearing or being guessed.
 - The page is de-anonymized for the authenticated captain: opaque `item-NN`/`project-NN`/`home-NN` references become real names, and work items and decisions are clickable rich detail views (description, test plan, PR link, tailnet preview links, report excerpt, recent activity) assembled from task briefs, recorded metadata, the backlog, and scout reports.
 - Open decisions with `data/<origin>/decisions/<key>.md` records show each recorded option with its impact, a per-option Approve button, and a bounded custom-answer control.
 - An Ideas section renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.

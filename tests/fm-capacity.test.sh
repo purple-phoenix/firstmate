@@ -1535,8 +1535,41 @@ test_recurring_items_get_their_own_section() {
   pass "date-gated cadence work rests in the calm recurring section with next-run and last-run linkage, and an expired date gate re-enters normal readiness"
 }
 
+test_live_agents_render_working_idle_and_unavailable_states() {
+  local home="$TMP_ROOT/live-agents-home" snapshot="$TMP_ROOT/live-agents-snapshot.json" environment="$TMP_ROOT/live-agents-environment.json"
+  local output="$TMP_ROOT/live-agents-home/data/live-agents.html" refs="$TMP_ROOT/live-agents-home/state/live-agents-refs.json" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    (.secondmate_current.records[] | select(.id == "unknown-mate") | .current) = {"state":"unknown","reason":"structured home snapshot failed"}
+    | (.secondmate_current.records[] | select(.id == "unknown-mate") | .provenance.selected) = "unknown"
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs") ||
+    fail "live-agents fixture run failed"
+  printf '%s' "$json" | jq -e '
+    .live_agents.generated == "2026-07-17T16:00:00Z"
+    and (.live_agents.records | any(.role == "worker" and .activity == "working"))
+    and (.live_agents.records | any(.role == "worker" and .activity == "validating"))
+    and (.live_agents.records | any(.role == "supervisor" and .activity == "idle"))
+    and (.live_agents.records | any(.role == "supervisor" and .activity == "unavailable"))
+    and (.live_agents.records | all(.as_of == "2026-07-17T16:00:00Z"))
+  ' >/dev/null || fail "live-agents model omitted a current worker or honest supervisor state: $json"
+  jq -e '
+    [.refs[] | select(.kind == "item" and .value == "main/build-old" and .label == "Build the alpha subsystem")] | length == 1
+  ' "$refs" >/dev/null || fail "private refs sidecar omitted the live task title"
+  assert_grep '>Live agents<' "$output" "dashboard lacks the live-agents section"
+  assert_grep '>What every agent is doing now<' "$output" "dashboard lacks the live-agents heading"
+  assert_grep '>Idle<' "$output" "dashboard lacks an idle supervisor state"
+  assert_grep '>Unavailable<' "$output" "dashboard lacks an unavailable supervisor rollup"
+  assert_grep 'Reading generated 2026-07-17T16:00:00Z' "$output" "live-agents section lacks its observation time"
+  assert_grep '>As of<' "$output" "live-agents section lacks per-row freshness labeling"
+  assert_no_grep 'Build the alpha subsystem' "$output" "offline live-agents section leaked a private task title"
+  pass "live agents render current workers plus idle and unavailable supervisor states with explicit freshness"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
+test_live_agents_render_working_idle_and_unavailable_states
 test_parked_items_rest_in_the_parking_lot
 test_recurring_items_get_their_own_section
 test_cross_home_overlap_holds_supersession_and_active_count

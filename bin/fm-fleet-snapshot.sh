@@ -54,7 +54,7 @@
 #     projects fields when its canonical one-line syntax is parseable, so projections
 #     can describe routing alignment without reopening data/secondmates.md.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted.
+#     queued, landed, endpoints, agents, counts, and omitted.
 #     Active children and holds preserve bounded project, delivery, age, and kind
 #     evidence; queued work additionally preserves priority, order, and definition
 #     evidence used by cross-home projections.
@@ -655,8 +655,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
     | ([ $backlog.records[]?
+         | select((.state == "in_flight" or .state == "queued") and .structured) ]) as $owned_current
+    | ([ $backlog.records[]?
          | select(.structured and
-             (.state == "queued" or
+             ((.state == "queued"
+               and (.id as $id
+                    | any($tasks[]; .id == $id and .current_state.state == "working") | not)) or
               (.state == "in_flight" and .current_role == "held"
                and (.id as $id
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
@@ -680,10 +684,13 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
-    | ([ $tasks[]
-         | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
-         | {id,state:.current_state.state} ]) as $unowned_children
-    | ([ $owned_in_flight[] as $work
+    | ([ $tasks[] as $task
+         # Current task metadata joined to either structured current backlog
+         # section is owned. The current-state reader decides whether that
+         # worker is working or waiting; the section heading must not erase it.
+         | select($task.id as $id | [$owned_current[].id] | index($id) | not)
+         | {id:$task.id,state:$task.current_state.state} ]) as $unowned_children
+    | ([ $owned_current[] as $work
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
@@ -699,7 +706,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         else empty end,
         if ($unowned_children | length) > 0 then
           {kind:"unowned_current",ids:($unowned_children | map(.id)),
-           reason:("live child state has no in-flight backlog item: " +
+           reason:("live child state has no structured current backlog item: " +
                    ($unowned_children | map(.id + "=" + .state) | join(", ")))}
         else empty end,
         if ($terminal_in_flight | length) > 0 then
@@ -707,7 +714,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            reason:("in-flight backlog item has terminal child state: " +
                    ($terminal_in_flight | map(.id + "=" + .state) | join(", ")))}
         else empty end]) as $strict_invalidities
-    | ([ $owned_in_flight[] as $work
+    | ([ $owned_current[] as $work
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
@@ -718,6 +725,20 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             since:(($work.since // null) | if . == null then null else trunc(20) end),
             state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+    | ([ $tasks[] as $task
+         | ([ $backlog.records[]?
+              | select(.structured and .id == $task.id and .state != "done") ] | first) as $work
+         | select($work != null)
+         | select($task.current_state.state != "done" and $task.current_state.state != "failed")
+         | select($task.endpoint.exists != false)
+         | {id:$task.id,
+            title:(($work.title // $task.id) | trunc(160)),
+            kind:(($task.kind // $work.kind // null) | if . == null then null else trunc(40) end),
+            state:$task.current_state.state,
+            source:$task.current_state.source,
+            doing:(($task.current_state.detail // "") | trunc(160)),
+            decisions:(($task.hints.open_decisions // []) | length),
+            observed_at:($task.current_state.observed_at // $generated)} ]) as $agents_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -732,7 +753,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
             blocked_by_all:((.blocked_by_all // []) | map(trunc(120))),
             reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
-       + [ $owned_in_flight[] as $work
+       + [ $owned_current[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
@@ -797,19 +818,22 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
+        agents:$agents_all[:$child_n],
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
           landed:($landed_all | length),
-          endpoints:($tasks | length)
+          endpoints:($tasks | length),
+          agents:($agents_all | length)
         },
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
+          (if ($agents_all | length) > $child_n then {surface:"agents",count:(($agents_all | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
         ]
       }'
@@ -1257,6 +1281,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.active_children | type) == "array" and (.decisions_open | type) == "array"
           and (.holds | type) == "array" and (.queued | type) == "array"
           and (.landed | type) == "array" and (.endpoints | type) == "array"
+          and (.agents | type) == "array"
           and (.counts | type) == "object" and (.omitted | type) == "array"
         ' >/dev/null 2>&1; then
           reason="structured home snapshot was malformed or stale"
@@ -1303,7 +1328,8 @@ secondmate_current_json() {  # <parent-tasks-json>
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
-         landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
+         landed:$summary.landed,endpoints:$summary.endpoints,agents:$summary.agents,
+         counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
@@ -1329,7 +1355,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          current:{state:"unknown",reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],agents:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0,agents:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi

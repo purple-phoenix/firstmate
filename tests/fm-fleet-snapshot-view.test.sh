@@ -756,9 +756,63 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_secondmate_home_read_counts_current_workers_and_degrades_unreadable_home() {
+  local home healthy unreadable fakebin out mate
+  home=$(make_home secondmate-parent)
+  healthy=$(make_home secondmate-healthy)
+  unreadable=$(make_home secondmate-unreadable)
+  for mate in "$healthy" "$unreadable"; do
+    mkdir -p "$mate/bin"
+    printf '# Fixture home\n' > "$mate/AGENTS.md"
+    printf '%s\n' '- alpha [direct-PR] - Alpha project (added 2026-07-30)' > "$mate/data/projects.md"
+  done
+  printf 'healthy\n' > "$healthy/.fm-secondmate-home"
+  printf 'unreadable\n' > "$unreadable/.fm-secondmate-home"
+  cat > "$home/data/secondmates.md" <<EOF
+- healthy - Healthy supervisor (home: $healthy; scope: Test work.; projects: alpha; added 2026-07-30)
+- unreadable - Unreadable supervisor (home: $unreadable; scope: Test work.; projects: alpha; added 2026-07-30)
+EOF
+  cat > "$healthy/data/backlog.md" <<'EOF'
+## Queued
+- [ ] queued-ship-task - Continue a queued delivery (repo: alpha) (kind: ship) (since 2026-07-30)
+
+## Done
+EOF
+  mkdir -p "$healthy/projects/queued-ship-task"
+  fm_write_meta "$healthy/state/queued-ship-task.meta" \
+    "window=firstmate:fm-queued-ship-task" \
+    "worktree=$healthy/projects/queued-ship-task" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: implementation under way\n' > "$healthy/state/queued-ship-task.status"
+  printf 'unreadable backlog\n' > "$unreadable/data/backlog.md"
+  chmod 000 "$unreadable/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-30T20:00:00Z "$SNAPSHOT" --json)
+  chmod 600 "$unreadable/data/backlog.md"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records[] | select(.id == "healthy")
+      | .current.state == "active_child_work"
+        and .provenance.selected == "structured-home"
+        and .counts.active_children == 1
+        and .counts.agents == 1
+        and (.agents | any(.id == "queued-ship-task" and .title == "Continue a queued delivery" and .state == "working")))
+    and
+    (.secondmate_current.records[] | select(.id == "unreadable")
+      | .current.state == "unknown"
+        and (.current.reason | contains("structured home snapshot failed"))
+        and .provenance.selected != "structured-home"
+        and (.agents | length) == 0)
+  ' >/dev/null || fail "healthy or unreadable secondmate home was classified incorrectly: $out"
+  pass "healthy secondmate current workers are counted while unreadable homes stay honestly unavailable"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
+test_secondmate_home_read_counts_current_workers_and_degrades_unreadable_home
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
