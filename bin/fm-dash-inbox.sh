@@ -8,7 +8,7 @@
 # a command but can never silently lose one. Delivery is at-least-once across
 # interruption, and the capacity skill requires idempotency checks before
 # handling re-surfaced CAP actions, decision answers, idea verdicts, unpark
-# requests, or recurring run-now requests.
+# requests, recurring run-now requests, or needs-you your-go requests.
 # Each claimed prompt carries the capacity skill's authority limits and never
 # grants destructive or merge authority.
 # After archiving at least one command, claim touches
@@ -128,7 +128,7 @@ EOF
     printf 'delivered: %s captain dashboard command(s)\n' "$delivered"
     printf 'archived: %s captain dashboard command(s)\n' "$archived"
     echo "apply idempotency checks to every delivered prompt, then handle it by kind under the capacity skill; its authority limits apply and nothing here authorizes a merge, discard, or other destructive act."
-    echo "CAP records approve that action ID; decision records answer the named owner-qualified decision through the decision lifecycle, with destructive consequences re-confirmed in chat; idea records are captain verdicts: approve creates work through the normal backlog lifecycle, deny records the outcome, and suggestions are captain input."
+    echo "CAP records approve that action ID; decision records answer the named owner-qualified decision through the decision lifecycle, with destructive consequences re-confirmed in chat; idea records are captain verdicts: approve creates work through the normal backlog lifecycle, deny records the outcome, and suggestions are captain input; your-go records are the captain's verdict on an item awaiting them: go lifts the captain hold and re-enters normal re-evaluation, park rests the item through the normal backlog lifecycle, and guidance text is captain input."
     prune_archive
     ;;
   *)

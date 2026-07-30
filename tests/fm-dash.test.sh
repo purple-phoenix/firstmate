@@ -607,6 +607,107 @@ test_recurring_enrichment_and_run_now() {
   pass "the recurring section is enriched for the captain and run-now clicks become one durable through-firstmate command"
 }
 
+test_your_go_controls_for_captain_awaiting_items() {
+  local go_ref consent_ref option_ref generation record archived
+  cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.yourgo.bak"
+  cp "$HOME_DIR/state/dash-refs.json" "$TMP_ROOT/refs.yourgo.bak"
+  cp "$HOME_DIR/data/backlog.md" "$TMP_ROOT/backlog.yourgo.bak"
+  jq '.backlog.records += [
+    {"order":9,"state":"queued","structured":true,"id":"audit-idea-w6","title":"Feature idea: unified workspace","repo":"gamma","project_resolved":true,"kind":"ship","since":"2026-07-29","hold_kind":"captain","hold_reason":"Audit feature opportunity - queued for captain prioritization","body_excerpt":"Acceptance criteria: workspace carries context."},
+    {"order":10,"state":"queued","structured":true,"id":"astro-tests-decision-consent","title":"Supply testimonials consent","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"supply the astro testimonials and consent text","body_excerpt":"Origin: astro-tests\nDecision key: consent\nState: awaiting captain decision."}
+  ]' "$SNAPSHOT" > "$TMP_ROOT/yourgo-snapshot.json"
+  {
+    printf -- '- [ ] audit-idea-w6 - Feature idea: unified workspace (repo: gamma) (kind: ship) (since 2026-07-29) (hold: Audit feature opportunity - queued for captain prioritization) (hold-kind: captain)\n'
+    printf -- '- [ ] astro-tests-decision-consent - Supply testimonials consent (repo: alpha) (kind: captain) (hold: supply the astro testimonials and consent text) (hold-kind: captain)\n'
+  } >> "$HOME_DIR/data/backlog.md"
+  FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/yourgo-snapshot.json" --environment "$ENVIRONMENT" \
+    --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
+    || fail "could not render the your-go fixture dashboard"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" 'data-your-go-ref="item-' "needs-you rows lack their your-go interaction anchors"
+  assert_contains "$RESP" 'data-your-go-kind="review"' "the your-go prioritization hold row lacks its review anchor"
+  assert_contains "$RESP" 'data-your-go-kind="decision"' "decision rows lack their your-go anchors"
+  assert_contains "$RESP" '"has_options":true' "an options-backed decision lost its per-option path marker"
+  assert_contains "$RESP" '"has_options":false' "a hold without an options document was not marked for generic controls"
+  assert_contains "$RESP" '"ask":"supply the astro testimonials and consent text"' "the captain-deliverable hold did not surface its ask"
+  assert_contains "$RESP" '"ask":null' "a plain prioritization hold wrongly carried a deliverable ask"
+  assert_contains "$RESP" 'Go ahead' "generic controls lack the go-ahead button"
+  assert_contains "$RESP" 'Not now' "generic controls lack the not-now button"
+  assert_contains "$RESP" 'Send guidance' "generic controls lack the guidance button"
+  assert_contains "$RESP" 'Provide it' "the deliverable ask lacks its provide control"
+  assert_contains "$RESP" 'openGuidance(info.ask + ": ", "Send")' "the provide control does not prefill the guidance box with the ask"
+  assert_contains "$RESP" 'openDetail(info.ref, entry)' "the options-backed decision row does not open its per-option detail"
+  assert_contains "$RESP" 'dashboard_generated: cfg.generated' "your-go dispatches do not carry the served page generation"
+  go_ref=$(ref_for "main/audit-idea-w6") || fail "refs sidecar does not map the your-go hold"
+  consent_ref=$(ref_for "decision/main/astro-tests/consent") || fail "refs sidecar does not map the optionless decision"
+  option_ref=$(ref_for "decision/main/active-task/rollout-policy") || fail "refs sidecar does not map the options-backed decision"
+  generation=$(jq -r '.generated' "$HOME_DIR/state/dash-refs.json")
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"your_go":"nonsense","action":"go"}'
+  [ "$REQ_STATUS" = 400 ] || fail "a malformed your-go reference was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"item-99\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 409 ] || fail "an unlisted your-go reference was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"discard\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "an unknown your-go action was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"guidance\",\"text\":\"\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "empty guidance was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"go\",\"dashboard_generated\":\"stale-generation\"}"
+  [ "$REQ_STATUS" = 409 ] || fail "a your-go from a stale dashboard generation was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$option_ref\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 409 ] || fail "an options-backed decision accepted a generic your-go action (got $REQ_STATUS)"
+  assert_contains "$RESP" 'per-option approval flow' "options-backed decision refusal does not direct the captain to its options"
+  [ -z "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' 2>/dev/null)" ] \
+    || fail "a refused your-go still wrote an inbox record"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 200 ] || fail "your-go go-ahead dispatch failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$go_ref.json" | head -1)")
+  assert_contains "$record" '"kind": "your-go"' "your-go record lacks its kind"
+  assert_contains "$record" '"action": "go"' "your-go record lacks the chosen action"
+  assert_contains "$record" '"work_identity": "main/audit-idea-w6"' "your-go record lacks the hold identity"
+  assert_contains "$record" 'normal backlog lifecycle' "your-go record does not route the hold lift through firstmate"
+  assert_contains "$record" 'chat confirmation' "your-go record lacks the destructive-consequence boundary"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  assert_contains "$RESP" 'already-queued' "a repeated your-go was not coalesced"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"park\",\"dashboard_generated\":\"$generation\"}"
+  assert_contains "$RESP" '"replaced"' "a newer your-go verdict did not replace the pending one"
+  [ "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "verdict replacement left contradictory pending your-go records"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$go_ref.json" | head -1)")
+  assert_contains "$record" '"action": "park"' "verdict replacement did not retain the newest action"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"ack":{"status":"pending"' "a pending your-go does not acknowledge on its row"
+  archived="$HOME_DIR/state/dash-inbox/archive/review-yourgo.json"
+  mkdir -p "$(dirname "$archived")"
+  mv "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$go_ref.json" | head -1)" "$archived"
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    record.dashboard_generated = "a-previous-generation";
+    record.requested_at = new Date().toISOString();
+    fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+  ' "$archived"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '"kind":"your-go","action":"park"' "a prior your-go acknowledgment lost its selected action"
+  assert_contains "$RESP" 'Previously parked' "the acknowledgment layer lacks an action-appropriate parked label"
+  assert_contains "$RESP" 'Guidance previously sent' "the acknowledgment layer lacks an action-appropriate guidance label"
+  rm "$archived"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$consent_ref\",\"action\":\"guidance\",\"text\":\"Use the April quotes only\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 200 ] || fail "guidance for the optionless decision failed (got $REQ_STATUS: $RESP)"
+  record=$(cat "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$consent_ref.json" | head -1)")
+  assert_contains "$record" '"decision_identity": "main/astro-tests/consent"' "decision-targeted your-go lacks the durable decision identity"
+  assert_contains "$record" 'Use the April quotes only' "guidance text was not recorded for firstmate"
+  assert_contains "$record" 'decision lifecycle' "decision-targeted guidance does not route through the decision lifecycle"
+  find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' -delete
+  mv "$TMP_ROOT/dashboard.yourgo.bak" "$HOME_DIR/data/capacity-dashboard.html"
+  mv "$TMP_ROOT/refs.yourgo.bak" "$HOME_DIR/state/dash-refs.json"
+  mv "$TMP_ROOT/backlog.yourgo.bak" "$HOME_DIR/data/backlog.md"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$go_ref\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 409 ] || fail "a your-go for a no-longer-listed item was not refused (got $REQ_STATUS)"
+  pass "every item awaiting the captain carries validated interaction controls through the durable inbox"
+}
+
 test_dispatch_writes_one_durable_record() {
   local body record file
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"id":"CAP-06"}'
@@ -1180,6 +1281,7 @@ test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts
 test_parking_lot_enrichment_and_unpark
 test_recurring_enrichment_and_run_now
+test_your_go_controls_for_captain_awaiting_items
 test_dispatch_writes_one_durable_record
 test_dispatch_refuses_unknown_and_uncurrent_actions
 test_refresh_reruns_producer_server_side

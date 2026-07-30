@@ -2030,10 +2030,15 @@ function renderHtml(model, captainActions) {
     ...selfClearingBlocked,
   ];
   const needsYouCount = model.measures.open_captain_actions;
+  // Every needs-you row carries a data-your-go-ref validation anchor (with its
+  // row flavor in data-your-go-kind), like data-parked-ref and
+  // data-recurring-ref: rows stay identity-opaque here, and the authenticated
+  // dashboard service resolves the anchors to render real interaction
+  // controls for every item awaiting the captain.
   const needsYouRows = [
-    ...captainApprovalCards.map((card) => `<li><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
-    ...captainGateCards.map((card) => `<li><span class="verb verb-review">Review</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Paused work is waiting on you, not an automatic process.${blockedContext(card)}</span></li>`),
-    ...captainActions.map((action) => `<li><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
+    ...captainApprovalCards.map((card) => `<li data-your-go-ref="${h(card.id)}" data-your-go-kind="approval"><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
+    ...captainGateCards.map((card) => `<li data-your-go-ref="${h(card.id)}" data-your-go-kind="review"><span class="verb verb-review">Review</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Paused work is waiting on you, not an automatic process.${blockedContext(card)}</span></li>`),
+    ...captainActions.map((action) => `<li data-your-go-ref="${h(action.key)}" data-your-go-kind="decision"><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
   const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
 
