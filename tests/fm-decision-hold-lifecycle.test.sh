@@ -755,8 +755,7 @@ test_pruned_resolved_hold_survives_verify_via_durable_evidence() {
   assert_grep "absent from" "$home/verify-open.err" \
     "missing open hold must fail closed as absent, not via the resolved path"
 
-  # Restore open hold; drop receipt to exercise the legacy archive path for the
-  # resolved key.
+  # Restore open hold; drop receipt to exercise archived retry recovery.
   open_hold=$(run_decisions "$home" hold "$origin" access \
     --title "Choose the sample access level" --reason "captain access choice pending" \
     --options-file "$(write_options "$home" access "Choose the sample access level")" --repo sample) \
@@ -765,6 +764,14 @@ test_pruned_resolved_hold_survives_verify_via_durable_evidence() {
   assert_grep "$hold" "$archive" "legacy archive fixture lost the pruned hold"
   assert_grep "Resolution recorded by fm-decision-hold" "$archive" \
     "legacy archive fixture lost the resolution body"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-prune-implementation >/dev/null \
+    || fail "exact resolve retry did not recover from archived resolution evidence"
+  assert_present "$receipt" "archived resolve retry did not backfill the durable receipt"
+  assert_grep "Routed identities: sample-prune-implementation" "$receipt" \
+    "backfilled receipt lost the archived retry identity"
+
+  rm -f "$receipt"
   run_decisions "$home" verify "$origin" > "$home/verify-legacy.out" 2> "$home/verify-legacy.err" \
     || fail "verify failed for pruned resolved hold via legacy archive: $(cat "$home/verify-legacy.err")"
   assert_grep "legacy-attested: accepted pruned done record from archive for $hold" \
@@ -773,7 +780,7 @@ test_pruned_resolved_hold_survives_verify_via_durable_evidence() {
   run_teardown "$home" "$origin" >/dev/null 2> "$home/teardown-prune.err" \
     || fail "teardown refused after durable/legacy evidence path: $(cat "$home/teardown-prune.err")"
 
-  pass "pruned resolved holds verify via durable receipt or legacy archive; open holds still block"
+  pass "pruned resolved holds retry and verify via durable evidence; open holds still block"
 }
 
 test_uninventoried_report_decision_refuses_completion

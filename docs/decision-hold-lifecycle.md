@@ -58,7 +58,7 @@ The focused end-to-end regression uses only synthetic `sample` identities and de
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
-A 2026-07-30 regression resolves a hold, publishes `data/<origin>/decisions/<key>.resolved.md`, simulates Done retention by archiving and dropping the live Done record, asserts `verify` passes via the receipt, asserts an unresolved open hold still blocks when removed without evidence, and asserts the legacy archive path logs `legacy-attested` when the receipt is absent.
+A 2026-07-30 regression resolves a hold, publishes `data/<origin>/decisions/<key>.resolved.md`, simulates Done retention by archiving and dropping the live Done record, asserts `verify` passes via the receipt, asserts an unresolved open hold still blocks when removed without evidence, asserts an exact `resolve` retry backfills a missing receipt from identity-matched archived evidence, and asserts the legacy archive path logs `legacy-attested` when the receipt is absent.
 The same date's read-only live-wedge proof used origin `astroai-review-jess-beta-feedback-for-astroai-8d`: its live metadata had `decisions_reviewed=1` with eight decision keys, all eight holds were absent from the live backlog and present as resolved Done records in the configured Done archive, and `verify` exited 0 after emitting one `legacy-attested` acceptance line for each key.
 No teardown command was run on that home.
 
@@ -75,7 +75,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - pruned resolved holds verify via durable receipt or legacy archive; open holds still block
+ok - pruned resolved holds retry and verify via durable evidence; open holds still block
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

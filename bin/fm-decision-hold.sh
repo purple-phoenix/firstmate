@@ -358,24 +358,33 @@ verify_hold_active() {  # <hold-id>
   fi
 }
 
-verify_hold_resolved() {  # <hold-id> [origin] [key]
-  local id=$1 origin=${2:-} key=${3:-} show state kind body receipt
+resolved_hold_body() {  # <hold-id> [origin] [key]
+  local id=$1 origin=${2:-} key=${3:-} show state kind body receipt archive_body
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     body=$(show_field "$show" body)
     [ "$state" = "done" ] || return 1
     [ "$kind" = captain ] || return 1
-    resolution_body_ok "$body" && return 0
+    if resolution_body_ok "$body"; then
+      printf '%s' "$body"
+      return 0
+    fi
     return 1
   fi
-  # Live backlog may have pruned the Done record; accept a durable receipt.
   if [ -n "$origin" ] && [ -n "$key" ]; then
     receipt=$(resolution_receipt_path "$origin" "$key")
     if [ -f "$receipt" ]; then
       body=$(cat "$receipt")
-      resolution_body_ok "$body" && return 0
+      if resolution_body_ok "$body"; then
+        printf '%s' "$body"
+        return 0
+      fi
     fi
+  fi
+  if archive_body=$(archived_hold_body "$id") && resolution_body_ok "$archive_body"; then
+    printf '%s' "$archive_body"
+    return 0
   fi
   return 1
 }
@@ -625,12 +634,7 @@ command_resolve() {
   decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
-  if verify_hold_resolved "$id" "$origin" "$key"; then
-    if show=$(task_show "$id"); then
-      hold_body=$(show_field "$show" body)
-    else
-      hold_body=$(cat "$(resolution_receipt_path "$origin" "$key")")
-    fi
+  if hold_body=$(resolved_hold_body "$id" "$origin" "$key"); then
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     publish_resolution_receipt "$origin" "$key" "$hold_body"
     printf 'resolved: %s\n' "$id"
@@ -686,7 +690,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   publish_resolution_receipt "$origin" "$key" "$body"
-  verify_hold_resolved "$id" "$origin" "$key" \
+  resolved_hold_body "$id" "$origin" "$key" >/dev/null \
     || fail "captain hold $id did not retain its durable resolution record"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
