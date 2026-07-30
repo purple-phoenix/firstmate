@@ -26,9 +26,10 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision digest and routed task identities as a retry identity in the hold body, publishes the same resolution body as a durable receipt at `data/<origin>/decisions/<key>.resolved.md` before closing the hold, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, marks the hold Done, and only then publishes the same resolution body as a durable receipt at `data/<origin>/decisions/<key>.resolved.md`.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
-A failed intermediate step leaves the hold open.
+A failed routing or close step leaves the hold open without an authoritative receipt.
+An exact retry of a closed hold backfills or validates its receipt.
 
 `verify` and `complete` treat a hold as satisfiable when it is actively queued-held, present as a Done live backlog record with a resolution body, or absent from the live backlog with durable resolution evidence.
 The preferred absent-backlog path is the options document plus the `.resolved.md` receipt.
@@ -58,6 +59,8 @@ It begins with a completed investigation and visual review whose genuine unresol
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 A 2026-07-30 regression resolves a hold, publishes `data/<origin>/decisions/<key>.resolved.md`, simulates Done retention by archiving and dropping the live Done record, asserts `verify` passes via the receipt, asserts an unresolved open hold still blocks when removed without evidence, and asserts the legacy archive path logs `legacy-attested` when the receipt is absent.
+The same date's read-only live-wedge proof used origin `astroai-review-jess-beta-feedback-for-astroai-8d`: its live metadata had `decisions_reviewed=1` with eight decision keys, all eight holds were absent from the live backlog and present as resolved Done records in the configured Done archive, and `verify` exited 0 after emitting one `legacy-attested` acceptance line for each key.
+No teardown command was run on that home.
 
 The final verification commands and their exact summarized outputs follow.
 

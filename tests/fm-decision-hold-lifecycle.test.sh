@@ -267,6 +267,8 @@ EOF
   assert_contains "$show" "blocked: no" "partial routing fixture did not release its first dependent"
   show=$(tasks_in "$home" show sample-route-implementation --full)
   assert_contains "$show" "blocked: yes" "partial routing fixture unexpectedly released its second dependent"
+  assert_absent "$home/data/$id/decisions/route.resolved.md" \
+    "partial routing failure published an authoritative resolution receipt"
   if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-followup > "$home/reduced-retry.out" 2> "$home/reduced-retry.err"; then
     fail "partial resolution retry accepted a reduced routed task set"

@@ -34,10 +34,10 @@
 # source before this gate has succeeded.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# It writes the captain decision and routed identities into the hold body, publishes
-# a durable per-key resolution receipt under data/<origin>/decisions/<key>.resolved.md
-# (survives Done retention), clears those dependency edges, and only then marks the
-# hold Done. A failure before the final step leaves the captain hold open.
+# It writes the captain decision and routed identities into the hold body, clears
+# those dependency edges, marks the hold Done, and then publishes a durable per-key
+# resolution receipt under data/<origin>/decisions/<key>.resolved.md (survives Done
+# retention). A failure before the Done transition leaves no authoritative receipt.
 #
 # `verify` / `complete` accept a hold that is actively queued, present as a Done
 # backlog record with a resolution body, or absent from the live backlog when
@@ -226,6 +226,8 @@ same_text_file() {  # <path> <text>
 
 publish_resolution_receipt() {  # <origin> <key> <body>
   local origin=$1 key=$2 body=$3 directory target tmp
+  body=$(resolution_body_as_text "$body") \
+    || fail "could not normalize resolution receipt body"
   directory="$DATA/$origin/decisions"
   target=$(resolution_receipt_path "$origin" "$key")
   if [ -e "$target" ]; then
@@ -630,6 +632,7 @@ command_resolve() {
       hold_body=$(cat "$(resolution_receipt_path "$origin" "$key")")
     fi
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    publish_resolution_receipt "$origin" "$key" "$hold_body"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -667,9 +670,6 @@ command_resolve() {
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
-  # Publish the durable receipt before closing the hold so a Done prune cannot
-  # erase the only resolution evidence.
-  publish_resolution_receipt "$origin" "$key" "$body"
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
@@ -685,6 +685,7 @@ command_resolve() {
     esac
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
+  publish_resolution_receipt "$origin" "$key" "$body"
   verify_hold_resolved "$id" "$origin" "$key" \
     || fail "captain hold $id did not retain its durable resolution record"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
