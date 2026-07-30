@@ -62,6 +62,25 @@ A 2026-07-30 regression resolves a hold, publishes `data/<origin>/decisions/<key
 The same date's read-only live-wedge proof used origin `astroai-review-jess-beta-feedback-for-astroai-8d`: its live metadata had `decisions_reviewed=1` with eight decision keys, all eight holds were absent from the live backlog and present as resolved Done records in the configured Done archive, and `verify` exited 0 after emitting one `legacy-attested` acceptance line for each key.
 No teardown command was run on that home.
 
+The following transcript was captured from that earlier read-only run in the live primary home, not reproduced by the synthetic regression.
+
+```text
+$ FM_HOME=<primary home> bin/fm-decision-hold.sh verify astroai-review-jess-beta-feedback-for-astroai-8d
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-beta-clarity-bundle
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-concept-help-expansion
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-familiarity-preference
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-founder-profile-scope
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-friend-discovery-model
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-monthly-newsletter-scope
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-testimonial-consent
+fm-decision-hold: legacy-attested: accepted pruned done record from archive for astroai-review-jess-beta-feedback-for-astroai-8d-decision-jess-voice-mvp-scope
+verified: astroai-review-jess-beta-feedback-for-astroai-8d unresolved-decision inventory
+exit 0
+```
+
+At capture time, the origin metadata recorded `decisions_reviewed=1` and eight `decision_keys`; the holds were absent from the live backlog but remained as resolved Done records in `data/done-archive.md`.
+No teardown command was run on that home.
+
 The final verification commands and their exact summarized outputs follow.
 
 ```text
