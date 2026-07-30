@@ -1227,12 +1227,14 @@ test_captain_gated_pauses_need_action_without_eta() {
     .backlog.records += [
       {"order":10,"state":"in_flight","structured":true,"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: pipeline hardened."},
       {"order":11,"state":"in_flight","structured":true,"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: transits prefetched."},
-      {"order":12,"state":"in_flight","structured":true,"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: window observed."}
+      {"order":12,"state":"in_flight","structured":true,"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: window observed."},
+      {"order":13,"state":"in_flight","structured":true,"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: canary order given."}
     ]
     | .tasks += [
       {"id":"pr-pause","kind":"ship","project":"mu","current_state":{"state":"paused","source":"status-fold","detail":"PR 106 awaiting captain merge decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/106"},"paths":{"report":{"present":false}},"backlog":{"id":"pr-pause","title":"Harden the mu pipeline","repo":"mu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
       {"id":"review-pause","kind":"ship","project":"nu","current_state":{"state":"paused","source":"status-fold","detail":"planned batch under captain review, holding for approvals"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"review-pause","title":"Prefetch the nu transits","repo":"nu","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
-      {"id":"ambient-pause","kind":"ship","project":"xi","current_state":{"state":"paused","source":"status-fold","detail":"upstream rate limit window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
+      {"id":"ambient-pause","kind":"ship","project":"xi","current_state":{"state":"paused","source":"status-fold","detail":"upstream rate limit window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"ambient-pause","title":"Wait for the upstream window","repo":"xi","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
+      {"id":"stale-pr-pause","kind":"ship","project":"astro","current_state":{"state":"paused","source":"status-fold","detail":"holding for captain approvals and the send-the-canary order"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"paths":{"report":{"present":false}},"backlog":{"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
     ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
@@ -1248,22 +1250,31 @@ test_captain_gated_pauses_need_action_without_eta() {
     and (.pipeline.blocked | any(
       .captain_gate == true
       and .wait.class == "needs_actor"
-      and ((.waits_on | join(" ")) | contains("paused for your review or decision"))
-      and (.what_you_can_do | contains("Review and decide in chat"))))
-    and ([.pipeline.blocked[] | select(.captain_gate == true)] | length) == 2
+      and ((.waits_on | join(" ")) | contains("paused: planned batch under captain review, holding for approvals"))
+      and (.what_you_can_do | contains("Give your go or decision on: planned batch under captain review, holding for approvals"))
+      and ((.what_you_can_do | test("open pull request"; "i")) | not)
+      and ((.waits_on | join(" ") | test("open pull request"; "i")) | not)))
+    and (.pipeline.blocked | any(
+      .captain_gate == true
+      and ((.waits_on | join(" ")) | contains("paused: holding for captain approvals and the send-the-canary order"))
+      and (.what_you_can_do | contains("send-the-canary order"))
+      and ((.what_you_can_do | test("open pull request"; "i")) | not)
+      and ((.waits_on | join(" ") | test("open pull request"; "i")) | not)))
+    and ([.pipeline.blocked[] | select(.captain_gate == true)] | length) == 3
     and (.pipeline.blocked | any(
       .wait.class == "self_clearing"
       and .wait.kind == "paused"
       and .wait.progress.basis == "none"
       and .wait.progress.percent == null
       and (.wait.progress.label | contains("time unknown"))))
-    and .measures.open_captain_actions >= 3
+    and .measures.open_captain_actions >= 4
   ' >/dev/null || fail "captain-gated pauses are misclassified: $json"
   html=$(cat "$output")
   assert_contains "$html" 'class="verb verb-review"' "captain-gated pauses are missing from the needs-you band"
   assert_contains "$html" 'Paused work is waiting on you, not an automatic process.' "captain-gate rows lack the plain-language framing"
   assert_contains "$html" 'Review and merge its open pull request' "the PR-gated pause lacks its what-you-can-do line"
-  assert_contains "$html" 'Review and decide in chat' "the review-gated pause lacks its what-you-can-do line"
+  assert_contains "$html" 'holding for captain approvals and the send-the-canary order' "the non-PR captain pause lacks its declared reason"
+  assert_contains "$html" 'Give your go or decision on:' "the non-PR captain pause lacks its what-you-can-do line"
   assert_contains "$html" 'time unknown' "the ambiguous pause does not admit its unknown duration"
   case "$html" in
     *'% done'*) fail "a pause fabricated a percent from unrelated past waits" ;;
@@ -1271,7 +1282,55 @@ test_captain_gated_pauses_need_action_without_eta() {
   case "$html" in
     *'based on past runs'*) fail "a pause borrowed an ETA from unrelated past waits" ;;
   esac
+  # A stale pr= must not invent open-PR language for non-PR captain-gated pauses.
+  # Exactly one captain_gate card may mention an open pull request (the real PR).
+  printf '%s' "$json" | jq -e '
+    ([.pipeline.blocked[]
+      | select(.captain_gate == true)
+      | select(((.waits_on | join(" ")) + " " + (.what_you_can_do // "")) | test("open pull request"; "i"))]
+     | length) == 1
+    and ([.pipeline.blocked[]
+      | select(.captain_gate == true)
+      | select((.waits_on | join(" ")) | contains("send-the-canary"))
+      | select(((.waits_on | join(" ")) + " " + (.what_you_can_do // "")) | test("open pull request"; "i"))]
+     | length) == 0
+  ' >/dev/null || fail "open pull request language leaked onto non-PR captain gates: $json"
   pass "captain-gated pauses render as needs-your-action with no fabricated ETA"
+}
+
+test_captain_kind_idea_hold_is_your_go_not_stuck() {
+  local home="$TMP_ROOT/idea-hold-home" snapshot="$TMP_ROOT/idea-hold-snapshot.json" environment="$TMP_ROOT/idea-hold-environment.json" output="$TMP_ROOT/idea-hold-home/data/idea-hold.html" json html
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records += [
+      {"order":20,"state":"queued","structured":true,"id":"audit-idea-w6","title":"Feature (queued): unified workspace","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-29","hold_kind":"captain","hold_reason":"Audit feature opportunity - queued for captain prioritization","body_excerpt":"Acceptance criteria: workspace carries context."}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$(FM_HOME="$home" "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "captain idea-hold capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | any(
+      .captain_gate == true
+      and .reason == "Waiting on your go"
+      and .wait.class == "needs_actor"
+      and ((.waits_on | join(" ")) | contains("held for your prioritization"))
+      and (.what_you_can_do | contains("Prioritize or give your go on this held item"))
+      and ((.what_you_can_do | test("Nothing yet"; "i")) | not)
+      and (.reason != "Structured hold")))
+    and ([.pipeline.blocked[] | select(.reason == "Structured hold" and (.what_you_can_do | test("Nothing yet"; "i")))] | length) == 0
+  ' >/dev/null || fail "captain-kind idea hold misclassified as stuck: $json"
+  html=$(cat "$output")
+  assert_contains "$html" 'class="verb verb-review"' "captain idea hold is missing from the needs-you band"
+  assert_contains "$html" 'Prioritize or give your go on this held item' "captain idea hold lacks your-go what-you-can-do"
+  case "$html" in
+    *'verb-blocked">Stuck'*)
+      # Stuck may still exist for other fixture rows; the idea hold must not be one.
+      printf '%s' "$html" | grep -F 'verb-blocked">Stuck' | grep -q 'held for your prioritization' &&
+        fail "captain idea hold rendered as STUCK" || true
+      ;;
+  esac
+  pass "captain-kind idea holds render as waiting-on-your-go, not STUCK"
 }
 
 test_wait_history_estimates_and_overrun() {
@@ -1482,4 +1541,5 @@ test_keyless_questions_and_blocker_chains
 test_wait_estimator_honesty
 test_wait_classes_render_distinct_treatments
 test_captain_gated_pauses_need_action_without_eta
+test_captain_kind_idea_hold_is_your_go_not_stuck
 test_wait_history_estimates_and_overrun
