@@ -651,6 +651,129 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Extract one backlog task block (title line + indented body) by id.
+extract_task_block() {  # <backlog> <id> > stdout
+  local file=$1 id=$2
+  awk -v id="$id" '
+    BEGIN {grab=0}
+    $0 ~ "^- \\[[ x]\\] " id " -" {grab=1; print; next}
+    grab {
+      if ($0 ~ /^- \[[ x]\] / || $0 ~ /^## /) exit
+      print
+    }
+  ' "$file"
+}
+
+# Drop one backlog task block by id, writing the remainder to stdout.
+drop_task_block() {  # <backlog> <id> > stdout
+  local file=$1 id=$2
+  awk -v id="$id" '
+    BEGIN {skip=0}
+    $0 ~ "^- \\[[ x]\\] " id " -" {skip=1; next}
+    skip {
+      if ($0 ~ /^- \[[ x]\] / || $0 ~ /^## /) {skip=0; print; next}
+      next
+    }
+    {print}
+  ' "$file"
+}
+
+# Done retention can prune a resolved captain hold out of the live backlog.
+# verify must still pass via the durable resolution receipt, while an unresolved
+# (still-open) hold must continue to block. A legacy prune without a receipt is
+# accepted only when the archived Done body still carries the resolution record.
+test_pruned_resolved_hold_survives_verify_via_durable_evidence() {
+  local home origin hold open_hold show receipt archive
+  home=$(make_home pruned-resolved-hold)
+  origin=sample-prune-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample prune retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create prune-retention origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample prune review\n\nOne resolved and one still-open decision.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --options-file "$(write_options "$home" route "Choose the sample route")" --repo sample) \
+    || fail "could not register resolved-path hold"
+  open_hold=$(run_decisions "$home" hold "$origin" access \
+    --title "Choose the sample access level" --reason "captain access choice pending" \
+    --options-file "$(write_options "$home" access "Choose the sample access level")" --repo sample) \
+    || fail "could not register still-open hold"
+
+  tasks_in "$home" add sample-prune-implementation "Apply the selected sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create dependent work for prune-retention fixture"
+  printf 'Use route north after prune retention.\n' > "$home/route-decision.txt"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-prune-implementation >/dev/null \
+    || fail "could not resolve the route hold before prune"
+  receipt="$home/data/$origin/decisions/route.resolved.md"
+  assert_present "$receipt" "resolve did not publish a durable resolution receipt"
+  assert_grep "Resolution recorded by fm-decision-hold" "$receipt" \
+    "resolution receipt missing resolution marker"
+  assert_grep "Routed work:" "$receipt" "resolution receipt missing routed-work marker"
+
+  run_decisions "$home" complete "$origin" route access >/dev/null \
+    || fail "completion failed before prune with live resolved + open holds"
+
+  show=$(tasks_in "$home" show "$hold" --full) || fail "resolved hold missing before simulated prune"
+  assert_contains "$show" "state: done" "resolved hold was not done before prune"
+
+  # Simulate Done retention: archive the resolved hold, then drop it from live backlog.
+  archive="$home/data/done-archive.md"
+  {
+    printf '\n## Archived 2026-07-30\n'
+    extract_task_block "$home/data/backlog.md" "$hold"
+  } > "$archive"
+  drop_task_block "$home/data/backlog.md" "$hold" > "$home/backlog.pruned"
+  mv "$home/backlog.pruned" "$home/data/backlog.md"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "simulated prune left the resolved hold in the live backlog"
+  fi
+  show=$(tasks_in "$home" show "$open_hold" --full) || fail "open hold disappeared during prune simulation"
+  assert_contains "$show" "state: queued" "open hold must remain live after prune simulation"
+  assert_contains "$show" "held: yes" "open hold must remain held after prune simulation"
+
+  # Receipt path: verify passes even though the resolved hold is gone from live backlog.
+  run_decisions "$home" verify "$origin" > "$home/verify-receipt.out" 2> "$home/verify-receipt.err" \
+    || fail "verify failed for pruned resolved hold with durable receipt: $(cat "$home/verify-receipt.err")"
+  assert_grep "accepted durable resolution receipt" "$home/verify-receipt.err" \
+    "verify did not log durable-receipt acceptance"
+  assert_grep "verified: $origin" "$home/verify-receipt.out" "verify did not report success"
+
+  # Unresolved open hold must still block when its live record is removed without
+  # resolution evidence (simulate accidental loss of an open hold).
+  drop_task_block "$home/data/backlog.md" "$open_hold" > "$home/backlog.open-missing"
+  mv "$home/backlog.open-missing" "$home/data/backlog.md"
+  if run_decisions "$home" verify "$origin" > "$home/verify-open.out" 2> "$home/verify-open.err"; then
+    fail "verify passed after removing an unresolved open hold without durable evidence"
+  fi
+  assert_grep "absent from" "$home/verify-open.err" \
+    "missing open hold must fail closed as absent, not via the resolved path"
+
+  # Restore open hold; drop receipt to exercise the legacy archive path for the
+  # resolved key.
+  open_hold=$(run_decisions "$home" hold "$origin" access \
+    --title "Choose the sample access level" --reason "captain access choice pending" \
+    --options-file "$(write_options "$home" access "Choose the sample access level")" --repo sample) \
+    || fail "could not restore still-open hold after absence check"
+  rm -f "$receipt"
+  assert_grep "$hold" "$archive" "legacy archive fixture lost the pruned hold"
+  assert_grep "Resolution recorded by fm-decision-hold" "$archive" \
+    "legacy archive fixture lost the resolution body"
+  run_decisions "$home" verify "$origin" > "$home/verify-legacy.out" 2> "$home/verify-legacy.err" \
+    || fail "verify failed for pruned resolved hold via legacy archive: $(cat "$home/verify-legacy.err")"
+  assert_grep "legacy-attested: accepted pruned done record from archive for $hold" \
+    "$home/verify-legacy.err" "verify did not log legacy-attested archive acceptance"
+
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/teardown-prune.err" \
+    || fail "teardown refused after durable/legacy evidence path: $(cat "$home/teardown-prune.err")"
+
+  pass "pruned resolved holds verify via durable receipt or legacy archive; open holds still block"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -663,3 +786,4 @@ test_secondmate_hold_stays_in_authoritative_home
 test_same_home_same_key_decisions_are_origin_qualified
 test_overlong_captain_hold_is_non_dispatchable
 test_resolve_matches_quoted_blocked_by_edges
+test_pruned_resolved_hold_survives_verify_via_durable_evidence
