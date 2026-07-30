@@ -289,25 +289,29 @@ function ackKey(record) {
 function ackStates(generated) {
   const acks = new Map();
   const now = Date.now();
+  const stateFor = (record, status, extra = {}) => ({
+    status,
+    requested_at: record.requested_at || null,
+    verdict: record.verdict || null,
+    ...(record.kind === "your-go" ? { kind: record.kind, action: record.action || null } : {}),
+    ...extra,
+  });
   for (const { record, claimedAtMs } of archivedRecords()) {
     const key = ackKey(record);
     if (!key) continue;
     const requestedAtMs = Date.parse(record.requested_at || "");
     if (record.dashboard_generated === generated) {
-      acks.set(key, {
-        status: "claimed",
-        requested_at: record.requested_at || null,
+      acks.set(key, stateFor(record, "claimed", {
         claimed_at: new Date(claimedAtMs).toISOString(),
-        verdict: record.verdict || null,
-      });
+      }));
     } else if (Number.isFinite(requestedAtMs) && now - requestedAtMs <= ACK_PRIOR_WINDOW_MS) {
-      acks.set(key, { status: "prior", requested_at: record.requested_at, verdict: record.verdict || null });
+      acks.set(key, stateFor(record, "prior"));
     }
   }
   for (const record of pendingRecords()) {
     const key = ackKey(record);
     if (!key) continue;
-    acks.set(key, { status: "pending", requested_at: record.requested_at || null, verdict: record.verdict || null });
+    acks.set(key, stateFor(record, "pending"));
   }
   return acks;
 }
@@ -1008,7 +1012,14 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       if (ack.status === "claimed") {
         return "Received - being worked" + (ack.claimed_at ? " since " + new Date(ack.claimed_at).toLocaleString() : "");
       }
-      const verb = ack.verdict === "deny" ? "Previously denied" : "Previously approved";
+      const yourGoVerbs = {
+        go: "Previously approved",
+        park: "Previously parked",
+        guidance: "Guidance previously sent",
+      };
+      const verb = ack.kind === "your-go"
+        ? (yourGoVerbs[ack.action] || "Previously answered")
+        : (ack.verdict === "deny" ? "Previously denied" : "Previously approved");
       return verb + (ack.requested_at ? " " + new Date(ack.requested_at).toLocaleString() : "") + " - in progress";
     };
     const ackNode = (ack, extraClass) => {
@@ -1532,7 +1543,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       const original = button.textContent;
       button.textContent = "Sending…";
       try {
-        const res = await postJson({ your_go: ref, action, text });
+        const res = await postJson({ your_go: ref, action, text, dashboard_generated: cfg.generated });
         const out = await res.json();
         if (out.status === "queued" || out.status === "replaced" || out.status === "already-queued") {
           acknowledge(button);
@@ -1990,7 +2001,11 @@ async function handle(req, res) {
         return;
       }
       const currentDashboard = readDashboard();
-      if (!currentDashboard || !currentDashboard.html.includes(`data-your-go-ref="${ref}"`)) {
+      if (!currentDashboard || body.dashboard_generated !== currentDashboard.generated) {
+        sendJson(res, 409, { status: "refused", error: "your-go was sent from a stale dashboard generation; refresh first" });
+        return;
+      }
+      if (!currentDashboard.html.includes(`data-your-go-ref="${ref}"`)) {
         sendJson(res, 409, { status: "refused", error: `${ref} is not awaiting the captain on the current dashboard; refresh first` });
         return;
       }
@@ -2001,6 +2016,10 @@ async function handle(req, res) {
         return;
       }
       const decision = decisionRef(entry);
+      if (decision && decisionDocument(decision.home, decision.origin, decision.key)) {
+        sendJson(res, 409, { status: "refused", error: `${ref} has structured decision options; use the per-option approval flow` });
+        return;
+      }
       const separator = entry.value.indexOf("/");
       const workHome = decision ? decision.home : entry.value.slice(0, separator);
       const workId = decision ? decision.key : entry.value.slice(separator + 1);
