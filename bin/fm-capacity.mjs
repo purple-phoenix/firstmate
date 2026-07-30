@@ -169,7 +169,7 @@ WAIT TREATMENT AND PROGRESS
   progress bar or ETA, because a human decision has no duration model. A PR wait
   is claimed only when an open PR is honestly evidenced (recorded pr= plus no
   merged signal, or equivalent positive open evidence such as the pause reason
-  itself naming a pull request); a stale pr= from an already-merged delivery
+  affirmatively saying the pull request is open or awaiting review/merge); a stale pr= from an already-merged delivery
   never invents "open pull request" copy - the pause's own declared reason is
   the wait description instead. A queued hold with hold-kind=captain (including
   ship/scout prioritization holds, not only kind=captain decision rows) is the
@@ -757,11 +757,13 @@ function waitKindFromDetail(detail) {
 // sufficient on its own - meta keeps pr= after merge. Claim a PR wait only
 // when that record is still open: no explicit merged/not-open signal, and a
 // positive open signal (explicit open flag, armed merge poll, or the pause
-// reason itself naming a pull request / PR). Otherwise render the pause's own
-// declared reason and never invent open-PR language.
+// reason affirmatively saying the pull request is open or awaiting its
+// review/merge). Otherwise render the pause's own declared reason and never
+// invent open-PR language.
 const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|merge|order|sign-?off)\b/i;
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
-const PR_NAMED_REASON = /\b(?:pull\s+requests?|PRs?)\b/i;
+const PR_TERMINAL_REASON = /(?:\b(?:pull\s+requests?|PRs?)\b[^\n.!?;]{0,80}\b(?:merged|closed)\b|\b(?:merged|closed)\b[^\n.!?;]{0,80}\b(?:pull\s+requests?|PRs?)\b)/i;
+const PR_OPEN_REASON = /(?:\bopen\s+(?:pull\s+requests?|PRs?)\b|\b(?:pull\s+requests?|PRs?)(?:\s*#?\d+)?\s+(?:is\s+)?(?:open|pending|awaiting|ready\s+for)\b|\b(?:awaiting|pending)\b[^\n.!?;]{0,60}\b(?:review|approval|merge)\b[^\n.!?;]{0,30}\b(?:pull\s+requests?|PRs?)\b)/i;
 
 function pauseReasonText(task) {
   return String(task.current_state?.detail ?? task.reason ?? task.doing ?? "").trim();
@@ -774,15 +776,15 @@ function prRecorded(task) {
 
 function hasOpenPrEvidence(task) {
   if (!prRecorded(task)) return false;
+  const reason = pauseReasonText(task);
   if (task.pr?.merged === true || task.pr_merged === true || task.pr?.open === false || task.pr_open === false) {
     return false;
   }
   if (task.pr?.merge_poll === "merged" || task.pr_merge_poll === "merged") return false;
+  if (PR_TERMINAL_REASON.test(reason)) return false;
   if (task.pr?.open === true || task.pr_open === true) return true;
   if (task.pr?.merge_poll_armed === true || task.pr_merge_poll_armed === true) return true;
-  // Equivalent honest signal when the snapshot has no poll/open flags: the
-  // pause reason itself names a pull request, so the wait is about that PR.
-  return PR_NAMED_REASON.test(pauseReasonText(task));
+  return PR_OPEN_REASON.test(reason);
 }
 
 function captainGatedPause(task) {
@@ -825,10 +827,11 @@ function captainPrioritizationCopy(record, owner) {
       decision,
     };
   }
+  const ref = itemRef(owner, record.id || "unstructured");
   return {
     reason: "Waiting on your go",
     waits_on: ["held for your prioritization"],
-    what_you_can_do: "Prioritize or give your go on this held item - this wait is on you, not an automatic process.",
+    what_you_can_do: `Prioritize or give your go on ${ref} - this wait is on you, not an automatic process.`,
     decision_ref: null,
     decision: null,
   };
@@ -1359,6 +1362,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const parkedQueuedIds = new Set((mate.queued || []).filter((record) => activeHold(record, now) && record.hold_kind === "parked").map((record) => record.id));
     const recurringQueuedIds = new Set((mate.queued || []).filter((record) => recurringNextRun(record, now)).map((record) => record.id));
     const inactiveHoldQueuedIds = new Set((mate.queued || []).filter((record) => !record.blocked_by && record.hold_reason != null && holdExpired(record, now)).map((record) => record.id));
+    const mateQueuedById = new Map((mate.queued || []).map((record) => [record.id, record]));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       // A parked, recurring, or expired-hold queued record can also project
@@ -1367,6 +1371,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       // re-enters normal readiness classification).
       if (parkedQueuedIds.has(hold.id) || recurringQueuedIds.has(hold.id) || inactiveHoldQueuedIds.has(hold.id)) continue;
       heldIds.add(hold.id);
+      const queuedHold = mateQueuedById.get(hold.id);
+      const holdRecord = queuedHold && captainPrioritizationHold(queuedHold, now) ? queuedHold : hold;
       if (hold.source === "child-state") {
         if (requiresGithubAuth(hold.delivery_mode)) secondmateGithubBoundDelivery.add(mate.id);
         if (hold.repo) {
@@ -1376,14 +1382,21 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         }
       }
       const ageDays = dateAgeDays(hold.since, now);
-      blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: "structured wait gate" });
-      const chain = describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
-      const holdCard = Object.assign(cardFromBacklog(hold, mate.id, "blocked", "Structured wait gate"), {
-        waits_on: chain.waits,
-        what_you_can_do: chain.action,
+      const captainHold = captainPrioritizationHold(holdRecord, now);
+      const copy = captainHold ? captainPrioritizationCopy(holdRecord, mate.id) : null;
+      blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: captainHold ? "captain hold" : "structured wait gate" });
+      const chain = captainHold ? null : describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
+      const holdCard = Object.assign(cardFromBacklog(holdRecord, mate.id, "blocked", copy?.reason || "Structured wait gate"), {
+        waits_on: copy?.waits_on || chain.waits,
+        what_you_can_do: copy?.what_you_can_do || chain.action,
       });
       pipeline.blocked.push(holdCard);
-      attachChainWait(holdCard, chain, mate.id, hold);
+      if (captainHold) {
+        holdCard.wait = { class: "needs_actor" };
+        if (!copy.decision_ref) holdCard.captain_gate = true;
+      } else {
+        attachChainWait(holdCard, chain, mate.id, hold);
+      }
       if (ageDays !== null && ageDays >= 7) {
         aging.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), age_days: ageDays, state: "held", evidence: "structured backlog age; structured wait gate" });
       }
