@@ -41,11 +41,12 @@
 #
 # `verify` / `complete` accept a hold that is actively queued, present as a Done
 # backlog record with a resolution body, or absent from the live backlog when
-# durable resolution evidence remains: the options document plus the
-# `.resolved.md` receipt. When the live record was pruned and no receipt exists
-# (legacy resolves that only wrote the backlog body), verify accepts an archived
-# Done record that still carries the resolution body and logs an explicit
-# legacy-attested acceptance. Open (queued-held) decisions never use that path.
+# a valid `.resolved.md` receipt remains, normally alongside the options document.
+# A receipt remains sufficient when legacy options are absent. When the live
+# record was pruned and no receipt exists (legacy resolves that only wrote the
+# backlog body), verify accepts an archived Done record that still carries the
+# resolution body and logs an explicit legacy-attested acceptance. Open
+# (queued-held) decisions never use that path.
 # Retention pinning of Done captain holds is intentionally not used: tasks-axi
 # owns Done prune, and the co-located receipt is the cleaner durable contract.
 set -eu

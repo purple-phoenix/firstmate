@@ -32,7 +32,7 @@ A failed routing or close step leaves the hold open without an authoritative rec
 An exact retry of a closed hold backfills or validates its receipt.
 
 `verify` and `complete` treat a hold as satisfiable when it is actively queued-held, present as a Done live backlog record with a resolution body, or absent from the live backlog with durable resolution evidence.
-The preferred absent-backlog path is the options document plus the `.resolved.md` receipt.
+The preferred absent-backlog evidence is the `.resolved.md` receipt, normally co-located with the options document; the receipt remains sufficient when legacy options are absent.
 When a pre-receipt resolve left evidence only in a Done backlog body that Done retention later archived, verify accepts that archived resolution body and logs an explicit `legacy-attested` acceptance.
 Open (queued-held) decisions never use the pruned path; only resolved evidence can satisfy an absent live record.
 Retention pinning of Done captain holds is intentionally not used: tasks-axi owns Done prune, and the co-located receipt is the durable contract that survives retention without fighting the Done list.
