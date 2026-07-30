@@ -712,7 +712,7 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "unknown"
-      and (.current.reason | contains("live child state has no in-flight backlog item"))
+      and (.current.reason | contains("live child state has no structured current backlog item"))
       and (.current.reason | contains("parked=parked"))
   ' >/dev/null || fail "unowned held child was silently dropped: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
@@ -1712,7 +1712,7 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
-      and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
+      and (.current.reason | contains("live child state has no structured current backlog item: unreadable-child=unknown"))
       and .provenance.selected != "structured-home"
       and .invalidity == null
       and .active_children == []
