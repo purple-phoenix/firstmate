@@ -678,6 +678,8 @@ test_your_go_controls_for_captain_awaiting_items() {
   archived="$HOME_DIR/state/dash-inbox/archive/review-yourgo.json"
   mkdir -p "$(dirname "$archived")"
   mv "$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$go_ref.json" | head -1)" "$archived"
+  # JavaScript template literals are intentionally single-quoted for the shell.
+  # shellcheck disable=SC2016
   node -e '
     const fs = require("node:fs");
     const file = process.argv[1];
