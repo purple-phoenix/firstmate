@@ -358,7 +358,108 @@ test_decision_detail_options_and_validated_approval() {
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"answer\":\"unsafe fallback\"}"
   [ "$REQ_STATUS" = 400 ] || fail "legacy decision accepted free text without an options document"
   mv "$HOME_DIR/data/active-task/decisions/runtime-policy.md.off" "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
+  cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$TMP_ROOT/runtime-policy.md"
+  printf '%140000s' '' | tr ' ' x >> "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  assert_contains "$RESP" 'Conservative rollout' "oversized main-home decision no longer renders its bounded leading record"
+  mv "$TMP_ROOT/runtime-policy.md" "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
   pass "decision documents validate option picks and bounded custom answers"
+}
+
+test_supervisor_decision_detail_uses_bounded_projection() {
+  local remote_ref unavailable_ref main_ref generation record
+  cp "$HOME_DIR/data/capacity-dashboard.html" "$TMP_ROOT/dashboard.remote-decision.bak"
+  cp "$HOME_DIR/state/dash-refs.json" "$TMP_ROOT/refs.remote-decision.bak"
+  jq --arg remote_home "$HOME_DIR/design" '
+    .secondmate_current.registry.records = [{"id":"design","scope":"domain decisions","projects":["delta"]}]
+    | .secondmate_current.records = [{
+      "id":"design",
+      "home":$remote_home,
+      "current":{"state":"captain_decision","reason":null},
+      "provenance":{"selected":"structured-home"},
+      "active_children":[],
+      "decisions_open":[
+      {
+        "id":"remote-origin-decision-rollout",
+        "origin":"remote-origin",
+        "key":"rollout",
+        "verb":"captain-hold",
+        "summary":"Choose the domain rollout",
+        "source":"backlog",
+        "detail":{
+          "available":true,
+          "title":"Choose the domain rollout",
+          "context":"Pick the rollout that keeps every remote destination reachable.",
+          "options":[
+            {"text":"Bounded rollout","impact":"Preserves reachability with the smallest change.","recommended":true},
+            {"text":"Expanded rollout","impact":"Adds a broader surface and more validation.","recommended":false}
+          ]
+        }
+      },
+      {
+        "id":"remote-origin-decision-unreadable",
+        "origin":"remote-origin",
+        "key":"unreadable",
+        "verb":"captain-hold",
+        "summary":"Choose the unavailable-record fallback",
+        "source":"backlog",
+        "detail":{"available":false,"reason":"decision record could not be read (EACCES): data/remote-origin/decisions/unreadable.md"}
+      }
+      ],
+      "holds":[],
+      "queued":[
+      {"id":"remote-origin-decision-rollout","title":"Choose the domain rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"captain choice pending","body_excerpt":"Origin: remote-origin\nDecision key: rollout"},
+      {"id":"remote-origin-decision-unreadable","title":"Choose the unavailable-record fallback","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"captain choice pending","body_excerpt":"Origin: remote-origin\nDecision key: unreadable"}
+      ],
+      "landed":[],
+      "counts":{"active_children":0,"decisions_open":2,"holds":0,"queued":2},
+      "omitted":[]
+    }]
+    | .secondmate_current.total = 1
+    | .secondmate_current.shown = 1
+    | .secondmate_current.truncated = 0
+  ' "$SNAPSHOT" > "$TMP_ROOT/remote-decision-snapshot.json"
+  FM_HOME="$HOME_DIR" "$CAPACITY" --snapshot "$TMP_ROOT/remote-decision-snapshot.json" --environment "$ENVIRONMENT" \
+    --output "$HOME_DIR/data/capacity-dashboard.html" --refs "$HOME_DIR/state/dash-refs.json" >/dev/null \
+    || fail "could not render the supervisor decision fixture dashboard"
+  remote_ref=$(ref_for "decision/design/remote-origin/rollout") \
+    || fail "refs sidecar omitted the supervisor decision: $(jq -c '.refs | to_entries | map(.value.value)' "$HOME_DIR/state/dash-refs.json")"
+  unavailable_ref=$(ref_for "decision/design/remote-origin/unreadable") || fail "refs sidecar omitted the unreadable supervisor decision"
+  main_ref=$(ref_for "decision/main/active-task/runtime-policy") || fail "refs sidecar lost the main-home decision"
+  generation=$(jq -r '.generated' "$HOME_DIR/state/dash-refs.json")
+
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$remote_ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "supervisor decision detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'Choose the domain rollout' "supervisor decision detail lacks its title"
+  assert_contains "$RESP" 'keeps every remote destination reachable' "supervisor decision detail lacks its context"
+  assert_contains "$RESP" 'Bounded rollout' "supervisor decision detail lacks its options"
+  assert_contains "$RESP" '"recommended":true' "supervisor decision detail lacks its recommendation marker"
+  assert_contains "$RESP" 'lives with a domain supervisor' "supervisor decision detail lacks its small provenance note"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$remote_ref\",\"option\":0}"
+  [ "$REQ_STATUS" = 200 ] || fail "supervisor decision option failed (got $REQ_STATUS: $RESP)"
+  record=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$remote_ref.json" | head -1)
+  [ -n "$record" ] || fail "supervisor decision option did not write a command"
+  rm -f "$record"
+
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$unavailable_ref" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "unreadable supervisor decision detail failed (got $REQ_STATUS: $RESP)"
+  assert_contains "$RESP" 'Decision details unavailable' "unreadable supervisor decision did not degrade honestly"
+  assert_contains "$RESP" 'EACCES' "unreadable supervisor decision omitted its concrete reason"
+  assert_contains "$RESP" '"options":[]' "unreadable supervisor decision invented options"
+  req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"your_go\":\"$unavailable_ref\",\"action\":\"go\",\"dashboard_generated\":\"$generation\"}"
+  [ "$REQ_STATUS" = 200 ] || fail "unreadable supervisor decision generic action failed (got $REQ_STATUS: $RESP)"
+  record=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name "*$unavailable_ref.json" | head -1)
+  [ -n "$record" ] || fail "unreadable supervisor decision generic action did not write a command"
+  rm -f "$record"
+
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$main_ref" "$CAPTAIN"
+  assert_contains "$RESP" 'Choose how the active rollout should continue.' "main-home decision context changed"
+  assert_contains "$RESP" 'Conservative rollout' "main-home decision options changed"
+  assert_not_contains "$RESP" 'domain supervisor' "main-home decision gained remote provenance"
+
+  mv "$TMP_ROOT/dashboard.remote-decision.bak" "$HOME_DIR/data/capacity-dashboard.html"
+  mv "$TMP_ROOT/refs.remote-decision.bak" "$HOME_DIR/state/dash-refs.json"
+  pass "supervisor decisions use bounded full detail, unavailable records stay actionable, and main-home detail is unchanged"
 }
 
 test_decision_answers_are_qualified_by_home_and_origin() {
@@ -376,7 +477,19 @@ test_decision_answers_are_qualified_by_home_and_origin() {
     const refs = JSON.parse(fs.readFileSync(file, "utf8"));
     refs.refs["item-90"] = { kind: "item", value: "decision/main/origin-alpha/shared-policy" };
     refs.refs["item-91"] = { kind: "item", value: "decision/main/origin-beta/shared-policy" };
-    refs.refs["item-92"] = { kind: "item", value: "decision/design/design-origin/shared-policy" };
+    refs.refs["item-92"] = {
+      kind: "item",
+      value: "decision/design/design-origin/shared-policy",
+      decision_detail: {
+        available: true,
+        title: "Choose the runtime policy",
+        context: "Choose how the active rollout should continue.",
+        options: [
+          { text: "Conservative rollout", impact: "Slower delivery with the lowest regression risk.", recommended: true },
+          { text: "Fast rollout", impact: "Reaches everyone this week with higher regression risk.", recommended: false }
+        ]
+      }
+    };
     fs.writeFileSync(file, `${JSON.stringify(refs, null, 2)}\n`);
   ' "$HOME_DIR/state/dash-refs.json"
   main_ref=item-90
@@ -1264,7 +1377,8 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
   # The single-quoted assertion is intentionally literal.
   # shellcheck disable=SC2016
-  assert_grep 'bounded read-only excerpt from a resolved secondmate `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
+  assert_grep 'bounded read-only excerpt from a resolved `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
+  assert_grep 'bounded home snapshot reads that exact structured record' "$ROOT/docs/dashboard-service.md" "service doc omits supervisor decision projection"
   assert_grep 'Secondmate briefs, metadata, status tails, and chat remain prohibited' "$ROOT/docs/dashboard-service.md" "service doc broadens secondmate detail ingestion"
   assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
   assert_grep 'at-least-once' "$INBOX_SH" "inbox consumer omits its delivery contract"
@@ -1278,6 +1392,7 @@ test_subscription_usage_panel
 test_inline_config_is_script_safe
 test_refs_sidecar_and_rich_work_item_detail
 test_decision_detail_options_and_validated_approval
+test_supervisor_decision_detail_uses_bounded_projection
 test_decision_answers_are_qualified_by_home_and_origin
 test_stale_refs_are_disabled
 test_idea_pitch_and_verdicts

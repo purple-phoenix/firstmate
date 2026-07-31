@@ -694,6 +694,77 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
+test_secondmate_summary_carries_bounded_decision_detail() {
+  local home out bounded bytes key
+  home=$(make_home decision-detail)
+  mkdir -p "$home/data/origin-one/decisions"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] origin-one-decision-route - Choose the reachable route (repo: sample) (kind: captain) (hold: captain route choice pending) (hold-kind: captain)
+  Origin: origin-one
+  Decision key: route
+  State: awaiting captain decision.
+- [ ] origin-two-decision-missing - Choose the missing-record fallback (repo: sample) (kind: captain) (hold: captain fallback choice pending) (hold-kind: captain)
+  Origin: origin-two
+  Decision key: missing
+  State: awaiting captain decision.
+- [ ] origin-three-decision-alpha - Choose alpha (repo: sample) (kind: captain) (hold: captain alpha choice pending) (hold-kind: captain)
+  Origin: origin-three
+  Decision key: alpha
+  State: awaiting captain decision.
+- [ ] origin-three-decision-beta - Choose beta (repo: sample) (kind: captain) (hold: captain beta choice pending) (hold-kind: captain)
+  Origin: origin-three
+  Decision key: beta
+  State: awaiting captain decision.
+EOF
+  cat > "$home/data/origin-one/decisions/route.md" <<'EOF'
+# Choose the reachable route
+
+Pick the route that keeps every destination reachable.
+
+## Options
+
+- [recommended] Use the existing route - Keeps the surface reachable without adding scope.
+- Build a new route - Adds a larger surface and more validation.
+EOF
+  mkdir -p "$home/data/origin-three/decisions"
+  for key in alpha beta; do
+    {
+      printf '# Choose %s\n\n' "$key"
+      printf '%4000s' '' | tr ' ' x
+      printf '\n\n## Options\n\n'
+      printf -- '- [recommended] Keep %s - ' "$key"
+      printf '%5000s' '' | tr ' ' y
+      printf '\n- Change %s - ' "$key"
+      printf '%5000s' '' | tr ' ' z
+      printf '\n'
+    } > "$home/data/origin-three/decisions/$key.md"
+  done
+  out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-30T12:00:00Z "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate decision-detail summary failed"
+  printf '%s' "$out" | jq -e '
+    (.decisions_open[] | select(.origin == "origin-one" and .key == "route")
+      | .detail.available == true
+        and .detail.title == "Choose the reachable route"
+        and (.detail.context | contains("every destination reachable"))
+        and (.detail.options | length) == 2
+        and .detail.options[0].recommended == true)
+    and (.decisions_open[] | select(.origin == "origin-two" and .key == "missing")
+      | .detail.available == false
+        and (.detail.reason | contains("decision record is missing"))
+        and (.detail.reason | contains("data/origin-two/decisions/missing.md")))
+  ' >/dev/null || fail "secondmate summary did not preserve structured detail and concrete unavailability: $out"
+  bounded=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-30T12:00:00Z FM_SNAPSHOT_SECONDMATE_MAX_BYTES=12000 "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "byte-bounded secondmate decision-detail summary failed"
+  bytes=$(printf '%s' "$bounded" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -le 12000 ] || fail "decision detail exceeded the aggregate home-summary bound: $bytes bytes"
+  printf '%s' "$bounded" | jq -e '
+    any(.decisions_open[]; .detail.available == false
+      and (.detail.reason | contains("structured home snapshot byte limit")))
+  ' >/dev/null || fail "aggregate-bounded decision detail was not marked honestly unavailable: $bounded"
+  pass "secondmate summary carries bounded structured decision detail and concrete read failures"
+}
+
 # A COMPLETED scout report must never be read as a pending decision. A scout that
 # raised a needs-decision and then finished (done) - its report delivered, its
 # decision either answered or captured in the report for the captain - must surface
@@ -830,6 +901,7 @@ test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
+test_secondmate_summary_carries_bounded_decision_detail
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports

@@ -632,6 +632,92 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
   pass "captain actions retain item-level identity and privacy-safe reasons"
 }
 
+test_supervisor_decision_detail_reaches_private_refs() {
+  local home="$TMP_ROOT/remote-detail-home" snapshot="$TMP_ROOT/remote-detail-snapshot.json" environment="$TMP_ROOT/remote-detail-environment.json"
+  local output="$TMP_ROOT/remote-detail-home/data/remote-detail.html" refs="$TMP_ROOT/remote-detail-home/state/remote-detail-refs.json"
+  local available_ref unavailable_ref bounded_ref generic_ref stale_ref
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmate_current.records[0].decisions_open = [
+      {
+        "id":"domain-origin-decision-route",
+        "origin":"domain-origin",
+        "key":"route",
+        "verb":"captain-hold",
+        "summary":"Choose the domain route",
+        "source":"backlog",
+        "detail":{
+          "available":true,
+          "title":"Choose the domain route",
+          "context":"Pick the route that remains reachable.",
+          "options":[
+            {"text":"Reachable route","impact":"Keeps the existing surface usable.","recommended":true},
+            {"text":"New route","impact":"Adds a larger implementation surface.","recommended":false}
+          ]
+        }
+      },
+      {
+        "id":"domain-origin-decision-unreadable",
+        "origin":"domain-origin",
+        "key":"unreadable",
+        "verb":"captain-hold",
+        "summary":"Choose despite an unreadable record",
+        "source":"backlog",
+        "detail":{"available":false,"reason":"decision record could not be read (EACCES): data/domain-origin/decisions/unreadable.md"}
+      }
+    ]
+    | .secondmate_current.records[0].queued += [
+      {"id":"domain-origin-decision-route","title":"Choose the domain route","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"captain choice pending","body_excerpt":"Origin: domain-origin\nDecision key: route"},
+      {"id":"domain-origin-decision-unreadable","title":"Choose despite an unreadable record","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"captain choice pending","body_excerpt":"Origin: domain-origin\nDecision key: unreadable"}
+    ]
+    | .secondmate_current.records[0].counts.decisions_open = 2
+    | .secondmate_current.records[0].counts.queued = 3
+    | .secondmate_current.registry.records += [{"id":"bounded-out","scope":"bounded testing","projects":["delta"]}]
+    | .secondmate_current.records += [{
+        "id":"bounded-out",
+        "current":{"state":"unknown","reason":"structured home snapshot exceeded byte limit"},
+        "provenance":{"selected":"unknown"},
+        "active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"endpoints":[],
+        "counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0,"landed":0,"endpoints":0},
+        "omitted":[]
+      }]
+    | .secondmate_current.total = 4
+    | .secondmate_current.shown = 3
+    | .secondmate_current.truncated = 1
+    | .tasks += [
+      {"id":"bounded-out","kind":"secondmate","hints":{"open_decisions":[{"key":"fallback-choice","verb":"needs-decision","summary":"Choose the bounded fallback"}]}},
+      {"id":"design","kind":"secondmate","hints":{"open_decisions":[{"key":"stale-choice","verb":"needs-decision","summary":"Stale parent-side choice"}]}}
+    ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs" >/dev/null \
+    || fail "supervisor decision detail capacity run failed"
+  available_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/design/domain-origin/route") | .key' "$refs")
+  unavailable_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/design/domain-origin/unreadable") | .key' "$refs")
+  bounded_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/bounded-out/bounded-out/fallback-choice") | .key' "$refs")
+  generic_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "design/domain-origin-decision-route") | .key' "$refs")
+  stale_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/design/design/stale-choice") | .key' "$refs")
+  [ -n "$available_ref" ] && [ -n "$unavailable_ref" ] && [ -n "$bounded_ref" ] || fail "decision refs were not preserved"
+  jq -e '
+    (.refs[] | select(.value == "decision/design/domain-origin/route")
+      | .decision_detail.available == true
+        and .decision_detail.title == "Choose the domain route"
+        and .decision_detail.context == "Pick the route that remains reachable."
+        and (.decision_detail.options | length) == 2
+        and .decision_detail.options[0].recommended == true)
+    and (.refs[] | select(.value == "decision/design/domain-origin/unreadable")
+      | .decision_detail.available == false and (.decision_detail.reason | contains("EACCES")))
+    and (.refs[] | select(.value == "decision/bounded-out/bounded-out/fallback-choice")
+      | .decision_detail.available == false and (.decision_detail.reason | contains("structured home snapshot exceeded byte limit")))
+  ' "$refs" >/dev/null || fail "private refs omitted available or honestly unavailable supervisor decision detail"
+  assert_grep "data-your-go-ref=\"$available_ref\"" "$output" "supervisor decision row lost its canonical decision ref"
+  assert_grep "data-your-go-ref=\"$unavailable_ref\"" "$output" "unreadable supervisor decision row was dropped"
+  assert_grep "data-your-go-ref=\"$bounded_ref\"" "$output" "bounded-out supervisor decision row was dropped"
+  [ -z "$stale_ref" ] || fail "readable structured-home authority was overridden by a stale parent-side decision"
+  [ -z "$generic_ref" ] || assert_no_grep ">${generic_ref}<" "$output" "supervisor decision manifest still opens generic remote-work detail"
+  pass "supervisor decision detail reaches private refs and bounded omissions remain honest actionable rows"
+}
+
 test_approval_signal_and_max_effort_survive_safe_normalization() {
   local home="$TMP_ROOT/approval-home" snapshot="$TMP_ROOT/approval-snapshot.json" environment="$TMP_ROOT/approval-environment.json" output="$TMP_ROOT/approval-home/data/approval.html" json
   make_fixture "$home" "$snapshot" "$environment"
@@ -1632,6 +1718,7 @@ test_secondmate_scope_is_required_for_lane_readiness
 test_ready_selection_preserves_priority_and_order
 test_recent_landings_report_incomplete_projection
 test_secondmate_captain_holds_are_pipeline_waiting_work
+test_supervisor_decision_detail_reaches_private_refs
 test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct
 test_blocked_tasks_suppress_demand_shortage

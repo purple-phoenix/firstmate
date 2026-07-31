@@ -54,7 +54,9 @@
 #     projects fields when its canonical one-line syntax is parseable, so projections
 #     can describe routing alignment without reopening data/secondmates.md.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, agents, counts, and omitted.
+#     queued, landed, endpoints, agents, counts, and omitted. Every included
+#     decisions_open row carries the bounded structured decision detail or an
+#     explicit read/format failure reason.
 #     Active children and holds preserve bounded project, delivery, age, and kind
 #     evidence; queued work additionally preserves priority, order, and definition
 #     evidence used by cross-home projections.
@@ -163,7 +165,8 @@ Its invalidity object names the normalized failure kind and affected ids.
 Structured queued rows carry hold_reason, hold_kind, hold_until, and plural
 blocker fields for downstream projections. Actionable tasks-axi captain holds
 also appear as decisions_open; a captain hold is actionable only when every
-blocker is Done.
+blocker is Done. Each included decision carries its bounded structured detail,
+or the concrete reason that detail could not be read.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
@@ -838,7 +841,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           (if ($agents_all | length) > $child_n then {surface:"agents",count:(($agents_all | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
         ]
-      }'
+      }' \
+    | node "$SCRIPT_DIR/fm-decision-document.mjs" --enrich-summary "$FM_HOME"
 }
 
 # Current registered-secondmate aggregation.
@@ -1281,6 +1285,14 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.valid | type) == "boolean" and (.state | type) == "string"
           and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
           and (.active_children | type) == "array" and (.decisions_open | type) == "array"
+          and all(.decisions_open[];
+            (.detail.available | type) == "boolean"
+            and (if .detail.available
+                 then (.detail.title | type) == "string"
+                      and (.detail.context | type) == "string"
+                      and (.detail.options | type) == "array"
+                 else (.detail.reason | type) == "string"
+                 end))
           and (.holds | type) == "array" and (.queued | type) == "array"
           and (.landed | type) == "array" and (.endpoints | type) == "array"
           and (.agents | type) == "array"
