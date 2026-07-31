@@ -1011,7 +1011,7 @@ const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|me
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
 const PR_TERMINAL_REASON = /(?:\b(?:pull\s+requests?|PRs?)\b[^\n.!?;]{0,80}\b(?:merged|closed)\b|\b(?:merged|closed)\b[^\n.!?;]{0,80}\b(?:pull\s+requests?|PRs?)\b)/i;
 const PR_OPEN_REASON = /(?:\bopen\s+(?:pull\s+requests?|PRs?)\b|\b(?:pull\s+requests?|PRs?)(?:\s*#?\d+)?\s+(?:is\s+)?(?:open|pending|awaiting|ready\s+for)\b|\b(?:awaiting|pending)\b[^\n.!?;]{0,60}\b(?:review|approval|merge)\b[^\n.!?;]{0,30}\b(?:pull\s+requests?|PRs?)\b)/i;
-const PR_ONLY_GATE_REASON = /^(?:(?:pull\s+request|pr)(?:\s*#?\d+)?\s+)?(?:is\s+)?(?:awaiting|pending|ready\s+for|waiting\s+(?:for|on)|paused\s+(?:for|on))\s+(?:(?:the\s+)?(?:captain(?:'s)?|your)\s+)?(?:approval|review|merge|merge\s+decision|sign-?off)(?:\s+(?:for|on|of)\s+(?:the\s+)?(?:pull\s+request|pr)(?:\s*#?\d+)?)?[.!]?$/i;
+const PR_ONLY_GATE_REASON = /^(?:(?:pull\s+request|pr)(?:\s*#?\d+)?\s+)?(?:is\s+)?(?:awaiting|pending|ready\s+for|waiting\s+(?:for|on)|paused\s+(?:for|on))\s+(?:(?:the\s+)?(?:captain(?:'s)?|your)\s+)?(?:approval|review|merge|merge\s+(?:approval|decision)|sign-?off)(?:\s+(?:for|on|of)\s+(?:the\s+)?(?:pull\s+request|pr)(?:\s*#?\d+)?)?[.!]?$/i;
 
 function pauseReasonText(task) {
   return String(task.current_state?.detail ?? task.reason ?? task.doing ?? "").trim();

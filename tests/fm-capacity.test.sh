@@ -1808,7 +1808,7 @@ test_merged_pr_current_task_truth_is_shared() {
       {"order":1,"state":"in_flight","structured":true,"id":"pr-only","title":"Stale merged approval wait","repo":"stale-project","project_resolved":true,"kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29","body_excerpt":"Acceptance criteria: delivery is merged."}
     ]
     | .tasks = [
-      {"id":"pr-only","kind":"ship","mode":"direct-PR","project":"stale-project","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"pr-only","repo":"stale-project","kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29"}}
+      {"id":"pr-only","kind":"ship","mode":"direct-PR","project":"stale-project","current_state":{"state":"paused","source":"run-step","detail":"PR awaiting captain merge approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"pr-only","repo":"stale-project","kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29"}}
     ]
     | .pr_reconciliation = {
         "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"}
