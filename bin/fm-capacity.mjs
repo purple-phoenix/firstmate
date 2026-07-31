@@ -1704,8 +1704,18 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   // Preserve any keyed parent-side decision fold as an explicitly unavailable
   // captain row instead of silently dropping it or pretending its detail was
   // read. This is fallback provenance only; readable structured-home rows win.
+  const mateById = new Map((snapshot.secondmate_current?.records || [])
+    .filter((mate) => mate?.id)
+    .map((mate) => [mate.id, mate]));
   for (const route of snapshot.secondmate_current?.registry?.records || []) {
     if (!route?.id) continue;
+    const mate = mateById.get(route.id);
+    if (mate?.provenance?.selected === "structured-home") continue;
+    const detailReason = typeof mate?.current?.reason === "string" && mate.current.reason
+      ? mate.current.reason
+      : mate
+        ? "owning home did not report why its structured snapshot was unavailable"
+        : "owning home was outside the bounded snapshot reading";
     const parent = taskById.get(route.id);
     for (const decision of parent?.hints?.open_decisions || []) {
       if (!decision.key || decision.key === "default") continue;
@@ -1714,14 +1724,16 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       if (projectedRemoteDecisionRefs.has(ref)) continue;
       rememberDecisionDetail(ref, {
         available: false,
-        reason: "owning home was outside the bounded snapshot reading",
+        reason: detailReason,
       });
       projectedRemoteDecisionRefs.add(ref);
       decisions.push({
         owner: ownerRef(route.id),
         task: itemRef(route.id, origin),
         key: ref,
-        reason: "Decision details unavailable because the owning home was outside the bounded reading.",
+        reason: mate
+          ? "Decision details unavailable because the owning home snapshot was unavailable."
+          : "Decision details unavailable because the owning home was outside the bounded reading.",
       });
     }
   }

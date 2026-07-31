@@ -635,7 +635,7 @@ test_secondmate_captain_holds_are_pipeline_waiting_work() {
 test_supervisor_decision_detail_reaches_private_refs() {
   local home="$TMP_ROOT/remote-detail-home" snapshot="$TMP_ROOT/remote-detail-snapshot.json" environment="$TMP_ROOT/remote-detail-environment.json"
   local output="$TMP_ROOT/remote-detail-home/data/remote-detail.html" refs="$TMP_ROOT/remote-detail-home/state/remote-detail-refs.json"
-  local available_ref unavailable_ref bounded_ref generic_ref
+  local available_ref unavailable_ref bounded_ref generic_ref stale_ref
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .secondmate_current.records[0].decisions_open = [
@@ -684,7 +684,10 @@ test_supervisor_decision_detail_reaches_private_refs() {
     | .secondmate_current.total = 4
     | .secondmate_current.shown = 3
     | .secondmate_current.truncated = 1
-    | .tasks += [{"id":"bounded-out","kind":"secondmate","hints":{"open_decisions":[{"key":"fallback-choice","verb":"needs-decision","summary":"Choose the bounded fallback"}]}}]
+    | .tasks += [
+      {"id":"bounded-out","kind":"secondmate","hints":{"open_decisions":[{"key":"fallback-choice","verb":"needs-decision","summary":"Choose the bounded fallback"}]}},
+      {"id":"design","kind":"secondmate","hints":{"open_decisions":[{"key":"stale-choice","verb":"needs-decision","summary":"Stale parent-side choice"}]}}
+    ]
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs" >/dev/null \
@@ -693,6 +696,7 @@ test_supervisor_decision_detail_reaches_private_refs() {
   unavailable_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/design/domain-origin/unreadable") | .key' "$refs")
   bounded_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/bounded-out/bounded-out/fallback-choice") | .key' "$refs")
   generic_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "design/domain-origin-decision-route") | .key' "$refs")
+  stale_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/design/design/stale-choice") | .key' "$refs")
   [ -n "$available_ref" ] && [ -n "$unavailable_ref" ] && [ -n "$bounded_ref" ] || fail "decision refs were not preserved"
   jq -e '
     (.refs[] | select(.value == "decision/design/domain-origin/route")
@@ -704,11 +708,12 @@ test_supervisor_decision_detail_reaches_private_refs() {
     and (.refs[] | select(.value == "decision/design/domain-origin/unreadable")
       | .decision_detail.available == false and (.decision_detail.reason | contains("EACCES")))
     and (.refs[] | select(.value == "decision/bounded-out/bounded-out/fallback-choice")
-      | .decision_detail.available == false and (.decision_detail.reason | contains("outside the bounded snapshot reading")))
+      | .decision_detail.available == false and (.decision_detail.reason | contains("structured home snapshot exceeded byte limit")))
   ' "$refs" >/dev/null || fail "private refs omitted available or honestly unavailable supervisor decision detail"
   assert_grep "data-your-go-ref=\"$available_ref\"" "$output" "supervisor decision row lost its canonical decision ref"
   assert_grep "data-your-go-ref=\"$unavailable_ref\"" "$output" "unreadable supervisor decision row was dropped"
   assert_grep "data-your-go-ref=\"$bounded_ref\"" "$output" "bounded-out supervisor decision row was dropped"
+  [ -z "$stale_ref" ] || fail "readable structured-home authority was overridden by a stale parent-side decision"
   [ -z "$generic_ref" ] || assert_no_grep ">${generic_ref}<" "$output" "supervisor decision manifest still opens generic remote-work detail"
   pass "supervisor decision detail reaches private refs and bounded omissions remain honest actionable rows"
 }
