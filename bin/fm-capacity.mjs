@@ -58,6 +58,9 @@ import { loadWaitHistory, observeWaits, estimateWait, deadlineWait, progressLabe
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
 const HOME_PROBE_BUDGET_MS = 30000;
+const PR_PROBE_BUDGET_MS = 15000;
+const PR_PROBE_TIMEOUT_MS = 5000;
+const PR_PROBE_MAX = 12;
 const VERIFIED_HARNESSES = new Set(["claude", "codex", "opencode", "pi", "grok"]);
 const STAGES = [
   "queued",
@@ -159,6 +162,10 @@ BOUNDS AND PROBES
   Backend, bootstrap credential, and dispatch probes share one 30-second fleet-wide
   deadline. Per-home steps are capped at 5, 15, and 3 seconds respectively, reduced
   by remaining aggregate time; unvisited or incomplete homes become unavailable.
+  Current GitHub delivery gates are reconciled through gh-axi before rendering.
+  At most 12 unique pull requests are read, each read is capped at 5 seconds, and
+  all reads share a 15-second deadline. A failed, malformed, or skipped read stays
+  visibly unavailable instead of being presented as verified current state.
 
 WAIT TREATMENT AND PROGRESS
   Every blocked card carries wait.class: "self_clearing" for a wait expected to
@@ -254,6 +261,62 @@ function gatherSnapshot(file) {
     throw new Error(`fresh fleet snapshot failed: ${(result.stderr || result.stdout || "unknown error").trim()}`);
   }
   return JSON.parse(result.stdout);
+}
+
+function githubPullRequest(url) {
+  const match = String(url || "").match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)\/?$/);
+  return match ? { repo: `${match[1]}/${match[2]}`, number: match[3] } : null;
+}
+
+function pullRequestState(output) {
+  const state = String(output || "").match(/^state:\s*(open|closed|merged)\s*$/im)?.[1]?.toLowerCase();
+  return state || null;
+}
+
+function reconcilePullRequests(snapshot) {
+  const candidates = new Map();
+  for (const task of snapshot.tasks || []) {
+    const state = task.current_state?.state || "unknown";
+    if (task.kind === "secondmate"
+      || (!["done", "parked"].includes(state) && taskStage(task) !== "pr_ci_approval")) continue;
+    const coordinates = githubPullRequest(task.pr?.url);
+    if (!coordinates) continue;
+    const key = `${coordinates.repo}#${coordinates.number}`;
+    if (!candidates.has(key)) candidates.set(key, { ...coordinates, tasks: [] });
+    candidates.get(key).tasks.push(task);
+  }
+  const deadline = Date.now() + PR_PROBE_BUDGET_MS;
+  let readCount = 0;
+  for (const candidate of [...candidates.values()].sort((a, b) =>
+    `${a.repo}#${a.number}`.localeCompare(`${b.repo}#${b.number}`)
+  )) {
+    let reconciliation;
+    if (readCount >= PR_PROBE_MAX) {
+      reconciliation = { status: "unavailable", reason: "pull request lookup limit reached" };
+    } else if (Date.now() >= deadline) {
+      reconciliation = { status: "unavailable", reason: "pull request lookup deadline exhausted" };
+    } else {
+      readCount += 1;
+      const result = run("gh-axi", ["pr", "view", candidate.number, "-R", candidate.repo, "--full"], {
+        timeout: Math.max(1, Math.min(PR_PROBE_TIMEOUT_MS, deadline - Date.now())),
+        maxBuffer: 512 * 1024,
+      });
+      const state = result.status === 0 ? pullRequestState(result.stdout) : null;
+      reconciliation = state
+        ? { status: state, reason: null }
+        : {
+            status: "unavailable",
+            reason: result.error?.code === "ETIMEDOUT"
+              ? "pull request lookup timed out"
+              : result.status === 0
+                ? "pull request lookup returned an unrecognized state"
+                : "pull request lookup failed",
+          };
+    }
+    for (const task of candidate.tasks) {
+      task.pr = { ...task.pr, reconciliation };
+    }
+  }
 }
 
 function executableOnPath(name) {
@@ -772,10 +835,14 @@ function taskStage(task) {
   const state = task.current_state?.state || "unknown";
   const detail = task.current_state?.detail || "";
   const decision = (task.hints?.open_decisions || []).length > 0;
+  const prState = task.pr?.reconciliation?.status || null;
   if (decision || ["blocked", "paused", "unknown", "failed"].includes(state)) return "blocked";
-  if (task.pr?.url && (state === "done" || state === "parked")) return "pr_ci_approval";
+  if (prState === "merged" && ["done", "parked"].includes(state)) return null;
+  if (task.endpoint?.exists === false) return "blocked";
+  if (prState === "closed") return "blocked";
+  if (task.pr?.url && prState !== "merged" && (state === "done" || state === "parked")) return "pr_ci_approval";
   if (/validat|fixing|ci |ci running|parked at/i.test(detail) || state === "parked") return "validating_fixing";
-  if (task.pr?.url) return "pr_ci_approval";
+  if (task.pr?.url && prState !== "merged") return "pr_ci_approval";
   if (state === "done") return "pr_ci_approval";
   return "building";
 }
@@ -1161,6 +1228,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (task.kind === "secondmate") continue;
     const backlog = task.backlog || mainRecords.find((record) => record.structured && record.id === task.id) || {};
     const stage = taskStage(task);
+    if (stage === null) continue;
     const ageDays = dateAgeDays(backlog.since, now);
     const taskRepo = backlog.repo || task.project || null;
     if (taskRepo) {
@@ -1184,8 +1252,19 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         reason: "Open decision raised by work already under way.",
       });
     }
-    if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
+    const currentUnavailable = (task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false;
+    const prReconciliationUnavailable = stage === "pr_ci_approval"
+      && task.pr?.reconciliation?.status === "unavailable";
+    if (currentUnavailable) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
+      mainInventoryComplete = false;
+    }
+    if (prReconciliationUnavailable) {
+      markUnavailable(
+        itemRef("main", task.id),
+        "main",
+        `pull request state unavailable: ${task.pr.reconciliation.reason}`
+      );
       mainInventoryComplete = false;
     }
     if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "pr_ci_approval", "blocked"].includes(stage)) {
@@ -1196,7 +1275,21 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     let taskCanDo = null;
     let taskContexts = null;
     if (stage === "blocked") {
-      taskContexts = taskRootContexts(task, "main");
+      taskContexts = currentUnavailable
+        ? [{
+            kind: "unknown",
+            key: `unknown:${task.id}`,
+            wait: "its current state could not be read",
+            action: "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.",
+          }]
+        : task.pr?.reconciliation?.status === "closed"
+          ? [{
+              kind: "closed_pr",
+              key: `closed-pr:${task.id}`,
+              wait: "its recorded pull request is closed and is not a current approval gate",
+              action: "Nothing yet - firstmate reconciles the closed delivery path.",
+            }]
+          : taskRootContexts(task, "main");
       taskWaits = taskContexts.map((context) => context.wait);
       taskCanDo = [...new Set(taskContexts.map((context) => context.action))].join(" ");
     }
@@ -1207,9 +1300,17 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       repo: projectRef(taskRepo),
       kind: ["ship", "scout"].includes(task.kind) ? task.kind : null,
       stage,
-      reason: chatQuestionCount > 0
-        ? "Worker question being handled in chat"
-        : `Authoritative current state: ${safeState(task.current_state?.state)}`,
+      reason: currentUnavailable
+        ? "Current state unavailable - no authoritative detail or ETA is shown"
+        : prReconciliationUnavailable
+          ? "Pull request state unavailable - the recorded delivery gate could not be verified"
+          : task.pr?.reconciliation?.status === "open" && stage === "pr_ci_approval"
+            ? "Forge-verified current state: open pull request"
+            : task.pr?.reconciliation?.status === "closed"
+              ? "Forge-verified pull request is closed - delivery reconciliation is required"
+              : chatQuestionCount > 0
+                ? "Worker question being handled in chat"
+                : `Authoritative current state: ${safeState(task.current_state?.state)}`,
       artifact: null,
       provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
@@ -1398,7 +1499,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
   };
 
-  const queue = mainRecords.filter((record) => record.state === "queued");
+  const queue = mainRecords.filter((record) => record.state === "queued" && !taskById.has(record.id));
   const candidates = [];
   for (const record of queue) {
     if (!record.structured) {
@@ -1537,6 +1638,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const recurringQueuedIds = new Set((mate.queued || []).filter((record) => recurringNextRun(record, now)).map((record) => record.id));
     const inactiveHoldQueuedIds = new Set((mate.queued || []).filter((record) => !record.blocked_by && record.hold_reason != null && holdExpired(record, now)).map((record) => record.id));
     const mateQueuedById = new Map((mate.queued || []).map((record) => [record.id, record]));
+    const activeChildIds = new Set((mate.active_children || []).map((child) => child.id));
+    const endpointById = new Map((mate.endpoints || []).filter((entry) => entry?.id).map((entry) => [entry.id, entry]));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       // A parked, recurring, or expired-hold queued record can also project
@@ -1582,11 +1685,18 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         secondmateGithubBoundDelivery.add(mate.id);
       }
       const detail = child.doing || child.state || "working";
-      const stage = /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
+      const endpointUnavailable = endpointById.get(child.id)?.endpoint?.exists === false;
+      const currentUnavailable = child.state === "unknown" || endpointUnavailable;
+      const stage = currentUnavailable
+        ? "blocked"
+        : /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
       if (child.repo) {
         activeProjects.add(child.repo);
       } else {
         markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "active child work lacks project provenance");
+      }
+      if (currentUnavailable) {
+        markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "current child state unavailable");
       }
       const ageDays = dateAgeDays(child.since, now);
       const childCard = {
@@ -1597,13 +1707,21 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         kind: ["ship", "scout"].includes(child.kind) ? child.kind : "ship",
         delivery_mode: safeDeliveryMode(child.delivery_mode),
         stage,
-        reason: `Authoritative current state: ${safeState(child.state || "working")}`,
+        reason: currentUnavailable
+          ? "Current state unavailable - no authoritative detail or ETA is shown"
+          : `Authoritative current state: ${safeState(child.state || "working")}`,
         artifact: null,
         provenance: "validated structured-home summary",
         age_days: ageDays,
+        waits_on: currentUnavailable ? ["its current state could not be read"] : null,
+        what_you_can_do: currentUnavailable
+          ? "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed."
+          : null,
       };
       pipeline[stage].push(childCard);
-      if (stage === "validating_fixing" && (child.state || "working") === "working") {
+      if (currentUnavailable) {
+        childCard.wait = { class: "needs_actor" };
+      } else if (stage === "validating_fixing" && (child.state || "working") === "working") {
         attachMeasurable(childCard, mate.id, child.id, waitKindFromDetail(detail));
       }
       if (ageDays !== null && ageDays >= 7) {
@@ -1611,7 +1729,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       }
     }
     for (const record of mate.queued || []) {
-      if (isSuperseded(record) || heldIds.has(record.id)) continue;
+      if (isSuperseded(record) || heldIds.has(record.id) || activeChildIds.has(record.id)) continue;
       const holdIsActive = activeHold(record, now);
       if (holdIsActive && record.hold_kind === "parked") {
         parked.push(parkedCard(record, mate.id));
@@ -2268,6 +2386,10 @@ function renderHtml(model, captainActions) {
     ...captainActions.map((action) => `<li data-your-go-ref="${h(action.key)}" data-your-go-kind="decision"><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
   const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
+  const blockedShownElsewhere = blockedCount - otherBlockedCards.length;
+  const blockedSummary = `${blockedRows}${blockedShownElsewhere > 0
+    ? `<li class="empty">${h(blockedShownElsewhere)} blocked item${blockedShownElsewhere === 1 ? " is" : "s are"} already shown under Needs You or automatic waits.</li>`
+    : blockedRows ? "" : `<li class="empty">No current work is blocked.</li>`}`;
 
   const blockedReasonCounts = new Map();
   for (const card of otherBlockedCards) {
@@ -2515,8 +2637,8 @@ function renderHtml(model, captainActions) {
         <ul>${needsYouRows || `<li class="empty">Nothing is waiting on your decision or approval.</li>`}</ul>
       </div>
       <div class="rollcall blocked-items" id="blocked-items">
-        <h2><span class="n">${h(otherBlockedCards.length)}</span> blocked</h2>
-        <ul>${blockedRows || `<li class="empty">Nothing is stuck waiting on a person or a decision.</li>`}</ul>
+        <h2><span class="n">${h(blockedCount)}</span> blocked total</h2>
+        <ul>${blockedSummary}</ul>
       </div>
       ${alarmTail}
     </div></section>
@@ -2571,6 +2693,7 @@ function renderHtml(model, captainActions) {
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const snapshot = gatherSnapshot(opts.snapshot);
+  reconcilePullRequests(snapshot);
   const environment = normalizeEnvironment(opts.environment ? readJson(opts.environment, "environment fixture") : liveEnvironment(snapshot));
   const defaultOutput = path.join(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"), "capacity-dashboard.html");
   const output = path.resolve(opts.output || defaultOutput);
