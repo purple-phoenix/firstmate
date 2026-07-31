@@ -2195,6 +2195,12 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   // The brief is a projection of the already-classified canonical model.
   // It never re-reads backlog or runtime state, and its work references point
   // back to the same one-stage pipeline cards used by the manifest.
+  const currentPipelineCards = new Map(
+    STAGES
+      .filter((stage) => stage !== "recently_landed")
+      .flatMap((stage) => pipeline[stage])
+      .map((card) => [card.id, card])
+  );
   const needsActionItems = [
     ...captainApprovalCards.map((card) => ({
       ref: card.id,
@@ -2216,16 +2222,19 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       waits_on: card.waits_on,
       what_you_can_do: card.what_you_can_do,
     })),
-    ...decisions.map((action) => ({
-      ref: action.key,
-      work_ref: action.task,
-      kind: "decision",
-      owner: action.owner,
-      repo: null,
-      reason: action.reason,
-      waits_on: null,
-      what_you_can_do: null,
-    })),
+    ...decisions.map((action) => {
+      const card = currentPipelineCards.get(action.key) || currentPipelineCards.get(action.task) || null;
+      return {
+        ref: action.key,
+        work_ref: card?.id || null,
+        kind: "decision",
+        owner: action.owner,
+        repo: card?.repo || null,
+        reason: action.reason,
+        waits_on: card?.waits_on || null,
+        what_you_can_do: card?.what_you_can_do || null,
+      };
+    }),
   ];
   const activeStatusCounts = {};
   for (const record of liveAgents.records) {
@@ -2235,9 +2244,12 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const activePeople = liveAgents.records
     .map((record, index) => ({ record, index }))
     .sort((a, b) => {
-      const aInactive = ["idle", "unavailable"].includes(a.record.activity);
-      const bInactive = ["idle", "unavailable"].includes(b.record.activity);
-      return Number(aInactive) - Number(bInactive) || a.index - b.index;
+      const activityPriority = (activity) => {
+        if (["working", "validating"].includes(activity)) return 0;
+        if (["idle", "unavailable"].includes(activity)) return 2;
+        return 1;
+      };
+      return activityPriority(a.record.activity) - activityPriority(b.record.activity) || a.index - b.index;
     })
     .map(({ record }) => record);
 
@@ -2514,7 +2526,7 @@ function renderHtml(model) {
   const needsYouRow = (item, interactive) => {
     const verb = item.kind === "approval" ? "Approve" : item.kind === "review" ? "Review" : "Decide";
     const who = item.kind === "decision"
-      ? `<span class="item-id">${h(item.ref)}</span> ${h(item.owner)} · work ${h(item.work_ref)}`
+      ? `<span class="item-id">${h(item.ref)}</span> ${h(item.owner)}${item.work_ref ? ` · work ${h(item.work_ref)}` : " · current work unavailable"}`
       : `<span class="item-id">${h(item.work_ref)}</span> ${h(item.owner)}${item.repo ? ` · ${h(item.repo)}` : ""}`;
     const context = blockedContext(item);
     const anchor = interactive ? ` data-your-go-ref="${h(item.ref)}" data-your-go-kind="${h(item.kind)}"` : "";

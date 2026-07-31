@@ -1757,21 +1757,25 @@ test_captain_brief_prioritizes_active_people() {
   make_fixture "$home" "$snapshot" "$environment"
   jq '
     .tasks = []
-    | (.secondmate_current.records[] | select(.id == "design") | .current) = {"state":"no_active_work","reason":"no active work"}
+    | (.secondmate_current.records[] | select(.id == "design") | .current) = {"state":"captain_decision","reason":"waiting on a decision"}
     | (.secondmate_current.records[] | select(.id == "design") | .provenance.selected) = "structured-home"
     | (.secondmate_current.records[] | select(.id == "design") | .agents) = [
-      {"id":"active-domain-work","title":"Run domain delivery","kind":"ship","state":"working","doing":"implementing the delivery","decisions":0,"observed_at":"2026-07-17T16:00:00Z"}
+      {"id":"active-domain-work","title":"Run domain delivery","kind":"ship","state":"working","doing":"implementing the delivery","decisions":0,"observed_at":"2026-07-17T16:00:00Z"},
+      {"id":"validating-domain-work","title":"Validate domain delivery","kind":"ship","state":"working","doing":"validating the delivery","decisions":0,"observed_at":"2026-07-17T16:00:00Z"}
     ]
-    | (.secondmate_current.records[] | select(.id == "design") | .counts.agents) = 1
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.agents) = 2
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "active-brief capacity run failed"
   printf '%s' "$json" | jq -e '
     .live_agents.records[0].role == "supervisor"
-    and .live_agents.records[0].activity == "idle"
+    and .live_agents.records[0].activity == "waiting_on_decision"
     and .captain_brief.active_people.items[0].role == "worker"
     and .captain_brief.active_people.items[0].activity == "working"
+    and .captain_brief.active_people.items[1].role == "worker"
+    and .captain_brief.active_people.items[1].activity == "validating"
+    and .captain_brief.active_people.items[2].activity == "waiting_on_decision"
   ' >/dev/null || fail "captain brief did not prioritize the genuinely active worker: $json"
   pass "captain brief prioritizes active people without changing canonical roster truth"
 }
@@ -1780,11 +1784,30 @@ test_captain_brief_reuses_canonical_model_truth() {
   local home="$TMP_ROOT/captain-brief-home" snapshot="$TMP_ROOT/captain-brief-snapshot.json"
   local environment="$TMP_ROOT/captain-brief-environment.json" output="$TMP_ROOT/captain-brief-home/data/captain-brief.html" json
   make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    (.secondmate_current.records[] | select(.id == "design") | .decisions_open) = [
+      {"id":"mate-choice","origin":"mate-choice","key":"rollout","verb":"captain-hold","source":"backlog"}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) += [
+      {"id":"mate-choice","title":"Choose the domain rollout","repo":"delta","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"choose rollout"}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.decisions_open) = 1
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.queued) = 2
+    | (.secondmate_current.records[] | select(.id == "unknown-mate") | .provenance.selected) = "parent-fallback"
+    | .tasks += [{
+        "id":"unknown-mate",
+        "kind":"secondmate",
+        "hints":{"open_decisions":[{"origin":"fallback-work","key":"fallback-choice"}]}
+      }]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
   json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "captain-brief capacity run failed"
   printf '%s' "$json" | jq -e '
     [.pipeline | to_entries[] | select(.key != "recently_landed") | .value[].id] as $current
-    | [.captain_brief.needs_action.items[].work_ref] as $action_work
+    | [.captain_brief.needs_action.items[] | select(.work_ref != null) | .work_ref] as $action_work
+    | [.captain_brief.needs_action.items[] | select(.kind == "decision" and .work_ref != null)] as $projected_decisions
+    | [.captain_brief.needs_action.items[] | select(.kind == "decision" and .work_ref == null)] as $fallback_decisions
     | [.captain_brief.stuck_work.items[].id] as $brief_stuck
     | [.pipeline.blocked[].id] as $pipeline_stuck
     | [.captain_brief.shipped.items[].id] as $brief_shipped
@@ -1792,6 +1815,9 @@ test_captain_brief_reuses_canonical_model_truth() {
     | [.captain_brief.active_people.items[] | select(.role == "worker") | .task] as $worker_tasks
     | .captain_brief.needs_action.count == .measures.open_captain_actions
       and ($action_work | all(. as $id | ($current | index($id)) != null))
+      and ($projected_decisions | any(.ref == .work_ref))
+      and ($fallback_decisions | length) == 1
+      and ($fallback_decisions[0].reason | contains("unavailable"))
       and ($brief_stuck == $pipeline_stuck)
       and .captain_brief.stuck_work.count == (.pipeline.blocked | length)
       and ($brief_shipped == $pipeline_shipped)
@@ -1799,6 +1825,7 @@ test_captain_brief_reuses_canonical_model_truth() {
       and ($worker_tasks | all(. as $id | ([$current[] | select(. == $id)] | length) == 1))
       and .captain_brief.active_people.total_visible == (.live_agents.records | length)
   ' >/dev/null || fail "captain brief diverged from canonical pipeline or live-agent truth: $json"
+  assert_grep 'current work unavailable' "$output" "fallback decision invented a pipeline work identity"
   pass "four-question brief reuses canonical one-stage work, live-agent, and landing projections"
 }
 
