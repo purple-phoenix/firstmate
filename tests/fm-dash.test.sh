@@ -358,6 +358,11 @@ test_decision_detail_options_and_validated_approval() {
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" "{\"ref\":\"$ref\",\"answer\":\"unsafe fallback\"}"
   [ "$REQ_STATUS" = 400 ] || fail "legacy decision accepted free text without an options document"
   mv "$HOME_DIR/data/active-task/decisions/runtime-policy.md.off" "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
+  cp "$HOME_DIR/data/active-task/decisions/runtime-policy.md" "$TMP_ROOT/runtime-policy.md"
+  printf '%140000s' '' | tr ' ' x >> "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
+  req GET "http://127.0.0.1:$PORT/api/detail?ref=$ref" "$CAPTAIN"
+  assert_contains "$RESP" 'Conservative rollout' "oversized main-home decision no longer renders its bounded leading record"
+  mv "$TMP_ROOT/runtime-policy.md" "$HOME_DIR/data/active-task/decisions/runtime-policy.md"
   pass "decision documents validate option picks and bounded custom answers"
 }
 

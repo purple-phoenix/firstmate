@@ -600,7 +600,7 @@ function projectedDecisionDetail(entry, decision) {
   if (decision.home === "main") {
     const root = decisionHome(decision.home);
     return root
-      ? readDecisionDocument(root, decision.origin, decision.key)
+      ? readDecisionDocument(root, decision.origin, decision.key, { allowOversizePrefix: true })
       : { available: false, reason: "main decision home could not be resolved" };
   }
   const detail = entry?.decision_detail;

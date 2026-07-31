@@ -673,6 +673,14 @@ test_supervisor_decision_detail_reaches_private_refs() {
     | .secondmate_current.records[0].counts.decisions_open = 2
     | .secondmate_current.records[0].counts.queued = 3
     | .secondmate_current.registry.records += [{"id":"bounded-out","scope":"bounded testing","projects":["delta"]}]
+    | .secondmate_current.records += [{
+        "id":"bounded-out",
+        "current":{"state":"unknown","reason":"structured home snapshot exceeded byte limit"},
+        "provenance":{"selected":"unknown"},
+        "active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"endpoints":[],
+        "counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":0,"landed":0,"endpoints":0},
+        "omitted":[]
+      }]
     | .secondmate_current.total = 4
     | .secondmate_current.shown = 3
     | .secondmate_current.truncated = 1

@@ -1704,9 +1704,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   // Preserve any keyed parent-side decision fold as an explicitly unavailable
   // captain row instead of silently dropping it or pretending its detail was
   // read. This is fallback provenance only; readable structured-home rows win.
-  const observedMateIds = new Set((snapshot.secondmate_current?.records || []).map((mate) => mate.id));
   for (const route of snapshot.secondmate_current?.registry?.records || []) {
-    if (!route?.id || observedMateIds.has(route.id)) continue;
+    if (!route?.id) continue;
     const parent = taskById.get(route.id);
     for (const decision of parent?.hints?.open_decisions || []) {
       if (!decision.key || decision.key === "default") continue;

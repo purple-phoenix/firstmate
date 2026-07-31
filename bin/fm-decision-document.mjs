@@ -18,6 +18,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 export const DECISION_DOCUMENT_MAX_BYTES = 131072;
+const SUMMARY_OUTPUT_MAX_BYTES = 262144;
 const SUMMARY_INPUT_MAX_BYTES = 4 * 1024 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -68,7 +69,7 @@ export function parseDecisionDocument(text) {
   };
 }
 
-export function readDecisionDocument(home, origin, key) {
+export function readDecisionDocument(home, origin, key, { allowOversizePrefix = false } = {}) {
   if (!ID_PATTERN.test(String(key || ""))) return unavailable("decision key is invalid");
   if (origin !== null && !ID_PATTERN.test(String(origin || ""))) return unavailable("decision origin is invalid");
   const root = path.resolve(home);
@@ -85,10 +86,12 @@ export function readDecisionDocument(home, origin, key) {
     descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile()) return unavailable(`decision record is not a regular file: ${relative}`);
-    if (stat.size > DECISION_DOCUMENT_MAX_BYTES) {
+    if (stat.size > DECISION_DOCUMENT_MAX_BYTES && !allowOversizePrefix) {
       return unavailable(`decision record exceeds the ${DECISION_DOCUMENT_MAX_BYTES}-byte limit: ${relative}`);
     }
-    const text = fs.readFileSync(descriptor).subarray(0, DECISION_DOCUMENT_MAX_BYTES).toString("utf8");
+    const buffer = Buffer.alloc(Math.min(stat.size, DECISION_DOCUMENT_MAX_BYTES));
+    const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
     return parseDecisionDocument(text);
   } catch (error) {
     const code = errorCode(error);
@@ -100,15 +103,28 @@ export function readDecisionDocument(home, origin, key) {
   }
 }
 
-export function enrichDecisionSummary(summary, home) {
+export function enrichDecisionSummary(summary, home, maxBytes = SUMMARY_OUTPUT_MAX_BYTES) {
   if (!summary || !Array.isArray(summary.decisions_open)) throw new Error("summary decisions_open must be an array");
-  return {
+  const overflow = unavailable("decision detail omitted to preserve the structured home snapshot byte limit");
+  const enriched = {
     ...summary,
     decisions_open: summary.decisions_open.map((decision) => ({
       ...decision,
-      detail: readDecisionDocument(home, decision.origin || decision.id, decision.key),
+      detail: overflow,
     })),
   };
+  for (let index = 0; index < enriched.decisions_open.length; index += 1) {
+    const decision = enriched.decisions_open[index];
+    const detail = readDecisionDocument(home, decision.origin || decision.id, decision.key);
+    decision.detail = detail;
+    if (Buffer.byteLength(JSON.stringify(enriched)) > maxBytes) decision.detail = overflow;
+  }
+  return enriched;
+}
+
+function summaryOutputMaxBytes() {
+  const value = Number(process.env.FM_SNAPSHOT_SECONDMATE_MAX_BYTES || SUMMARY_OUTPUT_MAX_BYTES);
+  return Number.isSafeInteger(value) && value > 0 ? value : SUMMARY_OUTPUT_MAX_BYTES;
 }
 
 async function readStdinBounded() {
@@ -129,7 +145,7 @@ async function main() {
     return;
   }
   const summary = JSON.parse(await readStdinBounded());
-  process.stdout.write(`${JSON.stringify(enrichDecisionSummary(summary, process.argv[3]))}\n`);
+  process.stdout.write(`${JSON.stringify(enrichDecisionSummary(summary, process.argv[3], summaryOutputMaxBytes()))}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
