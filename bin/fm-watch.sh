@@ -747,6 +747,11 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ] \
+          && [ "$out" = "preview-dead: task=$id pr=$url" ]; then
+          fm_pr_preview_outage_commit "$STATE" "$id" "$url" \
+            || triage_log "dead preview outage commit deferred for $id"
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \

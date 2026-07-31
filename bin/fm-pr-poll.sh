@@ -63,8 +63,10 @@ task_valid() {
 }
 
 preview_marker=
+preview_pending=
 if task_valid "$task" && [ -d "$preview_state" ] && [ ! -L "$preview_state" ]; then
   preview_marker=$preview_state/$task.preview-outage
+  preview_pending=$preview_state/$task.preview-outage-pending
 fi
 
 tailnet_ipv4_valid() {
@@ -83,13 +85,20 @@ preview_outage_clear() {
   if [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ]; then
     rm -f -- "$preview_marker" 2>/dev/null || true
   fi
+  if [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ]; then
+    rm -f -- "$preview_pending" 2>/dev/null || true
+  fi
 }
 
-preview_outage_is_new() {
+preview_outage_stage_new() {
   local body=$1 tmp
-  [ -n "$preview_marker" ] || return 1
+  [ -n "$preview_marker" ] && [ -n "$preview_pending" ] || return 1
   if { [ -e "$preview_marker" ] || [ -L "$preview_marker" ]; } \
     && { [ ! -f "$preview_marker" ] || [ -L "$preview_marker" ]; }; then
+    return 1
+  fi
+  if { [ -e "$preview_pending" ] || [ -L "$preview_pending" ]; } \
+    && { [ ! -f "$preview_pending" ] || [ -L "$preview_pending" ]; }; then
     return 1
   fi
   umask 077
@@ -102,7 +111,7 @@ preview_outage_is_new() {
     rm -f -- "$tmp"
     return 1
   fi
-  if ! mv -f -- "$tmp" "$preview_marker"; then
+  if ! mv -f -- "$tmp" "$preview_pending"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -160,7 +169,7 @@ probe_previews() {
       ''|*[!0-9]*) bytes=0 ;;
     esac
     if [ "$code" != 200 ] || [ "$bytes" -eq 0 ]; then
-      if preview_outage_is_new "$body"; then
+      if preview_outage_stage_new "$body"; then
         printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
       fi
       return 0
