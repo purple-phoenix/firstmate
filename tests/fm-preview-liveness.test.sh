@@ -11,7 +11,6 @@ set -eu
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
 . "$ROOT/bin/fm-pr-lib.sh"
 
 POLL="$ROOT/bin/fm-pr-poll.sh"
