@@ -956,7 +956,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-guide{width:100%;margin-top:.5rem;padding:.5rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair);font-size:.85rem}
   .fmdash-ack{display:inline-block;border:1px solid var(--good);color:var(--good);font-weight:700;font-size:.76rem;padding:.35rem .7rem;align-self:center;grid-column:2}
   .fmdash-ack-chip{margin-left:.6rem;padding:.15rem .5rem;font-size:.7rem;grid-column:auto}
-  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}}
+  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}}
   </style>
   <script>
   (() => {

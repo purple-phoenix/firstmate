@@ -1365,6 +1365,14 @@ test_served_page_has_zero_copy_affordances() {
   pass "every copy-prompt affordance on the served page is replaced by direct dispatch"
 }
 
+test_acknowledgment_stacks_at_narrow_viewports() {
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_contains "$RESP" '.fmdash-ack{display:inline-block' "served dashboard lacks the desktop acknowledgment style"
+  assert_contains "$RESP" '@media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}}' \
+    "390px acknowledgment does not return to the prompt's single explicit grid column"
+  pass "acknowledged prompts stack in one explicit column at narrow viewports"
+}
+
 test_service_contract_docs_and_ownership() {
   assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
   assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
@@ -1410,6 +1418,7 @@ test_installer_plist_and_funnel_stance
 test_installer_tracks_custom_serve_port
 test_launchd_env_and_degraded_render_selfcheck
 test_served_page_has_zero_copy_affordances
+test_acknowledgment_stacks_at_narrow_viewports
 test_service_contract_docs_and_ownership
 
 echo "fm-dash tests passed"

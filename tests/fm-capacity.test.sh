@@ -43,6 +43,9 @@ EOF
     {"id":"build-old","kind":"ship","project":"alpha","current_state":{"state":"working","source":"pane","detail":"harness busy"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-01"}},
     {"id":"validate-now","kind":"ship","project":"beta","current_state":{"state":"working","source":"run-step","detail":"validating (fixing)"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/11"},"paths":{"report":{"present":false}},"backlog":{"id":"validate-now","title":"Validate the beta delivery","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
   ],
+  "pr_reconciliation": {
+    "purple-phoenix/firstmate#11":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"}
+  },
   "scout_reports": [],
   "secondmate_current": {
     "registry": {"available":true,"complete":true,"records":[
@@ -1337,6 +1340,11 @@ test_captain_gated_pauses_need_action_without_eta() {
       {"id":"stale-pr-pause","kind":"ship","project":"astro","current_state":{"state":"paused","source":"status-fold","detail":"PR merged; awaiting captain canary decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"paths":{"report":{"present":false}},"backlog":{"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
       {"id":"closed-pr-pause","kind":"ship","project":"tau","current_state":{"state":"paused","source":"status-fold","detail":"PR closed; awaiting captain retry decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/tau/pull/12"},"paths":{"report":{"present":false}},"backlog":{"id":"closed-pr-pause","title":"Hold after a closed PR","repo":"tau","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
     ]
+    | .pr_reconciliation += {
+        "purple-phoenix/firstmate#106":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"},
+        "purple-phoenix/tau#12":{"exit_status":0,"stdout":"pull_request:\n  state: closed\n"}
+      }
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$(FM_HOME="$home" "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
@@ -1703,9 +1711,228 @@ test_live_agents_render_working_idle_and_unavailable_states() {
   pass "live agents render current workers plus idle and unavailable supervisor states with explicit freshness"
 }
 
+test_current_identity_appears_in_one_stage() {
+  local home="$TMP_ROOT/unique-stage-home" snapshot="$TMP_ROOT/unique-stage-snapshot.json"
+  local environment="$TMP_ROOT/unique-stage-environment.json" output="$TMP_ROOT/unique-stage-home/data/unique-stage.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    (.backlog.records[] | select(.id == "build-old" or .id == "validate-now") | .state) = "queued"
+    | (.secondmate_current.records[] | select(.id == "design") | .active_children) = [
+        {"id":"design-active","title":"Refresh the active design system","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-17","state":"working","source":"run-step","doing":"implementing"}
+      ]
+    | (.secondmate_current.records[] | select(.id == "design") | .endpoints) = [
+        {"id":"design-active","state":"working","source":"run-step","endpoint":{"exists":true}}
+      ]
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) += [
+        {"id":"design-active","title":"Refresh the active design system","repo":"delta","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: design checks pass."}
+      ]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unique-stage capacity run failed"
+  printf '%s' "$json" | jq -e '
+    [.pipeline | to_entries[] | select(.key != "recently_landed") | .value[].id] as $ids
+    | ($ids | length) == ($ids | unique | length)
+    and (.pipeline.building | length) == 2
+    and (.pipeline.validating_fixing | length) == 1
+  ' >/dev/null || fail "one or more current identities appeared in multiple stages: $json"
+  pass "current work identities appear in exactly one pipeline stage"
+}
+
+test_delivery_gates_reconcile_forge_state() {
+  local home="$TMP_ROOT/pr-truth-home" snapshot="$TMP_ROOT/pr-truth-snapshot.json"
+  local environment="$TMP_ROOT/pr-truth-environment.json" output="$TMP_ROOT/pr-truth-home/data/pr-truth.html"
+  local fakebin="$TMP_ROOT/pr-truth-fakebin" log="$TMP_ROOT/pr-truth-gh.log" json
+  make_fixture "$home" "$snapshot" "$environment"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 91
+SH
+  chmod +x "$fakebin/gh-axi"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"done","structured":true,"id":"merged-gate","title":"Already merged delivery","repo":"astroai","project_resolved":true,"kind":"ship","pr_url":"https://github.com/purple-phoenix/astroai/pull/97","completion":{"verb":"merged","date":"2026-07-28"}},
+      {"order":2,"state":"in_flight","structured":true,"id":"blocked-open-gate","title":"Blocked open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":3,"state":"in_flight","structured":true,"id":"unreadable-gate","title":"Unreadable delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":4,"state":"in_flight","structured":true,"id":"open-gate","title":"Open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":5,"state":"in_flight","structured":true,"id":"closed-gate","title":"Closed delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"}
+    ]
+    | .tasks = [
+      {"id":"merged-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"merged-gate","repo":"astroai","kind":"ship"}},
+      {"id":"blocked-open-gate","kind":"ship","project":"astroai","current_state":{"state":"blocked","source":"run-step","detail":"waiting for dependency"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"blocked-open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"unreadable-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"unreadable-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"open-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/100"},"backlog":{"id":"open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"closed-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"ready for approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/101"},"backlog":{"id":"closed-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}}
+    ]
+    | .pr_reconciliation = {
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n  merged: 2026-07-28T14:24:24Z\n"},
+        "purple-phoenix/astroai#98":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#99":{"exit_status":1,"stdout":"","stderr":"unavailable"},
+        "purple-phoenix/astroai#100":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#101":{"exit_status":0,"stdout":"pull_request:\n  state: closed\n"}
+      }
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$(PATH="$fakebin:$PATH" FM_TEST_GH_AXI_LOG="$log" \
+    "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "pull-request reconciliation capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.pr_ci_approval | length) == 1
+    and (.pipeline.blocked | length) == 3
+    and ([.pipeline.pr_ci_approval[] | select(.reason == "Forge-verified current state: open pull request")] | length) == 1
+    and ([.pipeline.blocked[] | select(.reason == "Pull request state unavailable - the recorded delivery gate could not be verified" and .approval_ready == false and .captain_gate != true)] | length) == 1
+    and ([.pipeline.blocked[] | select(.reason == "Forge-verified pull request is closed - delivery reconciliation is required"
+      and .approval_ready == false
+      and .approval_authority == null
+      and .captain_approval_required == false)] | length) == 1
+    and ([.pipeline.blocked[] | select((.waits_on // [] | join(" ")) | contains("awaiting captain approval"))] | length) == 0
+    and (.pipeline.recently_landed | length) == 1
+    and (.recommendations | any(.id == "CAP-03"))
+  ' >/dev/null || fail "forge reconciliation kept a merged gate current or hid an unreadable gate: $json"
+  [ ! -e "$log" ] || fail "snapshot fixture performed a live pull-request read"
+  pass "all recorded delivery gates reconcile offline with unavailable authority suppressed"
+}
+
+test_merged_pr_current_task_truth_is_shared() {
+  local home="$TMP_ROOT/merged-current-home" snapshot="$TMP_ROOT/merged-current-snapshot.json"
+  local environment="$TMP_ROOT/merged-current-environment.json" output="$TMP_ROOT/merged-current-home/data/merged-current.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"pr-only","title":"Stale merged approval wait","repo":"stale-project","project_resolved":true,"kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29","body_excerpt":"Acceptance criteria: delivery is merged."}
+    ]
+    | .tasks = [
+      {"id":"pr-only","kind":"ship","mode":"direct-PR","project":"stale-project","current_state":{"state":"paused","source":"run-step","detail":"PR awaiting captain merge approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"pr-only","repo":"stale-project","kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29"}}
+    ]
+    | .pr_reconciliation = {
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"}
+      }
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '
+    .github_auth.status = "unavailable"
+    | .backend.available = false
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "merged current-task exclusion run failed"
+  printf '%s' "$json" | jq -e '
+    ([.pipeline | to_entries[] | select(.key != "recently_landed") | .value[]] | length) == 0
+    and (.live_agents.records | length) == 0
+    and .lanes.ephemeral_workers.active == 0
+    and (.recommendations | any(.id == "CAP-02") | not)
+    and (.recommendations | any(.id == "CAP-09") | not)
+  ' >/dev/null || fail "merged PR-only work survived a current-task consumer: $json"
+
+  jq '
+    .backlog.records += [
+      {"order":2,"state":"queued","structured":true,"id":"followup","title":"Start the independent stale-project followup","repo":"stale-project","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: followup checks pass."},
+      {"order":3,"state":"in_flight","structured":true,"id":"incident","title":"Resolve the post-merge deployment incident","repo":"incident-project","project_resolved":true,"kind":"ship","since":"2026-07-29","body_excerpt":"Acceptance criteria: deployment recovers."},
+      {"order":4,"state":"in_flight","structured":true,"id":"canary","title":"Approve the post-merge canary","repo":"canary-project","project_resolved":true,"kind":"ship","since":"2026-07-29","body_excerpt":"Acceptance criteria: canary choice is recorded."}
+    ]
+    | .tasks += [
+      {"id":"incident","kind":"ship","project":"incident-project","current_state":{"state":"blocked","source":"run-step","detail":"PR merged; deployment blocked by incident"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"incident","repo":"incident-project","kind":"ship","since":"2026-07-29"}},
+      {"id":"canary","kind":"ship","project":"canary-project","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain canary approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"canary","repo":"canary-project","kind":"ship","since":"2026-07-29"}}
+    ]
+    | .pr_reconciliation += {
+        "purple-phoenix/astroai#98":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"},
+        "purple-phoenix/astroai#99":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"}
+      }
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '
+    .github_auth.status = "available"
+    | .backend.available = true
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "post-merge independent-work preservation run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.ready | length) == 1
+    and (.pipeline.blocked | length) == 2
+    and ([.pipeline | to_entries[] | select(.key != "recently_landed") | .value[].id] as $ids
+      | ($ids | length) == ($ids | unique | length))
+    and (.pipeline.blocked | any(.reason == "Authoritative current state: blocked"))
+    and (.pipeline.blocked | any(.captain_gate == true and ((.waits_on | join(" ")) | contains("canary approval"))))
+    and (.live_agents.records | length) == 2
+    and .lanes.ephemeral_workers.active == 2
+  ' >/dev/null || fail "independent post-merge work was dropped or stale overlap remained: $json"
+  pass "merged PR-only work leaves every capacity signal while independent work remains"
+}
+
+test_blocked_total_matches_manifest_truth() {
+  local home="$TMP_ROOT/blocked-total-home" snapshot="$TMP_ROOT/blocked-total-snapshot.json"
+  local environment="$TMP_ROOT/blocked-total-environment.json" output="$TMP_ROOT/blocked-total-home/data/blocked-total.html"
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"queued","structured":true,"id":"captain-choice","title":"Choose the rollout policy","repo":"alpha","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"pick a rollout"}
+    ]
+    | .tasks = []
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null ||
+    fail "blocked-total capacity run failed"
+  assert_grep '<span class="n">1</span> blocked total' "$output" "top blocked total contradicts the manifest"
+  assert_grep '1 blocked item is already shown under Needs You or automatic waits.' "$output" "captain-held blocked work is hidden by a false empty state"
+  assert_no_grep 'Nothing is stuck waiting on a person or a decision.' "$output" "dashboard still claims no decision-held work exists"
+  pass "top blocked total and manifest use the same truth"
+}
+
+test_unavailable_current_state_withholds_detail_and_eta() {
+  local home="$TMP_ROOT/unavailable-truth-home" snapshot="$TMP_ROOT/unavailable-truth-snapshot.json"
+  local environment="$TMP_ROOT/unavailable-truth-environment.json" output="$TMP_ROOT/unavailable-truth-home/data/unavailable-truth.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"main-unavailable","title":"Validate the unavailable main task","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-17"}
+    ]
+    | .tasks = [
+      {"id":"main-unavailable","kind":"ship","project":"alpha","current_state":{"state":"working","source":"run-step","detail":"validating (fixing)"},"endpoint":{"exists":false},"hints":{"open_decisions":[]},"pr":{"url":null},"backlog":{"id":"main-unavailable","repo":"alpha","kind":"ship","since":"2026-07-17"}}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .active_children) = [
+        {"id":"mate-unavailable","title":"Validate the unavailable domain task","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-17","state":"working","source":"run-step","doing":"validating (fixing)"}
+      ]
+    | (.secondmate_current.records[] | select(.id == "design") | .endpoints) = []
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.endpoints) = 1
+    | (.secondmate_current.records[] | select(.id == "design") | .omitted) = [{"surface":"endpoints","count":1}]
+    | (.secondmate_current.records[] | select(.id == "design") | .queued) = []
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unavailable-state capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.validating_fixing | length) == 0
+    and ([.pipeline.blocked[] | select(.reason == "Current state unavailable - no authoritative detail or ETA is shown")] | length) == 2
+    and ([.pipeline.blocked[].wait.progress? | select(. != null)] | length) == 0
+  ' >/dev/null || fail "unavailable work retained authoritative detail or progress: $json"
+  assert_no_grep 'done -' "$output" "unavailable work rendered a precise completion estimate"
+  assert_no_grep 'left</span>' "$output" "unavailable work rendered a remaining-time estimate"
+  pass "unavailable work stays unavailable without authoritative state or ETA"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_live_agents_render_working_idle_and_unavailable_states
+test_current_identity_appears_in_one_stage
+test_delivery_gates_reconcile_forge_state
+test_merged_pr_current_task_truth_is_shared
+test_blocked_total_matches_manifest_truth
+test_unavailable_current_state_withholds_detail_and_eta
 test_parked_items_rest_in_the_parking_lot
 test_recurring_items_get_their_own_section
 test_cross_home_overlap_holds_supersession_and_active_count

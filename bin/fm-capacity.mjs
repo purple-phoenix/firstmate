@@ -11,7 +11,8 @@
  * data/capacity-dashboard.html under the effective FM_HOME, and prints a compact
  * text summary. --json prints the complete model while still writing the dashboard.
  * --snapshot and --environment accept deterministic JSON fixtures for tests and
- * offline review; normal /capacity runs must not use them.
+ * offline review; snapshot PR reads come from its pr_reconciliation result map,
+ * and normal /capacity runs must not use either fixture input.
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
@@ -58,6 +59,9 @@ import { loadWaitHistory, observeWaits, estimateWait, deadlineWait, progressLabe
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
 const HOME_PROBE_BUDGET_MS = 30000;
+const PR_PROBE_BUDGET_MS = 15000;
+const PR_PROBE_TIMEOUT_MS = 5000;
+const PR_PROBE_MAX = 12;
 const VERIFIED_HARNESSES = new Set(["claude", "codex", "opencode", "pi", "grok"]);
 const STAGES = [
   "queued",
@@ -89,7 +93,9 @@ inside the canonical data root, may traverse legitimate system symlink ancestors
 must not traverse a symlink below FM_HOME or replace a symlink leaf, and is mode 0600.
 --json prints the complete model after writing the dashboard. --snapshot and
 --environment are deterministic fixture inputs for tests/offline review and must not
-be used for a normal /capacity run.
+be used for a normal /capacity run. A snapshot fixture's optional pr_reconciliation
+object maps owner/repo#number to deterministic gh-axi-shaped exit_status, stdout,
+and stderr fields; missing entries stay unavailable and never trigger live reads.
 
 --refs additionally writes the fm-capacity-refs.v1 sidecar this producer owns: the
 private mode-0600 mapping from every opaque dashboard reference (item-NN, project-NN,
@@ -159,6 +165,10 @@ BOUNDS AND PROBES
   Backend, bootstrap credential, and dispatch probes share one 30-second fleet-wide
   deadline. Per-home steps are capped at 5, 15, and 3 seconds respectively, reduced
   by remaining aggregate time; unvisited or incomplete homes become unavailable.
+  Current GitHub delivery gates are reconciled through gh-axi before rendering.
+  At most 12 unique pull requests are read, each read is capped at 5 seconds, and
+  all reads share a 15-second deadline. A failed, malformed, or skipped read stays
+  visibly unavailable instead of being presented as verified current state.
 
 WAIT TREATMENT AND PROGRESS
   Every blocked card carries wait.class: "self_clearing" for a wait expected to
@@ -254,6 +264,74 @@ function gatherSnapshot(file) {
     throw new Error(`fresh fleet snapshot failed: ${(result.stderr || result.stdout || "unknown error").trim()}`);
   }
   return JSON.parse(result.stdout);
+}
+
+function githubPullRequest(url) {
+  const match = String(url || "").match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)\/?$/);
+  return match ? { repo: `${match[1]}/${match[2]}`, number: match[3] } : null;
+}
+
+function pullRequestState(output) {
+  const state = String(output || "").match(/^\s*state:\s*(open|closed|merged)\s*$/im)?.[1]?.toLowerCase();
+  return state || null;
+}
+
+function pullRequestReconciliation(result) {
+  const state = result.status === 0 ? pullRequestState(result.stdout) : null;
+  return state
+    ? { status: state, reason: null }
+    : {
+        status: "unavailable",
+        reason: result.error?.code === "ETIMEDOUT"
+          ? "pull request lookup timed out"
+          : result.status === 0
+            ? "pull request lookup returned an unrecognized state"
+            : "pull request lookup failed",
+      };
+}
+
+function reconcilePullRequests(snapshot, fixture = null) {
+  const candidates = new Map();
+  for (const task of snapshot.tasks || []) {
+    if (task.kind === "secondmate") continue;
+    const coordinates = githubPullRequest(task.pr?.url);
+    if (!coordinates) continue;
+    const key = `${coordinates.repo}#${coordinates.number}`;
+    if (!candidates.has(key)) candidates.set(key, { ...coordinates, tasks: [] });
+    candidates.get(key).tasks.push(task);
+  }
+  const deadline = Date.now() + PR_PROBE_BUDGET_MS;
+  let readCount = 0;
+  for (const candidate of [...candidates.values()].sort((a, b) =>
+    `${a.repo}#${a.number}`.localeCompare(`${b.repo}#${b.number}`)
+  )) {
+    let reconciliation;
+    const key = `${candidate.repo}#${candidate.number}`;
+    if (fixture !== null) {
+      const result = fixture[key];
+      reconciliation = result && Number.isInteger(result.exit_status)
+        ? pullRequestReconciliation({
+            status: result.exit_status,
+            stdout: String(result.stdout || ""),
+            stderr: String(result.stderr || ""),
+          })
+        : { status: "unavailable", reason: "pull request reconciliation fixture missing" };
+    } else if (readCount >= PR_PROBE_MAX) {
+      reconciliation = { status: "unavailable", reason: "pull request lookup limit reached" };
+    } else if (Date.now() >= deadline) {
+      reconciliation = { status: "unavailable", reason: "pull request lookup deadline exhausted" };
+    } else {
+      readCount += 1;
+      const result = run("gh-axi", ["pr", "view", candidate.number, "-R", candidate.repo, "--full"], {
+        timeout: Math.max(1, Math.min(PR_PROBE_TIMEOUT_MS, deadline - Date.now())),
+        maxBuffer: 512 * 1024,
+      });
+      reconciliation = pullRequestReconciliation(result);
+    }
+    for (const task of candidate.tasks) {
+      task.pr = { ...task.pr, reconciliation };
+    }
+  }
 }
 
 function executableOnPath(name) {
@@ -586,7 +664,7 @@ function liveAgentRollCall(snapshot) {
   let workerNumber = 0;
   const addWorker = (owner, task, observedAt) => {
     const state = task.current_state?.state || task.state || "unknown";
-    if (["done", "failed"].includes(state) || task.endpoint?.exists === false) return;
+    if (!currentTask(task) || ["done", "failed"].includes(state) || task.endpoint?.exists === false) return;
     workerNumber += 1;
     const title = task.backlog?.title || task.title || task.id || "Current task";
     const decisions = Array.isArray(task.hints?.open_decisions)
@@ -772,15 +850,21 @@ function taskStage(task) {
   const state = task.current_state?.state || "unknown";
   const detail = task.current_state?.detail || "";
   const decision = (task.hints?.open_decisions || []).length > 0;
+  const prState = task.pr?.reconciliation?.status || null;
+  if (!currentTask(task)) return null;
   if (decision || ["blocked", "paused", "unknown", "failed"].includes(state)) return "blocked";
-  if (task.pr?.url && (state === "done" || state === "parked")) return "pr_ci_approval";
+  if (task.endpoint?.exists === false) return "blocked";
+  if (prState === "closed") return "blocked";
+  if (task.pr?.url && prState !== "merged" && (state === "done" || state === "parked")) return "pr_ci_approval";
   if (/validat|fixing|ci |ci running|parked at/i.test(detail) || state === "parked") return "validating_fixing";
-  if (task.pr?.url) return "pr_ci_approval";
+  if (task.pr?.url && prState !== "merged") return "pr_ci_approval";
   if (state === "done") return "pr_ci_approval";
   return "building";
 }
 
 function taskApprovalReady(task) {
+  const prState = task.pr?.reconciliation?.status || null;
+  if (prState !== null && prState !== "open") return false;
   if (task.current_state?.state !== "done") return false;
   const detail = task.current_state?.detail || "";
   if (task.mode === "direct-PR") return Boolean(task.pr?.url);
@@ -927,6 +1011,7 @@ const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|me
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
 const PR_TERMINAL_REASON = /(?:\b(?:pull\s+requests?|PRs?)\b[^\n.!?;]{0,80}\b(?:merged|closed)\b|\b(?:merged|closed)\b[^\n.!?;]{0,80}\b(?:pull\s+requests?|PRs?)\b)/i;
 const PR_OPEN_REASON = /(?:\bopen\s+(?:pull\s+requests?|PRs?)\b|\b(?:pull\s+requests?|PRs?)(?:\s*#?\d+)?\s+(?:is\s+)?(?:open|pending|awaiting|ready\s+for)\b|\b(?:awaiting|pending)\b[^\n.!?;]{0,60}\b(?:review|approval|merge)\b[^\n.!?;]{0,30}\b(?:pull\s+requests?|PRs?)\b)/i;
+const PR_ONLY_GATE_REASON = /^(?:(?:pull\s+request|pr)(?:\s*#?\d+)?\s+)?(?:is\s+)?(?:awaiting|pending|ready\s+for|waiting\s+(?:for|on)|paused\s+(?:for|on))\s+(?:(?:the\s+)?(?:captain(?:'s)?|your)\s+)?(?:approval|review|merge|merge\s+(?:approval|decision)|sign-?off)(?:\s+(?:for|on|of)\s+(?:the\s+)?(?:pull\s+request|pr)(?:\s*#?\d+)?)?[.!]?$/i;
 
 function pauseReasonText(task) {
   return String(task.current_state?.detail ?? task.reason ?? task.doing ?? "").trim();
@@ -937,8 +1022,23 @@ function prRecorded(task) {
   return prUrl !== null || task.pr_present === true;
 }
 
+function mergedPrOnlyGate(task) {
+  const state = task.current_state?.state || "unknown";
+  if (!["paused", "blocked"].includes(state)) return false;
+  if ((task.hints?.open_decisions || []).some((decision) => decision.key && decision.key !== "default")) return false;
+  return PR_ONLY_GATE_REASON.test(pauseReasonText(task));
+}
+
+function currentTask(task) {
+  if (task.pr?.reconciliation?.status !== "merged") return true;
+  const state = task.current_state?.state || "unknown";
+  return !["done", "parked"].includes(state) && !mergedPrOnlyGate(task);
+}
+
 function hasOpenPrEvidence(task) {
   if (!prRecorded(task)) return false;
+  const reconciledState = task.pr?.reconciliation?.status || null;
+  if (reconciledState !== null) return reconciledState === "open";
   const reason = pauseReasonText(task);
   if (task.pr?.merged === true || task.pr_merged === true || task.pr?.open === false || task.pr_open === false) {
     return false;
@@ -1034,7 +1134,13 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const recurringIds = new Set();
   const mainRecords = snapshot.backlog?.records || [];
   const mainDone = mainRecords.filter((record) => record.state === "done" && record.structured);
-  const taskById = new Map((snapshot.tasks || []).map((task) => [task.id, task]));
+  const mainTasks = (snapshot.tasks || []).filter((task) => task.kind !== "secondmate");
+  const supervisorTaskById = new Map((snapshot.tasks || [])
+    .filter((task) => task.kind === "secondmate")
+    .map((task) => [task.id, task]));
+  const currentMainTasks = mainTasks.filter(currentTask);
+  const allTaskById = new Map(mainTasks.map((task) => [task.id, task]));
+  const taskById = new Map(currentMainTasks.map((task) => [task.id, task]));
   const activeProjects = new Set();
   const decisions = [];
   const unavailable = [];
@@ -1148,6 +1254,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }];
   };
   for (const record of mainRecords.filter((item) => item.state === "in_flight" && item.structured)) {
+    const observedTask = allTaskById.get(record.id);
+    if (observedTask && !currentTask(observedTask)) continue;
     const task = taskById.get(record.id);
     const repo = record.repo || task?.project || null;
     if (repo) activeProjects.add(repo);
@@ -1157,10 +1265,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (!task) mainInventoryComplete = false;
   }
 
-  for (const task of snapshot.tasks || []) {
-    if (task.kind === "secondmate") continue;
+  for (const task of currentMainTasks) {
     const backlog = task.backlog || mainRecords.find((record) => record.structured && record.id === task.id) || {};
     const stage = taskStage(task);
+    if (stage === null) continue;
     const ageDays = dateAgeDays(backlog.since, now);
     const taskRepo = backlog.repo || task.project || null;
     if (taskRepo) {
@@ -1184,19 +1292,50 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         reason: "Open decision raised by work already under way.",
       });
     }
-    if ((task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false) {
+    const currentUnavailable = (task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false;
+    const prReconciliationUnavailable = task.pr?.reconciliation?.status === "unavailable";
+    if (currentUnavailable) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
+      mainInventoryComplete = false;
+    }
+    if (prReconciliationUnavailable) {
+      markUnavailable(
+        itemRef("main", task.id),
+        "main",
+        `pull request state unavailable: ${task.pr.reconciliation.reason}`
+      );
       mainInventoryComplete = false;
     }
     if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "pr_ci_approval", "blocked"].includes(stage)) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
-    const approvalReady = taskApprovalReady(task);
+    const approvalReady = !currentUnavailable && taskApprovalReady(task);
     let taskWaits = null;
     let taskCanDo = null;
     let taskContexts = null;
     if (stage === "blocked") {
-      taskContexts = taskRootContexts(task, "main");
+      taskContexts = currentUnavailable
+        ? [{
+            kind: "unknown",
+            key: `unknown:${task.id}`,
+            wait: "its current state could not be read",
+            action: "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.",
+          }]
+        : prReconciliationUnavailable
+          ? [{
+              kind: "unknown",
+              key: `unknown-pr:${task.id}`,
+              wait: "its recorded pull request state could not be verified",
+              action: "Nothing yet - firstmate reconciles the unavailable forge state and escalates if your input is needed.",
+            }]
+        : task.pr?.reconciliation?.status === "closed" && task.current_state?.state !== "paused"
+          ? [{
+              kind: "closed_pr",
+              key: `closed-pr:${task.id}`,
+              wait: "its recorded pull request is closed and is not a current approval gate",
+              action: "Nothing yet - firstmate reconciles the closed delivery path.",
+            }]
+          : taskRootContexts(task, "main");
       taskWaits = taskContexts.map((context) => context.wait);
       taskCanDo = [...new Set(taskContexts.map((context) => context.action))].join(" ");
     }
@@ -1207,9 +1346,17 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       repo: projectRef(taskRepo),
       kind: ["ship", "scout"].includes(task.kind) ? task.kind : null,
       stage,
-      reason: chatQuestionCount > 0
-        ? "Worker question being handled in chat"
-        : `Authoritative current state: ${safeState(task.current_state?.state)}`,
+      reason: currentUnavailable
+        ? "Current state unavailable - no authoritative detail or ETA is shown"
+        : prReconciliationUnavailable
+          ? "Pull request state unavailable - the recorded delivery gate could not be verified"
+          : task.pr?.reconciliation?.status === "open" && stage === "pr_ci_approval"
+            ? "Forge-verified current state: open pull request"
+            : task.pr?.reconciliation?.status === "closed"
+              ? "Forge-verified pull request is closed - delivery reconciliation is required"
+              : chatQuestionCount > 0
+                ? "Worker question being handled in chat"
+                : `Authoritative current state: ${safeState(task.current_state?.state)}`,
       artifact: null,
       provenance: `current state from ${safeSource(task.current_state?.source)}`,
       age_days: ageDays,
@@ -1398,7 +1545,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }
   };
 
-  const queue = mainRecords.filter((record) => record.state === "queued");
+  const queue = mainRecords.filter((record) => record.state === "queued" && !taskById.has(record.id));
   const candidates = [];
   for (const record of queue) {
     if (!record.structured) {
@@ -1442,7 +1589,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       const reason = record.blocked_by
         ? `Blocked by ${blockedByIds(record).map((id) => itemRef("main", id)).join(", ")}`
         : "Structured hold";
-      const chain = describeBlockedRecord(record, "main", mainRecords, snapshot.tasks || []);
+      const chain = describeBlockedRecord(record, "main", mainRecords, currentMainTasks);
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
       const chainCard = Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
         waits_on: chain.waits,
@@ -1486,6 +1633,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
     const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
+    const endpointCoverageIncomplete = omittedSurfaces.has("endpoints")
+      || (Array.isArray(mate.endpoints)
+        && Number.isInteger(mate.counts?.endpoints)
+        && mate.counts.endpoints !== mate.endpoints.length);
     const mateIncomplete = mateUnknown
       || !Array.isArray(mate.active_children)
       || !Array.isArray(mate.decisions_open)
@@ -1494,6 +1645,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       || omittedSurfaces.has("active_children")
       || omittedSurfaces.has("decisions_open")
       || omittedSurfaces.has("queued")
+      || endpointCoverageIncomplete
       || omittedSurfaces.has("agents")
       || !Number.isInteger(mate.counts?.active_children)
       || !Number.isInteger(mate.counts?.decisions_open)
@@ -1537,6 +1689,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const recurringQueuedIds = new Set((mate.queued || []).filter((record) => recurringNextRun(record, now)).map((record) => record.id));
     const inactiveHoldQueuedIds = new Set((mate.queued || []).filter((record) => !record.blocked_by && record.hold_reason != null && holdExpired(record, now)).map((record) => record.id));
     const mateQueuedById = new Map((mate.queued || []).map((record) => [record.id, record]));
+    const activeChildIds = new Set((mate.active_children || []).map((child) => child.id));
+    const endpointById = new Map((mate.endpoints || []).filter((entry) => entry?.id).map((entry) => [entry.id, entry]));
     const heldIds = new Set();
     for (const hold of mate.holds || []) {
       // A parked, recurring, or expired-hold queued record can also project
@@ -1582,11 +1736,20 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         secondmateGithubBoundDelivery.add(mate.id);
       }
       const detail = child.doing || child.state || "working";
-      const stage = /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
+      const endpoint = endpointById.get(child.id);
+      const endpointUnavailable = endpoint?.endpoint?.exists === false
+        || (endpointCoverageIncomplete && endpoint === undefined);
+      const currentUnavailable = child.state === "unknown" || endpointUnavailable;
+      const stage = currentUnavailable
+        ? "blocked"
+        : /validat|fixing|ci /i.test(detail) ? "validating_fixing" : "building";
       if (child.repo) {
         activeProjects.add(child.repo);
       } else {
         markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "active child work lacks project provenance");
+      }
+      if (currentUnavailable) {
+        markUnavailable(itemRef(mate.id, child.id), ownerRef(mate.id), "current child state unavailable");
       }
       const ageDays = dateAgeDays(child.since, now);
       const childCard = {
@@ -1597,13 +1760,21 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         kind: ["ship", "scout"].includes(child.kind) ? child.kind : "ship",
         delivery_mode: safeDeliveryMode(child.delivery_mode),
         stage,
-        reason: `Authoritative current state: ${safeState(child.state || "working")}`,
+        reason: currentUnavailable
+          ? "Current state unavailable - no authoritative detail or ETA is shown"
+          : `Authoritative current state: ${safeState(child.state || "working")}`,
         artifact: null,
         provenance: "validated structured-home summary",
         age_days: ageDays,
+        waits_on: currentUnavailable ? ["its current state could not be read"] : null,
+        what_you_can_do: currentUnavailable
+          ? "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed."
+          : null,
       };
       pipeline[stage].push(childCard);
-      if (stage === "validating_fixing" && (child.state || "working") === "working") {
+      if (currentUnavailable) {
+        childCard.wait = { class: "needs_actor" };
+      } else if (stage === "validating_fixing" && (child.state || "working") === "working") {
         attachMeasurable(childCard, mate.id, child.id, waitKindFromDetail(detail));
       }
       if (ageDays !== null && ageDays >= 7) {
@@ -1611,7 +1782,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       }
     }
     for (const record of mate.queued || []) {
-      if (isSuperseded(record) || heldIds.has(record.id)) continue;
+      if (isSuperseded(record) || heldIds.has(record.id) || activeChildIds.has(record.id)) continue;
       const holdIsActive = activeHold(record, now);
       if (holdIsActive && record.hold_kind === "parked") {
         parked.push(parkedCard(record, mate.id));
@@ -1716,7 +1887,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       : mate
         ? "owning home did not report why its structured snapshot was unavailable"
         : "owning home was outside the bounded snapshot reading";
-    const parent = taskById.get(route.id);
+    const parent = supervisorTaskById.get(route.id);
     for (const decision of parent?.hints?.open_decisions || []) {
       if (!decision.key || decision.key === "default") continue;
       const origin = decision.origin || route.id;
@@ -1868,14 +2039,13 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const captainApprovalCards = approvalReadyCards.filter((card) => card.captain_approval_required === true);
   const captainGateCards = pipeline.blocked.filter((card) => card.captain_gate === true);
   const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
-  const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
-    task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
+  const ephemeralActiveCount = currentMainTasks.filter((task) =>
+    ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
   ).length;
   const mainGithubBoundWork = ready.some((candidate) =>
     candidate.owner === "main"
     && requiresGithubAuth(candidate.record.delivery_mode)
-  ) || (snapshot.tasks || []).some((task) => {
-    if (task.kind === "secondmate") return false;
+  ) || currentMainTasks.some((task) => {
     const backlog = mainRecords.find((record) => record.structured && record.id === task.id) || task.backlog || {};
     return backlog.state !== "done"
       && (Boolean(task.pr?.url) || requiresGithubAuth(task.mode))
@@ -2044,7 +2214,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     live_agents: liveAgents,
     lanes: {
       ephemeral_workers: {
-        active: (snapshot.tasks || []).filter((task) => task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)).length,
+        active: ephemeralActiveCount,
         pool: "unbounded on demand - Firstmate has no fixed ephemeral pool or concurrency target",
         backend: environment.backend,
         github_auth: environment.github_auth,
@@ -2268,6 +2438,10 @@ function renderHtml(model, captainActions) {
     ...captainActions.map((action) => `<li data-your-go-ref="${h(action.key)}" data-your-go-kind="decision"><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
   ].join("");
   const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
+  const blockedShownElsewhere = blockedCount - otherBlockedCards.length;
+  const blockedSummary = `${blockedRows}${blockedShownElsewhere > 0
+    ? `<li class="empty">${h(blockedShownElsewhere)} blocked item${blockedShownElsewhere === 1 ? " is" : "s are"} already shown under Needs You or automatic waits.</li>`
+    : blockedRows ? "" : `<li class="empty">No current work is blocked.</li>`}`;
 
   const blockedReasonCounts = new Map();
   for (const card of otherBlockedCards) {
@@ -2515,8 +2689,8 @@ function renderHtml(model, captainActions) {
         <ul>${needsYouRows || `<li class="empty">Nothing is waiting on your decision or approval.</li>`}</ul>
       </div>
       <div class="rollcall blocked-items" id="blocked-items">
-        <h2><span class="n">${h(otherBlockedCards.length)}</span> blocked</h2>
-        <ul>${blockedRows || `<li class="empty">Nothing is stuck waiting on a person or a decision.</li>`}</ul>
+        <h2><span class="n">${h(blockedCount)}</span> blocked total</h2>
+        <ul>${blockedSummary}</ul>
       </div>
       ${alarmTail}
     </div></section>
@@ -2571,6 +2745,7 @@ function renderHtml(model, captainActions) {
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const snapshot = gatherSnapshot(opts.snapshot);
+  reconcilePullRequests(snapshot, opts.snapshot ? (snapshot.pr_reconciliation || {}) : null);
   const environment = normalizeEnvironment(opts.environment ? readJson(opts.environment, "environment fixture") : liveEnvironment(snapshot));
   const defaultOutput = path.join(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"), "capacity-dashboard.html");
   const output = path.resolve(opts.output || defaultOutput);
