@@ -1799,6 +1799,77 @@ SH
   pass "all recorded delivery gates reconcile offline with unavailable authority suppressed"
 }
 
+test_merged_pr_current_task_truth_is_shared() {
+  local home="$TMP_ROOT/merged-current-home" snapshot="$TMP_ROOT/merged-current-snapshot.json"
+  local environment="$TMP_ROOT/merged-current-environment.json" output="$TMP_ROOT/merged-current-home/data/merged-current.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":1,"state":"in_flight","structured":true,"id":"pr-only","title":"Stale merged approval wait","repo":"stale-project","project_resolved":true,"kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29","body_excerpt":"Acceptance criteria: delivery is merged."}
+    ]
+    | .tasks = [
+      {"id":"pr-only","kind":"ship","mode":"direct-PR","project":"stale-project","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"pr-only","repo":"stale-project","kind":"ship","delivery_mode":"direct-PR","since":"2026-07-29"}}
+    ]
+    | .pr_reconciliation = {
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"}
+      }
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.records = []
+    | .secondmate_current.total = 0
+    | .secondmate_current.shown = 0
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '
+    .github_auth.status = "unavailable"
+    | .backend.available = false
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "merged current-task exclusion run failed"
+  printf '%s' "$json" | jq -e '
+    ([.pipeline | to_entries[] | select(.key != "recently_landed") | .value[]] | length) == 0
+    and (.live_agents.records | length) == 0
+    and .lanes.ephemeral_workers.active == 0
+    and (.recommendations | any(.id == "CAP-02") | not)
+    and (.recommendations | any(.id == "CAP-09") | not)
+  ' >/dev/null || fail "merged PR-only work survived a current-task consumer: $json"
+
+  jq '
+    .backlog.records += [
+      {"order":2,"state":"queued","structured":true,"id":"followup","title":"Start the independent stale-project followup","repo":"stale-project","project_resolved":true,"kind":"ship","body_excerpt":"Acceptance criteria: followup checks pass."},
+      {"order":3,"state":"in_flight","structured":true,"id":"incident","title":"Resolve the post-merge deployment incident","repo":"incident-project","project_resolved":true,"kind":"ship","since":"2026-07-29","body_excerpt":"Acceptance criteria: deployment recovers."},
+      {"order":4,"state":"in_flight","structured":true,"id":"canary","title":"Approve the post-merge canary","repo":"canary-project","project_resolved":true,"kind":"ship","since":"2026-07-29","body_excerpt":"Acceptance criteria: canary choice is recorded."}
+    ]
+    | .tasks += [
+      {"id":"incident","kind":"ship","project":"incident-project","current_state":{"state":"blocked","source":"run-step","detail":"PR merged; deployment blocked by incident"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"incident","repo":"incident-project","kind":"ship","since":"2026-07-29"}},
+      {"id":"canary","kind":"ship","project":"canary-project","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain canary approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"canary","repo":"canary-project","kind":"ship","since":"2026-07-29"}}
+    ]
+    | .pr_reconciliation += {
+        "purple-phoenix/astroai#98":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"},
+        "purple-phoenix/astroai#99":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"}
+      }
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '
+    .github_auth.status = "available"
+    | .backend.available = true
+  ' "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "post-merge independent-work preservation run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.ready | length) == 1
+    and (.pipeline.blocked | length) == 2
+    and ([.pipeline | to_entries[] | select(.key != "recently_landed") | .value[].id] as $ids
+      | ($ids | length) == ($ids | unique | length))
+    and (.pipeline.blocked | any(.reason == "Authoritative current state: blocked"))
+    and (.pipeline.blocked | any(.captain_gate == true and ((.waits_on | join(" ")) | contains("canary approval"))))
+    and (.live_agents.records | length) == 2
+    and .lanes.ephemeral_workers.active == 2
+  ' >/dev/null || fail "independent post-merge work was dropped or stale overlap remained: $json"
+  pass "merged PR-only work leaves every capacity signal while independent work remains"
+}
+
 test_blocked_total_matches_manifest_truth() {
   local home="$TMP_ROOT/blocked-total-home" snapshot="$TMP_ROOT/blocked-total-snapshot.json"
   local environment="$TMP_ROOT/blocked-total-environment.json" output="$TMP_ROOT/blocked-total-home/data/blocked-total.html"
@@ -1859,6 +1930,7 @@ test_classification_priority_overlap_and_idle_semantics
 test_live_agents_render_working_idle_and_unavailable_states
 test_current_identity_appears_in_one_stage
 test_delivery_gates_reconcile_forge_state
+test_merged_pr_current_task_truth_is_shared
 test_blocked_total_matches_manifest_truth
 test_unavailable_current_state_withholds_detail_and_eta
 test_parked_items_rest_in_the_parking_lot

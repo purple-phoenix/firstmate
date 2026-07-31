@@ -664,7 +664,7 @@ function liveAgentRollCall(snapshot) {
   let workerNumber = 0;
   const addWorker = (owner, task, observedAt) => {
     const state = task.current_state?.state || task.state || "unknown";
-    if (["done", "failed"].includes(state) || task.endpoint?.exists === false) return;
+    if (!currentTask(task) || ["done", "failed"].includes(state) || task.endpoint?.exists === false) return;
     workerNumber += 1;
     const title = task.backlog?.title || task.title || task.id || "Current task";
     const decisions = Array.isArray(task.hints?.open_decisions)
@@ -851,7 +851,7 @@ function taskStage(task) {
   const detail = task.current_state?.detail || "";
   const decision = (task.hints?.open_decisions || []).length > 0;
   const prState = task.pr?.reconciliation?.status || null;
-  if (prState === "merged" && (["done", "parked"].includes(state) || mergedPrOnlyGate(task))) return null;
+  if (!currentTask(task)) return null;
   if (decision || ["blocked", "paused", "unknown", "failed"].includes(state)) return "blocked";
   if (task.endpoint?.exists === false) return "blocked";
   if (prState === "closed") return "blocked";
@@ -1011,6 +1011,7 @@ const CAPTAIN_GATE_REASON = /\bcaptain\b|\byour\s+(?:review|approval|decision|me
 const PR_GATE_REASON = /\b(?:merge|merging|review|approvals?|approve|decision|sign-?off)\b/i;
 const PR_TERMINAL_REASON = /(?:\b(?:pull\s+requests?|PRs?)\b[^\n.!?;]{0,80}\b(?:merged|closed)\b|\b(?:merged|closed)\b[^\n.!?;]{0,80}\b(?:pull\s+requests?|PRs?)\b)/i;
 const PR_OPEN_REASON = /(?:\bopen\s+(?:pull\s+requests?|PRs?)\b|\b(?:pull\s+requests?|PRs?)(?:\s*#?\d+)?\s+(?:is\s+)?(?:open|pending|awaiting|ready\s+for)\b|\b(?:awaiting|pending)\b[^\n.!?;]{0,60}\b(?:review|approval|merge)\b[^\n.!?;]{0,30}\b(?:pull\s+requests?|PRs?)\b)/i;
+const PR_ONLY_GATE_REASON = /^(?:(?:pull\s+request|pr)(?:\s*#?\d+)?\s+)?(?:is\s+)?(?:awaiting|pending|ready\s+for|waiting\s+(?:for|on)|paused\s+(?:for|on))\s+(?:(?:the\s+)?(?:captain(?:'s)?|your)\s+)?(?:approval|review|merge|merge\s+decision|sign-?off)(?:\s+(?:for|on|of)\s+(?:the\s+)?(?:pull\s+request|pr)(?:\s*#?\d+)?)?[.!]?$/i;
 
 function pauseReasonText(task) {
   return String(task.current_state?.detail ?? task.reason ?? task.doing ?? "").trim();
@@ -1025,10 +1026,13 @@ function mergedPrOnlyGate(task) {
   const state = task.current_state?.state || "unknown";
   if (!["paused", "blocked"].includes(state)) return false;
   if ((task.hints?.open_decisions || []).some((decision) => decision.key && decision.key !== "default")) return false;
-  const reason = pauseReasonText(task);
-  const namedDecision = reason.match(/\b(?:captain(?:'s)?\s+)?([a-z0-9][\w-]*)\s+(?:decision|choice|order|go-ahead|sign-off)\b/i)?.[1];
-  if (namedDecision && !/^(?:merge|merging|review|approval|approve|pull|pr)$/i.test(namedDecision)) return false;
-  return !reason || PR_GATE_REASON.test(reason) || PR_TERMINAL_REASON.test(reason);
+  return PR_ONLY_GATE_REASON.test(pauseReasonText(task));
+}
+
+function currentTask(task) {
+  if (task.pr?.reconciliation?.status !== "merged") return true;
+  const state = task.current_state?.state || "unknown";
+  return !["done", "parked"].includes(state) && !mergedPrOnlyGate(task);
 }
 
 function hasOpenPrEvidence(task) {
@@ -1130,7 +1134,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const recurringIds = new Set();
   const mainRecords = snapshot.backlog?.records || [];
   const mainDone = mainRecords.filter((record) => record.state === "done" && record.structured);
-  const taskById = new Map((snapshot.tasks || []).map((task) => [task.id, task]));
+  const mainTasks = (snapshot.tasks || []).filter((task) => task.kind !== "secondmate");
+  const currentMainTasks = mainTasks.filter(currentTask);
+  const allTaskById = new Map(mainTasks.map((task) => [task.id, task]));
+  const taskById = new Map(currentMainTasks.map((task) => [task.id, task]));
   const activeProjects = new Set();
   const decisions = [];
   const unavailable = [];
@@ -1244,6 +1251,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     }];
   };
   for (const record of mainRecords.filter((item) => item.state === "in_flight" && item.structured)) {
+    const observedTask = allTaskById.get(record.id);
+    if (observedTask && !currentTask(observedTask)) continue;
     const task = taskById.get(record.id);
     const repo = record.repo || task?.project || null;
     if (repo) activeProjects.add(repo);
@@ -1253,8 +1262,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (!task) mainInventoryComplete = false;
   }
 
-  for (const task of snapshot.tasks || []) {
-    if (task.kind === "secondmate") continue;
+  for (const task of currentMainTasks) {
     const backlog = task.backlog || mainRecords.find((record) => record.structured && record.id === task.id) || {};
     const stage = taskStage(task);
     if (stage === null) continue;
@@ -1578,7 +1586,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       const reason = record.blocked_by
         ? `Blocked by ${blockedByIds(record).map((id) => itemRef("main", id)).join(", ")}`
         : "Structured hold";
-      const chain = describeBlockedRecord(record, "main", mainRecords, snapshot.tasks || []);
+      const chain = describeBlockedRecord(record, "main", mainRecords, currentMainTasks);
       blockedRows.push({ id: itemRef("main", record.id), owner: "main", reason });
       const chainCard = Object.assign(cardFromBacklog(record, "main", "blocked", reason), {
         waits_on: chain.waits,
@@ -2028,14 +2036,13 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const captainApprovalCards = approvalReadyCards.filter((card) => card.captain_approval_required === true);
   const captainGateCards = pipeline.blocked.filter((card) => card.captain_gate === true);
   const activeCount = pipeline.building.length + pipeline.validating_fixing.length + pipeline.pr_ci_approval.length;
-  const ephemeralActiveCount = (snapshot.tasks || []).filter((task) =>
-    task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
+  const ephemeralActiveCount = currentMainTasks.filter((task) =>
+    ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)
   ).length;
   const mainGithubBoundWork = ready.some((candidate) =>
     candidate.owner === "main"
     && requiresGithubAuth(candidate.record.delivery_mode)
-  ) || (snapshot.tasks || []).some((task) => {
-    if (task.kind === "secondmate") return false;
+  ) || currentMainTasks.some((task) => {
     const backlog = mainRecords.find((record) => record.structured && record.id === task.id) || task.backlog || {};
     return backlog.state !== "done"
       && (Boolean(task.pr?.url) || requiresGithubAuth(task.mode))
@@ -2204,7 +2211,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     live_agents: liveAgents,
     lanes: {
       ephemeral_workers: {
-        active: (snapshot.tasks || []).filter((task) => task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)).length,
+        active: ephemeralActiveCount,
         pool: "unbounded on demand - Firstmate has no fixed ephemeral pool or concurrency target",
         backend: environment.backend,
         github_auth: environment.github_auth,
