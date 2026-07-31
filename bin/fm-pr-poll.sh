@@ -4,8 +4,10 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# A failed preview emits one line naming the task and PR; every other error is
-# silent, so a failed forge lookup can never be read as a merge or dead preview.
+# A newly detected failed preview emits one line naming the task and PR; the
+# committed failed-link identity suppresses repeats until recovery or link change.
+# Every other error is silent, so a failed forge lookup can never be read as a
+# merge or dead preview.
 # Preview probes resolve the link host directly to this machine's Tailscale IPv4
 # address and never follow redirects, so they cannot escape to public services.
 # The provider-tagged identity is data in the sidecar and is never interpolated
@@ -91,7 +93,7 @@ preview_outage_clear() {
 }
 
 preview_outage_stage_new() {
-  local body=$1 tmp
+  local failed_link=$1 tmp
   [ -n "$preview_marker" ] && [ -n "$preview_pending" ] || return 1
   if { [ -e "$preview_marker" ] || [ -L "$preview_marker" ]; } \
     && { [ ! -f "$preview_marker" ] || [ -L "$preview_marker" ]; }; then
@@ -103,7 +105,7 @@ preview_outage_stage_new() {
   fi
   umask 077
   tmp=$(mktemp "$preview_state/.fm-preview-outage.XXXXXX") || return 1
-  if ! printf '%s\n%s' "$url" "$body" > "$tmp" || ! chmod 0600 "$tmp"; then
+  if ! printf '%s\n%s' "$url" "$failed_link" > "$tmp" || ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -169,7 +171,7 @@ probe_previews() {
       ''|*[!0-9]*) bytes=0 ;;
     esac
     if [ "$code" != 200 ] || [ "$bytes" -eq 0 ]; then
-      if preview_outage_stage_new "$body"; then
+      if preview_outage_stage_new "$link"; then
         printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
       fi
       return 0

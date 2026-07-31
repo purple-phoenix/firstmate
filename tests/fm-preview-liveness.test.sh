@@ -15,6 +15,7 @@ set -eu
 . "$ROOT/bin/fm-pr-lib.sh"
 
 POLL="$ROOT/bin/fm-pr-poll.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-preview-liveness)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -93,7 +94,7 @@ test_dead_preview_wakes() {
   pass "non-200 and zero-byte preview responses emit one task-and-PR wake"
 }
 
-test_dead_preview_deduplicates_until_change_or_recovery() {
+test_dead_preview_deduplicates_until_link_change_or_recovery() {
   local body out
   body='Deduplicate https://preview.tailnet.ts.net:5443/'
   rm -f "$TMP_ROOT/preview-task.preview-outage" \
@@ -116,14 +117,18 @@ test_dead_preview_deduplicates_until_change_or_recovery() {
   [ -z "$out" ] || fail "committed dead preview emitted a duplicate wake"
 
   out=$(FM_TEST_GH_BODY="$body Updated" FM_TEST_CURL_CODE=503 run_poll)
-  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
-    || fail "PR body change did not start a new preview outage"
-  commit_outage || fail "changed-body outage candidate did not commit"
+  [ -z "$out" ] || fail "unrelated PR body change emitted a duplicate wake"
 
-  out=$(FM_TEST_GH_BODY="$body Updated" run_poll)
+  body='Deduplicate https://replacement.tailnet.ts.net:5443/'
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "preview link change did not start a new preview outage"
+  commit_outage || fail "changed-link outage candidate did not commit"
+
+  out=$(FM_TEST_GH_BODY="$body" run_poll)
   [ -z "$out" ] || fail "preview recovery emitted a wake"
 
-  out=$(FM_TEST_GH_BODY="$body Updated" FM_TEST_CURL_CODE=503 run_poll)
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "preview failure after recovery did not start a new outage"
   commit_outage || fail "post-recovery outage candidate did not commit"
@@ -190,8 +195,68 @@ test_closed_merged_and_draft_prs_skip_previews() {
   pass "closed, merged, and draft PRs do not probe previews"
 }
 
+test_dead_preview_reaches_durable_wake_queue_once() {
+  local home state out rc wake_count
+  home="$TMP_ROOT/watcher-home"
+  state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/preview-task.meta" \
+    'window=fm-preview-task' \
+    "pr=$URL"
+  fm_pr_poll_prepare "$state" preview-task github "$URL" github.com \
+    example/preview-app 42 "$POLL" \
+    || fail "could not prepare the authenticated preview poll"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish the authenticated preview poll"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  reset_logs
+
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=0 \
+    FM_CHECK_TIMEOUT=3 FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_CURL_LOG="$CURL_LOG" \
+    FM_TEST_TAILSCALE_LOG="$TAILSCALE_LOG" \
+    FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=503 FM_PREVIEW_TAILNET_IP=100.89.232.70 \
+    PATH="$FAKEBIN:$BASE_PATH" "$WATCH" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed while surfacing the dead preview: $out"
+  case "$out" in
+    "check: $state/preview-task.check.sh: preview-dead: task=preview-task pr=$URL") ;;
+    *) fail "watcher did not surface the exact dead-preview wake: $out" ;;
+  esac
+  wake_count=$(awk -F '\t' -v payload="check: $state/preview-task.check.sh: preview-dead: task=preview-task pr=$URL" \
+    '$5 == payload { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$wake_count" -eq 1 ] || fail "durable queue did not contain exactly one dead-preview wake"
+  [ -f "$state/preview-task.preview-outage" ] \
+    || fail "watcher did not commit the queued preview outage"
+  [ ! -e "$state/preview-task.preview-outage-pending" ] \
+    || fail "watcher left the queued preview outage pending"
+  [ "$(wc -l < "$GH_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "end-to-end watcher used more than one GitHub read"
+  if [ -n "${FM_TEST_EVIDENCE_LOG:-}" ]; then
+    {
+      printf 'WATCHER OUTPUT\n%s\n\n' "$out"
+      printf 'GITHUB READ\n'
+      cat "$GH_LOG"
+      printf '\nPINNED PREVIEW PROBE\n'
+      cat "$CURL_LOG"
+      printf '\nDURABLE WAKE QUEUE\n'
+      cat "$state/.wake-queue"
+      printf '\nOUTAGE STATE\ncommitted=%s pending=%s\n' \
+        "$(test -f "$state/preview-task.preview-outage" && printf yes || printf no)" \
+        "$(test -e "$state/preview-task.preview-outage-pending" && printf yes || printf no)"
+    } > "$FM_TEST_EVIDENCE_LOG"
+  fi
+  pass "dead preview produces exactly one durable watcher wake naming its task and PR"
+}
+
 test_dead_preview_wakes
-test_dead_preview_deduplicates_until_change_or_recovery
+test_dead_preview_deduplicates_until_link_change_or_recovery
 test_tailnet_override_must_match_local_host
 test_healthy_preview_is_silent
 test_closed_merged_and_draft_prs_skip_previews
+test_dead_preview_reaches_durable_wake_queue_once
