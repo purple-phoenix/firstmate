@@ -11,7 +11,8 @@
  * data/capacity-dashboard.html under the effective FM_HOME, and prints a compact
  * text summary. --json prints the complete model while still writing the dashboard.
  * --snapshot and --environment accept deterministic JSON fixtures for tests and
- * offline review; normal /capacity runs must not use them.
+ * offline review; snapshot PR reads come from its pr_reconciliation result map,
+ * and normal /capacity runs must not use either fixture input.
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
@@ -92,7 +93,9 @@ inside the canonical data root, may traverse legitimate system symlink ancestors
 must not traverse a symlink below FM_HOME or replace a symlink leaf, and is mode 0600.
 --json prints the complete model after writing the dashboard. --snapshot and
 --environment are deterministic fixture inputs for tests/offline review and must not
-be used for a normal /capacity run.
+be used for a normal /capacity run. A snapshot fixture's optional pr_reconciliation
+object maps owner/repo#number to deterministic gh-axi-shaped exit_status, stdout,
+and stderr fields; missing entries stay unavailable and never trigger live reads.
 
 --refs additionally writes the fm-capacity-refs.v1 sidecar this producer owns: the
 private mode-0600 mapping from every opaque dashboard reference (item-NN, project-NN,
@@ -269,16 +272,28 @@ function githubPullRequest(url) {
 }
 
 function pullRequestState(output) {
-  const state = String(output || "").match(/^state:\s*(open|closed|merged)\s*$/im)?.[1]?.toLowerCase();
+  const state = String(output || "").match(/^\s*state:\s*(open|closed|merged)\s*$/im)?.[1]?.toLowerCase();
   return state || null;
 }
 
-function reconcilePullRequests(snapshot) {
+function pullRequestReconciliation(result) {
+  const state = result.status === 0 ? pullRequestState(result.stdout) : null;
+  return state
+    ? { status: state, reason: null }
+    : {
+        status: "unavailable",
+        reason: result.error?.code === "ETIMEDOUT"
+          ? "pull request lookup timed out"
+          : result.status === 0
+            ? "pull request lookup returned an unrecognized state"
+            : "pull request lookup failed",
+      };
+}
+
+function reconcilePullRequests(snapshot, fixture = null) {
   const candidates = new Map();
   for (const task of snapshot.tasks || []) {
-    const state = task.current_state?.state || "unknown";
-    if (task.kind === "secondmate"
-      || (!["done", "parked"].includes(state) && taskStage(task) !== "pr_ci_approval")) continue;
+    if (task.kind === "secondmate") continue;
     const coordinates = githubPullRequest(task.pr?.url);
     if (!coordinates) continue;
     const key = `${coordinates.repo}#${coordinates.number}`;
@@ -291,7 +306,17 @@ function reconcilePullRequests(snapshot) {
     `${a.repo}#${a.number}`.localeCompare(`${b.repo}#${b.number}`)
   )) {
     let reconciliation;
-    if (readCount >= PR_PROBE_MAX) {
+    const key = `${candidate.repo}#${candidate.number}`;
+    if (fixture !== null) {
+      const result = fixture[key];
+      reconciliation = result && Number.isInteger(result.exit_status)
+        ? pullRequestReconciliation({
+            status: result.exit_status,
+            stdout: String(result.stdout || ""),
+            stderr: String(result.stderr || ""),
+          })
+        : { status: "unavailable", reason: "pull request reconciliation fixture missing" };
+    } else if (readCount >= PR_PROBE_MAX) {
       reconciliation = { status: "unavailable", reason: "pull request lookup limit reached" };
     } else if (Date.now() >= deadline) {
       reconciliation = { status: "unavailable", reason: "pull request lookup deadline exhausted" };
@@ -301,17 +326,7 @@ function reconcilePullRequests(snapshot) {
         timeout: Math.max(1, Math.min(PR_PROBE_TIMEOUT_MS, deadline - Date.now())),
         maxBuffer: 512 * 1024,
       });
-      const state = result.status === 0 ? pullRequestState(result.stdout) : null;
-      reconciliation = state
-        ? { status: state, reason: null }
-        : {
-            status: "unavailable",
-            reason: result.error?.code === "ETIMEDOUT"
-              ? "pull request lookup timed out"
-              : result.status === 0
-                ? "pull request lookup returned an unrecognized state"
-                : "pull request lookup failed",
-          };
+      reconciliation = pullRequestReconciliation(result);
     }
     for (const task of candidate.tasks) {
       task.pr = { ...task.pr, reconciliation };
@@ -848,6 +863,7 @@ function taskStage(task) {
 }
 
 function taskApprovalReady(task) {
+  if (task.pr?.reconciliation?.status === "unavailable") return false;
   if (task.current_state?.state !== "done") return false;
   const detail = task.current_state?.detail || "";
   if (task.mode === "direct-PR") return Boolean(task.pr?.url);
@@ -1006,6 +1022,8 @@ function prRecorded(task) {
 
 function hasOpenPrEvidence(task) {
   if (!prRecorded(task)) return false;
+  const reconciledState = task.pr?.reconciliation?.status || null;
+  if (reconciledState !== null) return reconciledState === "open";
   const reason = pauseReasonText(task);
   if (task.pr?.merged === true || task.pr_merged === true || task.pr?.open === false || task.pr_open === false) {
     return false;
@@ -1253,8 +1271,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       });
     }
     const currentUnavailable = (task.current_state?.state || "unknown") === "unknown" || task.endpoint?.exists === false;
-    const prReconciliationUnavailable = stage === "pr_ci_approval"
-      && task.pr?.reconciliation?.status === "unavailable";
+    const prReconciliationUnavailable = task.pr?.reconciliation?.status === "unavailable";
     if (currentUnavailable) {
       markUnavailable(itemRef("main", task.id), "main", "current task state unavailable");
       mainInventoryComplete = false;
@@ -1270,7 +1287,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (ageDays !== null && ageDays >= 7 && ["building", "validating_fixing", "pr_ci_approval", "blocked"].includes(stage)) {
       aging.push({ id: itemRef("main", task.id), owner: "main", age_days: ageDays, state: safeState(task.current_state?.state), evidence: `structured backlog age; current source ${safeSource(task.current_state?.source)}` });
     }
-    const approvalReady = taskApprovalReady(task);
+    const approvalReady = !currentUnavailable && taskApprovalReady(task);
     let taskWaits = null;
     let taskCanDo = null;
     let taskContexts = null;
@@ -1282,7 +1299,14 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
             wait: "its current state could not be read",
             action: "Nothing yet - firstmate reconciles the unavailable state and escalates if your input is needed.",
           }]
-        : task.pr?.reconciliation?.status === "closed"
+        : prReconciliationUnavailable
+          ? [{
+              kind: "unknown",
+              key: `unknown-pr:${task.id}`,
+              wait: "its recorded pull request state could not be verified",
+              action: "Nothing yet - firstmate reconciles the unavailable forge state and escalates if your input is needed.",
+            }]
+        : task.pr?.reconciliation?.status === "closed" && task.current_state?.state !== "paused"
           ? [{
               kind: "closed_pr",
               key: `closed-pr:${task.id}`,
@@ -2693,7 +2717,7 @@ function renderHtml(model, captainActions) {
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const snapshot = gatherSnapshot(opts.snapshot);
-  reconcilePullRequests(snapshot);
+  reconcilePullRequests(snapshot, opts.snapshot ? (snapshot.pr_reconciliation || {}) : null);
   const environment = normalizeEnvironment(opts.environment ? readJson(opts.environment, "environment fixture") : liveEnvironment(snapshot));
   const defaultOutput = path.join(snapshot.roots?.data || path.join(snapshot.fm_home || ROOT, "data"), "capacity-dashboard.html");
   const output = path.resolve(opts.output || defaultOutput);

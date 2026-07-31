@@ -43,6 +43,9 @@ EOF
     {"id":"build-old","kind":"ship","project":"alpha","current_state":{"state":"working","source":"pane","detail":"harness busy"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"build-old","title":"Build the alpha subsystem","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-01"}},
     {"id":"validate-now","kind":"ship","project":"beta","current_state":{"state":"working","source":"run-step","detail":"validating (fixing)"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/firstmate/pull/11"},"paths":{"report":{"present":false}},"backlog":{"id":"validate-now","title":"Validate the beta delivery","repo":"beta","project_resolved":true,"kind":"ship","since":"2026-07-16"}}
   ],
+  "pr_reconciliation": {
+    "purple-phoenix/firstmate#11":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"}
+  },
   "scout_reports": [],
   "secondmate_current": {
     "registry": {"available":true,"complete":true,"records":[
@@ -1337,6 +1340,11 @@ test_captain_gated_pauses_need_action_without_eta() {
       {"id":"stale-pr-pause","kind":"ship","project":"astro","current_state":{"state":"paused","source":"status-fold","detail":"PR merged; awaiting captain canary decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"paths":{"report":{"present":false}},"backlog":{"id":"stale-pr-pause","title":"Hold for canary after a merged PR","repo":"astro","project_resolved":true,"kind":"ship","since":"2026-07-20"}},
       {"id":"closed-pr-pause","kind":"ship","project":"tau","current_state":{"state":"paused","source":"status-fold","detail":"PR closed; awaiting captain retry decision"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/tau/pull/12"},"paths":{"report":{"present":false}},"backlog":{"id":"closed-pr-pause","title":"Hold after a closed PR","repo":"tau","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
     ]
+    | .pr_reconciliation += {
+        "purple-phoenix/firstmate#106":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n"},
+        "purple-phoenix/tau#12":{"exit_status":0,"stdout":"pull_request:\n  state: closed\n"}
+      }
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   json=$(FM_HOME="$home" "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
@@ -1740,33 +1748,28 @@ test_delivery_gates_reconcile_forge_state() {
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "$*" in
-  "pr view 97 -R purple-phoenix/astroai --full")
-    printf 'number: 97\nstate: merged\nmerged: 2026-07-28T14:24:24Z\n'
-    ;;
-  "pr view 98 -R purple-phoenix/astroai --full")
-    printf 'number: 98\nstate: open\n'
-    ;;
-  "pr view 99 -R purple-phoenix/astroai --full")
-    exit 1
-    ;;
-  *)
-    exit 2
-    ;;
-esac
+exit 91
 SH
   chmod +x "$fakebin/gh-axi"
   jq '
     .backlog.records = [
       {"order":1,"state":"done","structured":true,"id":"merged-gate","title":"Already merged delivery","repo":"astroai","project_resolved":true,"kind":"ship","pr_url":"https://github.com/purple-phoenix/astroai/pull/97","completion":{"verb":"merged","date":"2026-07-28"}},
-      {"order":2,"state":"in_flight","structured":true,"id":"open-gate","title":"Open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
-      {"order":3,"state":"in_flight","structured":true,"id":"unreadable-gate","title":"Unreadable delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"}
+      {"order":2,"state":"in_flight","structured":true,"id":"blocked-open-gate","title":"Blocked open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":3,"state":"in_flight","structured":true,"id":"unreadable-gate","title":"Unreadable delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":4,"state":"in_flight","structured":true,"id":"open-gate","title":"Open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"}
     ]
     | .tasks = [
-      {"id":"merged-gate","kind":"ship","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":false},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"merged-gate","repo":"astroai","kind":"ship"}},
-      {"id":"open-gate","kind":"ship","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
-      {"id":"unreadable-gate","kind":"ship","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"unreadable-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}}
+      {"id":"merged-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"merged-gate","repo":"astroai","kind":"ship"}},
+      {"id":"blocked-open-gate","kind":"ship","project":"astroai","current_state":{"state":"blocked","source":"run-step","detail":"waiting for dependency"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"blocked-open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"unreadable-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"unreadable-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"open-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/100"},"backlog":{"id":"open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}}
     ]
+    | .pr_reconciliation = {
+        "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n  merged: 2026-07-28T14:24:24Z\n"},
+        "purple-phoenix/astroai#98":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#99":{"exit_status":1,"stdout":"","stderr":"unavailable"},
+        "purple-phoenix/astroai#100":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"}
+      }
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
     | .secondmate_current.total = 0
@@ -1777,15 +1780,20 @@ SH
     "$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
     fail "pull-request reconciliation capacity run failed"
   printf '%s' "$json" | jq -e '
-    (.pipeline.pr_ci_approval | length) == 2
+    (.pipeline.pr_ci_approval | length) == 1
+    and (.pipeline.blocked | length) == 3
     and ([.pipeline.pr_ci_approval[] | select(.reason == "Forge-verified current state: open pull request")] | length) == 1
-    and ([.pipeline.pr_ci_approval[] | select(.reason == "Pull request state unavailable - the recorded delivery gate could not be verified")] | length) == 1
+    and ([.pipeline.blocked[] | select(.reason == "Pull request state unavailable - the recorded delivery gate could not be verified" and .approval_ready == false and .captain_gate != true)] | length) == 1
+    and ([.pipeline.blocked[] | select(
+      .captain_gate == true
+      and ((.waits_on | join(" ")) | contains("awaiting captain approval"))
+      and ((((.waits_on | join(" ")) + " " + .what_you_can_do) | test("open pull request"; "i")) | not)
+    )] | length) == 1
     and (.pipeline.recently_landed | length) == 1
     and (.recommendations | any(.id == "CAP-03"))
   ' >/dev/null || fail "forge reconciliation kept a merged gate current or hid an unreadable gate: $json"
-  [ "$(wc -l < "$log" | tr -d ' ')" = 3 ] || fail "forge reconciliation did not perform one bounded read per unique pull request"
-  assert_grep 'pr view 97 -R purple-phoenix/astroai --full' "$log" "merged pull request was not reconciled through gh-axi"
-  pass "current delivery gates are forge-verified and unavailable reads stay explicit"
+  [ ! -e "$log" ] || fail "snapshot fixture performed a live pull-request read"
+  pass "all recorded delivery gates reconcile offline with unavailable authority suppressed"
 }
 
 test_blocked_total_matches_manifest_truth() {
