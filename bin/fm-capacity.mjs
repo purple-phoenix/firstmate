@@ -2232,6 +2232,14 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     activeStatusCounts[record.activity] = (activeStatusCounts[record.activity] || 0) + 1;
   }
   const activePeopleCount = liveAgents.records.filter((record) => !["idle", "unavailable"].includes(record.activity)).length;
+  const activePeople = liveAgents.records
+    .map((record, index) => ({ record, index }))
+    .sort((a, b) => {
+      const aInactive = ["idle", "unavailable"].includes(a.record.activity);
+      const bInactive = ["idle", "unavailable"].includes(b.record.activity);
+      return Number(aInactive) - Number(bInactive) || a.index - b.index;
+    })
+    .map(({ record }) => record);
 
   const model = {
     schema: "fm-capacity.v1",
@@ -2268,7 +2276,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         count: activePeopleCount,
         total_visible: liveAgents.records.length,
         status_counts: activeStatusCounts,
-        items: liveAgents.records,
+        items: activePeople,
       },
       stuck_work: {
         count: pipeline.blocked.length,
@@ -2513,8 +2521,8 @@ function renderHtml(model) {
     return `<li${anchor}><span class="verb verb-${h(item.kind === "approval" ? "approve" : item.kind === "review" ? "review" : "decide")}">${verb}</span><span class="who">${who}</span><span class="why">${h(item.reason)}${context}</span></li>`;
   };
   const needsYouRowList = brief.needs_action.items.map((item) => needsYouRow(item, true));
-  const needsYouPrimary = brief.needs_action.items.length ? needsYouRow(brief.needs_action.items[0], false) : "";
-  const needsYouMore = needsYouRowList.join("");
+  const needsYouPrimary = needsYouRowList[0] || "";
+  const needsYouMore = needsYouRowList.slice(1).join("");
   const briefStuckRows = brief.stuck_work.items.map((card) => {
     const heldForCaptain = card.reason === "Captain hold" || card.captain_gate === true;
     return `<li><span class="verb ${heldForCaptain ? "verb-review" : "verb-blocked"}">${heldForCaptain ? "Needs you" : "Stuck"}</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`;
@@ -2689,11 +2697,13 @@ function renderHtml(model) {
     .brief-list li>*{min-width:0}.brief-list small{display:block;color:var(--muted);font-size:.68rem;margin-top:.08rem}
     .brief-list .activity-working{color:var(--good)}.brief-list .activity-validating{color:var(--blue)}.brief-list .activity-waiting_on_ci{color:var(--warn)}.brief-list .activity-waiting_on_decision{color:var(--serious)}.brief-list .activity-unavailable{color:var(--crit)}
     .brief-more{min-width:0}.brief-more summary{cursor:pointer;color:var(--muted);font-size:.7rem;font-weight:700;padding-top:.2rem}.brief-more[open] summary{margin-bottom:.2rem}
-    .operations{border-top:1px solid var(--line)}
-    .operations>summary{cursor:pointer;list-style:none;padding:1rem clamp(1rem,6vw,5rem);display:flex;justify-content:space-between;align-items:baseline;gap:1rem;color:var(--ink2);font-weight:800}
-    .operations>summary::-webkit-details-marker{display:none}.operations>summary::before{content:"+";color:var(--muted);margin-right:.65rem}.operations[open]>summary::before{content:"−"}
-    .operations>summary span{flex:1}.operations>summary small{color:var(--muted);font-weight:400;text-align:right}
-    .operations[open]>summary{border-bottom:1px solid var(--line)}
+    .dashboard-nav{display:flex;gap:.35rem;flex-wrap:wrap;padding:.65rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
+    .dashboard-nav a{color:var(--ink2);font-size:.78rem;font-weight:750;text-decoration:none;border:1px solid var(--hair);padding:.38rem .75rem}
+    .dashboard-nav a[aria-current="page"]{color:var(--bg);background:var(--ink);border-color:var(--ink)}
+    .dashboard-page[hidden]{display:none}
+    .page-intro{padding-bottom:1rem;border-bottom:1px solid var(--line)}
+    .page-intro h1{font-size:clamp(1.6rem,4vw,2.5rem);line-height:1.05}
+    .page-intro p{color:var(--ink2);margin-top:.4rem;max-width:72ch}
     .band-alarm{background:color-mix(in srgb,var(--sev) 13%,var(--bg));border-bottom:1px solid var(--line)}
     .kicker{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;color:var(--sev);font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:.76rem}
     .kicker .stamp{color:var(--muted);letter-spacing:.02em;text-transform:none;font-weight:400;font-size:.76rem;text-align:right}
@@ -2803,7 +2813,7 @@ function renderHtml(model) {
     .parking .mreason,.parked-copy{color:var(--muted)}
     footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
     footer p{max-width:70rem;margin:.3rem auto}
-    @media(max-width:760px){.band{padding:1.25rem 1rem}.band-brief{padding:.8rem;min-height:auto}.brief-title{font-size:1.55rem}.brief-intro{display:none}.brief-grid{grid-template-columns:1fr;gap:.45rem;margin-top:.65rem}.brief-card{padding:.58rem .7rem;gap:.28rem}.brief-question{font-size:.6rem}.brief-answer .n{font-size:1.55rem}.brief-answer h2{font-size:.88rem}.brief-rollup,.brief-basis{font-size:.68rem}.brief-card .rollcall li{grid-template-columns:3.75rem minmax(0,1fr);padding:.25rem 0}.brief-card .rollcall li .why{display:none}.brief-card>.rollcall .who,.brief-card>.brief-list .item-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brief-list li{padding:.25rem 0}.brief-more summary{font-size:.66rem}.operations>summary{padding:.85rem 1rem;display:grid;grid-template-columns:auto minmax(0,1fr)}.operations>summary small{grid-column:2;text-align:left}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media(max-width:760px){.band{padding:1.25rem 1rem}.dashboard-nav{padding:.55rem 1rem;gap:.3rem}.dashboard-nav a{flex:1 1 auto;text-align:center;padding:.35rem .5rem}.band-brief{padding:.8rem;min-height:auto}.brief-title{font-size:1.55rem}.brief-intro{display:none}.brief-grid{grid-template-columns:1fr;gap:.45rem;margin-top:.65rem}.brief-card{padding:.58rem .7rem;gap:.28rem}.brief-question{font-size:.6rem}.brief-answer .n{font-size:1.55rem}.brief-answer h2{font-size:.88rem}.brief-rollup,.brief-basis{font-size:.68rem}.brief-card .rollcall li{grid-template-columns:3.75rem minmax(0,1fr);padding:.25rem 0}.brief-card .rollcall li .why{display:block;grid-column:1/-1;padding-left:0}.brief-card>.rollcall .who,.brief-card>.brief-list .item-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brief-list li{padding:.25rem 0}.brief-more summary{font-size:.66rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
     @media(max-width:360px){.band-brief .kicker .stamp{display:none}}
     @media print{body,html{background:#fff;color:#111}.band-alarm{background:#fff}.prompt button{display:none}a{color:#0645ad}}
   </style>
@@ -2812,7 +2822,13 @@ function renderHtml(model) {
   <a class="skip" href="#main">Skip to dashboard</a>
   <div class="sevbar" aria-hidden="true"></div>
   <main id="main">
-    <section class="band band-brief" aria-labelledby="brief-title"><div class="wrap">
+    <nav class="dashboard-nav" aria-label="Dashboard pages">
+      <a href="#brief" data-dashboard-link="brief" aria-current="page">Brief</a>
+      <a href="#work" data-dashboard-link="work">Work</a>
+      <a href="#people" data-dashboard-link="people">People</a>
+      <a href="#ideas" data-dashboard-link="ideas">Ideas</a>
+    </nav>
+    <section class="dashboard-page band band-brief" id="brief" data-dashboard-page="brief" aria-labelledby="brief-title"><div class="wrap">
       <p class="kicker"><span>Captain brief</span><span class="stamp">One fleet reading · generated ${h(model.generated)}</span></p>
       <h1 class="brief-title" id="brief-title">Your fleet in four answers</h1>
       <p class="brief-intro">Current work uses one identity and one stage throughout this reading.</p>
@@ -2821,7 +2837,7 @@ function renderHtml(model) {
           <p class="brief-question">1 · Needs your action now</p>
           <div class="brief-answer"><span class="n">${h(needsYouCount)}</span><h2 id="needs-you-title">${needsYouCount === 1 ? "decision, review, or approval needs you" : "decisions, reviews, or approvals need you"}</h2></div>
           <div class="rollcall needs-you"><ul>${needsYouPrimary || `<li class="empty">Nothing is waiting on your decision, review, or approval.</li>`}</ul></div>
-          ${needsYouMore ? `<details class="brief-more"><summary>Open ${h(needsYouRowList.length)} action${needsYouRowList.length === 1 ? "" : "s"}</summary><div class="rollcall needs-you"><ul>${needsYouMore}</ul></div></details>` : ""}
+          ${needsYouMore ? `<details class="brief-more"><summary>Show ${h(needsYouRowList.length - 1)} more action${needsYouRowList.length === 2 ? "" : "s"}</summary><div class="rollcall needs-you"><ul>${needsYouMore}</ul></div></details>` : ""}
         </article>
         <article class="brief-card brief-card-active" aria-labelledby="active-people-title">
           <p class="brief-question">2 · Active people and current activity</p>
@@ -2844,8 +2860,8 @@ function renderHtml(model) {
         </article>
       </div>
     </div></section>
-    <details class="operations">
-      <summary><span>Operational appendix</span><small>Recommendations, waits, pipeline, full roster, lanes, definition health, and landed history</small></summary>
+    <section class="dashboard-page" id="work" data-dashboard-page="work" aria-labelledby="work-title" hidden>
+      <header class="band page-intro"><div class="wrap"><h1 id="work-title">Work and flow</h1><p>Recommendations, waits, pipeline state, recurring work, parking, definition health, and landed history.</p></div></header>
       <section class="band band-alarm" aria-labelledby="headline"><div class="wrap">
         <p class="kicker"><span>Primary bottleneck${model.primary_bottleneck.id ? `<span class="action-id">${h(model.primary_bottleneck.id)}</span>` : ""}</span><span class="stamp">Fleet capacity · generated ${h(model.generated)}</span></p>
         <h2 class="headline" id="headline">${h(model.primary_bottleneck.classification)}</h2>
@@ -2863,23 +2879,11 @@ function renderHtml(model) {
         ${meterBar}
         ${whyHtml}
       </div></section>
-      <section class="band band-agents" aria-labelledby="live-agents-title"><div class="wrap">
-        <p class="kicker"><span>Live agents</span><span class="stamp">Reading generated ${h(model.live_agents?.generated || model.generated)}</span></p>
-        <h2 id="live-agents-title">What every agent is doing now</h2>
-        <p class="agents-note">Each row is a single bounded reading. Use Refresh capacity for a fresh reading; a file opened directly stays at the time shown here.</p>
-        <div class="agents-head" aria-hidden="true"><span>Agent</span><span>Task</span><span>Current activity</span><span>As of</span></div>
-        <ul class="agents-list">${liveAgentRows}</ul>
-      </div></section>
       <section class="band band-quiet" aria-label="Reference detail"><div class="wrap">
         <h2 class="qhead">Also recommended · ranked by priority</h2>
         ${recs}
         <h2 class="qhead">Manifest · every current item by stage</h2>
         ${manifest}
-        <h2 class="qhead">Lanes</h2>
-        <div class="lanes-grid">
-          <div><h3>Ephemeral dispatch lanes</h3><p class="fine">Created on demand: ${h(model.lanes.ephemeral_workers.pool)}. Runtime backend ${h(model.lanes.ephemeral_workers.backend.name)}: ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><ul>${dispatchRows}</ul></div>
-          <div><h3>Persistent secondmates</h3><p class="fine">Healthy when idle unless grounded in-scope work is already ready.</p><ul>${mateRows}</ul></div>
-        </div>
         <h2 class="qhead">Definition health and landed context</h2>
         <div class="appendix">
           <div><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
@@ -2888,7 +2892,28 @@ function renderHtml(model) {
       </div></section>
       ${recurringBand}
       ${parkingLot}
-    </details>
+    </section>
+    <section class="dashboard-page" id="people" data-dashboard-page="people" aria-labelledby="people-title" hidden>
+      <header class="band page-intro"><div class="wrap"><h1 id="people-title">People and lanes</h1><p>The full live roster and the current dispatch paths behind it.</p></div></header>
+      <section class="band band-agents" aria-labelledby="live-agents-title"><div class="wrap">
+        <p class="kicker"><span>Live agents</span><span class="stamp">Reading generated ${h(model.live_agents?.generated || model.generated)}</span></p>
+        <h2 id="live-agents-title">What every agent is doing now</h2>
+        <p class="agents-note">Each row is a single bounded reading. Use Refresh capacity for a fresh reading; a file opened directly stays at the time shown here.</p>
+        <div class="agents-head" aria-hidden="true"><span>Agent</span><span>Task</span><span>Current activity</span><span>As of</span></div>
+        <ul class="agents-list">${liveAgentRows}</ul>
+      </div></section>
+      <section class="band band-quiet" aria-labelledby="lanes-title"><div class="wrap">
+        <h2 class="qhead" id="lanes-title">Lanes</h2>
+        <div class="lanes-grid">
+          <div><h3>Ephemeral dispatch lanes</h3><p class="fine">Created on demand: ${h(model.lanes.ephemeral_workers.pool)}. Runtime backend ${h(model.lanes.ephemeral_workers.backend.name)}: ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><ul>${dispatchRows}</ul></div>
+          <div><h3>Persistent secondmates</h3><p class="fine">Healthy when idle unless grounded in-scope work is already ready.</p><ul>${mateRows}</ul></div>
+        </div>
+      </div></section>
+    </section>
+    <section class="dashboard-page" id="ideas" data-dashboard-page="ideas" aria-labelledby="ideas-title" hidden>
+      <header class="band page-intro"><div class="wrap"><h1 id="ideas-title">Ideas</h1><p>Open the served dashboard to review pitches and send your verdict.</p></div></header>
+      <section class="band band-quiet"><div class="wrap"><p class="empty">Idea details are available only through the authenticated dashboard service.</p></div></section>
+    </section>
   </main>
   <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>
   <script>
@@ -2896,6 +2921,21 @@ function renderHtml(model) {
       try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = 'Copied'; }
       catch { button.textContent = 'Select prompt'; }
     }));
+    const showDashboardPage = () => {
+      const requested = location.hash.slice(1);
+      const page = document.querySelector('[data-dashboard-page="' + requested + '"]')
+        ? requested
+        : 'brief';
+      document.querySelectorAll('[data-dashboard-page]').forEach((section) => {
+        section.hidden = section.dataset.dashboardPage !== page;
+      });
+      document.querySelectorAll('[data-dashboard-link]').forEach((link) => {
+        if (link.dataset.dashboardLink === page) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
+      });
+    };
+    window.addEventListener('hashchange', showDashboardPage);
+    showDashboardPage();
   </script>
 </body>
 </html>`;

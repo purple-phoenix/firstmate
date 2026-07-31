@@ -931,12 +931,19 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_grep '>2 · Active people and current activity<' "$output" "dashboard lacks the second captain question"
   assert_grep '>3 · Stuck work and root cause<' "$output" "dashboard lacks the third captain question"
   assert_grep '>4 · Shipped since your last reading<' "$output" "dashboard lacks the fourth captain question"
-  assert_grep '<details class="operations">' "$output" "dashboard lacks the collapsed operational appendix"
-  assert_no_grep '<details class="operations" open' "$output" "operational appendix is expanded in the first viewport"
+  assert_grep 'aria-label="Dashboard pages"' "$output" "dashboard lacks focused page navigation"
+  assert_grep 'data-dashboard-page="brief"' "$output" "dashboard lacks its captain brief page"
+  assert_grep 'data-dashboard-page="work"' "$output" "dashboard lacks its work page"
+  assert_grep 'data-dashboard-page="people"' "$output" "dashboard lacks its people page"
+  assert_grep 'data-dashboard-page="ideas"' "$output" "dashboard lacks its ideas page"
+  assert_grep 'data-dashboard-page="work" aria-labelledby="work-title" hidden' "$output" "secondary work material loads into the first viewport"
   assert_grep '.brief-grid{grid-template-columns:1fr' "$output" "captain brief does not stack at the 320-390px viewport standard"
   assert_grep '.band-brief{padding:.8rem;min-height:auto}' "$output" "mobile brief reserves a full extra viewport below the service bar"
   assert_grep '@media(max-width:360px){.band-brief .kicker .stamp{display:none}}' "$output" "320px brief does not reclaim the optional timestamp row"
   assert_grep '.brief-card{padding:.58rem .7rem' "$output" "captain brief lacks compact narrow-viewport cards"
+  assert_grep '.brief-card .rollcall li .why{display:block;grid-column:1/-1' "$output" "mobile brief hides root causes or decision controls"
+  assert_no_grep '.brief-card .rollcall li .why{display:none}' "$output" "mobile brief still hides root causes and decision controls"
+  assert_grep '<div class="rollcall needs-you"><ul><li data-your-go-ref=' "$output" "the visible primary action lacks its direct interaction anchor"
   assert_grep 'id="needs-you"' "$output" "dashboard lacks the needs-you roll call"
   assert_grep 'id="blocked-items"' "$output" "dashboard lacks the blocked-items roll call"
   assert_grep 'class="meterbar"' "$output" "dashboard lacks the working-vs-waiting meter"
@@ -1743,6 +1750,31 @@ test_current_identity_appears_in_one_stage() {
   pass "current work identities appear in exactly one pipeline stage"
 }
 
+test_captain_brief_prioritizes_active_people() {
+  local home="$TMP_ROOT/active-brief-home" snapshot="$TMP_ROOT/active-brief-snapshot.json"
+  local environment="$TMP_ROOT/active-brief-environment.json" output="$TMP_ROOT/active-brief-home/data/active-brief.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .tasks = []
+    | (.secondmate_current.records[] | select(.id == "design") | .current) = {"state":"no_active_work","reason":"no active work"}
+    | (.secondmate_current.records[] | select(.id == "design") | .provenance.selected) = "structured-home"
+    | (.secondmate_current.records[] | select(.id == "design") | .agents) = [
+      {"id":"active-domain-work","title":"Run domain delivery","kind":"ship","state":"working","doing":"implementing the delivery","decisions":0,"observed_at":"2026-07-17T16:00:00Z"}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.agents) = 1
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "active-brief capacity run failed"
+  printf '%s' "$json" | jq -e '
+    .live_agents.records[0].role == "supervisor"
+    and .live_agents.records[0].activity == "idle"
+    and .captain_brief.active_people.items[0].role == "worker"
+    and .captain_brief.active_people.items[0].activity == "working"
+  ' >/dev/null || fail "captain brief did not prioritize the genuinely active worker: $json"
+  pass "captain brief prioritizes active people without changing canonical roster truth"
+}
+
 test_captain_brief_reuses_canonical_model_truth() {
   local home="$TMP_ROOT/captain-brief-home" snapshot="$TMP_ROOT/captain-brief-snapshot.json"
   local environment="$TMP_ROOT/captain-brief-environment.json" output="$TMP_ROOT/captain-brief-home/data/captain-brief.html" json
@@ -1959,6 +1991,7 @@ test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_live_agents_render_working_idle_and_unavailable_states
 test_current_identity_appears_in_one_stage
+test_captain_brief_prioritizes_active_people
 test_captain_brief_reuses_canonical_model_truth
 test_delivery_gates_reconcile_forge_state
 test_merged_pr_current_task_truth_is_shared

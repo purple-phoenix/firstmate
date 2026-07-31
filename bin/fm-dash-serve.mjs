@@ -1322,7 +1322,11 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       ideasSection.appendChild(wrap);
       const footer = document.querySelector("footer");
       const main = document.querySelector("main");
-      if (main) main.appendChild(ideasSection);
+      const ideasPage = document.querySelector('[data-dashboard-page="ideas"]');
+      const placeholder = ideasPage && ideasPage.querySelector(".band-quiet");
+      if (placeholder) placeholder.replaceWith(ideasSection);
+      else if (ideasPage) ideasPage.appendChild(ideasSection);
+      else if (main) main.appendChild(ideasSection);
       else if (footer) footer.before(ideasSection);
     }
     async function sendIdeaVerdict(id, verdict, suggestion, button) {
