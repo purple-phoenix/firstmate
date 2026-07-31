@@ -66,6 +66,11 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" state,isDraft,body "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_DRAFT:-false}" "${FM_TEST_GH_BODY:-}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"

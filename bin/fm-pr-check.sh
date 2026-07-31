@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, then atomically arm a static PR watcher.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
+# The watcher detects merge completion and re-checks tailnet preview liveness for
+# open, ready GitHub PRs without mutating the PR or preview service.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
