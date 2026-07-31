@@ -245,6 +245,8 @@ test_served_page_wears_dashboard_with_interactive_layer() {
   assert_contains "$RESP" 'Firstmate capacity dashboard' "served page is not the producer dashboard"
   assert_contains "$RESP" 'fmdash-bar' "served page lacks the injected service bar"
   assert_contains "$RESP" 'Refresh capacity' "served page lacks the refresh control"
+  assert_contains "$RESP" '>Live agents<' "served page lacks the live-agents section"
+  assert_contains "$RESP" '"label":"Run the active rollout"' "served live-agent data lacks the task's plain title"
   assert_contains "$RESP" 'Approve & send' "served page lacks the dispatch control script"
   assert_contains "$RESP" 'data-copy' "producer copy layer was lost in serving"
   assert_contains "$RESP" '"ready-safe"' "served page config lacks the de-anonymized work item id"

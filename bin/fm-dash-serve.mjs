@@ -643,9 +643,12 @@ function refDisplayMap(refsFile, acks = null) {
       const owner = entry.value.slice(0, separator);
       const decision = decisionRef(entry);
       const id = decision ? `${decision.origin ? `${decision.origin}/` : ""}${decision.key}` : entry.value.slice(separator + 1);
+      const label = typeof entry.label === "string" && entry.label.trim()
+        ? entry.label.trim().slice(0, 200)
+        : id;
       display[ref] = owner === "decision"
         ? { t: "decision", label: id }
-        : { t: "work", label: id, owner };
+        : { t: "work", label, owner };
       if (decision && acks) {
         const ack = acks.get(`decision:${decision.home}/${decision.origin || ""}/${decision.key}`);
         if (ack) display[ref].ack = ack;

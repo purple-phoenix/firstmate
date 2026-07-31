@@ -1541,8 +1541,85 @@ test_recurring_items_get_their_own_section() {
   pass "date-gated cadence work rests in the calm recurring section with next-run and last-run linkage, and an expired date gate re-enters normal readiness"
 }
 
+test_live_agents_render_working_idle_and_unavailable_states() {
+  local home="$TMP_ROOT/live-agents-home" snapshot="$TMP_ROOT/live-agents-snapshot.json" environment="$TMP_ROOT/live-agents-environment.json"
+  local output="$TMP_ROOT/live-agents-home/data/live-agents.html" refs="$TMP_ROOT/live-agents-home/state/live-agents-refs.json" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    (.secondmate_current.records[] | select(.id == "unknown-mate") | .current) = {"state":"unknown","reason":"structured home snapshot failed"}
+    | (.secondmate_current.records[] | select(.id == "unknown-mate") | .provenance.selected) = "unknown"
+    | .tasks += [
+      {"id":"checks-wait","kind":"ship","project":"alpha","current_state":{"state":"parked","source":"run-step","detail":"CI pending"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/checks"},"backlog":{"id":"checks-wait","title":"Wait for alpha checks"}},
+      {"id":"review-wait","kind":"ship","project":"beta","yolo":"off","current_state":{"state":"parked","source":"run-step","detail":"PR awaiting captain merge approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/review"},"backlog":{"id":"review-wait","title":"Wait for beta review"}},
+      {"id":"firstmate-review-wait","kind":"ship","project":"beta","yolo":"on","current_state":{"state":"parked","source":"run-step","detail":"PR awaiting merge approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/firstmate-review"},"backlog":{"id":"firstmate-review-wait","title":"Wait for firstmate merge"}},
+      {"id":"ambiguous-wait","kind":"ship","project":"gamma","current_state":{"state":"parked","source":"run-step","detail":"PR status unavailable"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://example.invalid/ambiguous"},"backlog":{"id":"ambiguous-wait","title":"Wait for gamma status"}}
+    ]
+    | .secondmate_current.registry.records += [
+      {"id":"bounded-out","scope":"testing","projects":["tests"]}
+    ]
+    | .secondmate_current.total = 4
+    | .secondmate_current.truncated = 1
+    | .secondmate_current.registry.complete = false
+    | .secondmate_current.registry.input_truncated = true
+    | .secondmate_current.registry.records_truncated = false
+    | .secondmate_current.registry.reasons = ["line_limit"]
+    | (.secondmate_current.records[] | select(.id == "design") | .agents) = [
+      {"id":"mate-review-wait","title":"Wait for domain review","kind":"ship","yolo":"off","approval_authority":"captain","state":"parked","source":"run-step","doing":"PR awaiting captain merge approval","decisions":0,"observed_at":"2026-07-17T16:00:00Z"}
+    ]
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.agents) = 1
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs") ||
+    fail "live-agents fixture run failed"
+  printf '%s' "$json" | jq -e '
+    .live_agents.generated == "2026-07-17T16:00:00Z"
+    and (.live_agents.records | any(.role == "worker" and .activity == "working"))
+    and (.live_agents.records | any(.role == "worker" and .activity == "validating"))
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_ci" and .label == "Waiting on checks" and .detail == "Automated checks are pending.")] | length) == 1
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting_on_review" and .label == "Waiting for your review or merge")] | length) == 2
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting" and .label == "Waiting" and .detail == "Review or merge is pending.")] | length) == 1
+    and ([.live_agents.records[] | select(.role == "worker" and .activity == "waiting" and .label == "Waiting" and .detail == "Waiting for the recorded condition to clear.")] | length) == 1
+    and (.live_agents.records | any(.role == "supervisor" and .activity == "idle"))
+    and ([.live_agents.records[] | select(.role == "supervisor")] | length) == 5
+    and ([.live_agents.records[] | select(.role == "supervisor" and .activity == "unavailable")] | length) == 3
+    and (.live_agents.records | any(.role == "supervisor" and .detail == "This registered home was outside the bounded reading."))
+    and (.live_agents.records | any(.role == "supervisor" and .agent == "Additional supervisors" and .detail == "The bounded registry reading omitted additional identities; their count is unavailable."))
+    and (.live_agents.records | all(.as_of == "2026-07-17T16:00:00Z"))
+  ' >/dev/null || fail "live-agents model omitted a current worker or honest supervisor state: $json"
+  jq -e '
+    [.refs[] | select(.kind == "item" and .value == "main/build-old" and .label == "Build the alpha subsystem")] | length == 1
+  ' "$refs" >/dev/null || fail "private refs sidecar omitted the live task title"
+  assert_grep '>Live agents<' "$output" "dashboard lacks the live-agents section"
+  assert_grep '>What every agent is doing now<' "$output" "dashboard lacks the live-agents heading"
+  assert_grep '>Idle<' "$output" "dashboard lacks an idle supervisor state"
+  assert_grep '>Unavailable<' "$output" "dashboard lacks an unavailable supervisor rollup"
+  assert_grep 'Reading generated 2026-07-17T16:00:00Z' "$output" "live-agents section lacks its observation time"
+  assert_grep '>As of<' "$output" "live-agents section lacks per-row freshness labeling"
+  assert_no_grep 'Build the alpha subsystem' "$output" "offline live-agents section leaked a private task title"
+  jq '
+    .secondmate_current.registry.available = false
+    | .secondmate_current.registry.complete = false
+    | .secondmate_current.registry.input_truncated = false
+    | .secondmate_current.registry.records_truncated = false
+    | .secondmate_current.registry.records = []
+    | .secondmate_current.registry.reason = "registered secondmate table is unreadable"
+    | .secondmate_current.registry.reasons = ["registered secondmate table is unreadable"]
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "unavailable-registry live-agents run failed"
+  printf '%s' "$json" | jq -e '
+    [.live_agents.records[]
+      | select(.role == "supervisor" and .agent == "Additional supervisors")
+      | select(.detail == "The registered supervisor table could not be read; supervisor count is unavailable.")]
+    | length == 1
+  ' >/dev/null || fail "unavailable registry omitted its unknown-count supervisor rollup: $json"
+  pass "live agents render current workers plus idle and unavailable supervisor states with explicit freshness"
+}
+
 test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
+test_live_agents_render_working_idle_and_unavailable_states
 test_parked_items_rest_in_the_parking_lot
 test_recurring_items_get_their_own_section
 test_cross_home_overlap_holds_supersession_and_active_count

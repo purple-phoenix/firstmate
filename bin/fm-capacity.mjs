@@ -15,8 +15,8 @@
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
- *   pipeline, parked, recurring, lanes, readiness, aging, recommendations,
- *   and omissions.
+ *   pipeline, parked, recurring, live_agents, lanes, readiness, aging,
+ *   recommendations, and omissions.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
  * Blocked and self-clearing cards carry a wait treatment (wait.class, copy,
@@ -100,7 +100,9 @@ The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
-  parked, recurring, lanes, readiness, aging, recommendations, omissions. Pipeline owns queued,
+  parked, recurring, live_agents, lanes, readiness, aging, recommendations,
+  omissions. live_agents owns the generated time and a bounded worker/supervisor
+  roll call sourced from the same current-state snapshot. Pipeline owns queued,
   ready, building, validating_fixing, pr_ci_approval, blocked, and recently_landed
   arrays. Each recommendation owns id, classification, priority, evidence,
   expected_throughput_consequence, safety_authority_boundary,
@@ -466,6 +468,7 @@ function normalizeEnvironment(environment) {
 }
 
 const opaqueRefs = new Map();
+const opaqueRefLabels = new Map();
 
 function opaqueRef(kind, value) {
   const key = `${kind}\0${String(value ?? "")}`;
@@ -478,6 +481,12 @@ function opaqueRef(kind, value) {
 
 function itemRef(owner, id) {
   return opaqueRef("item", `${owner}/${id}`);
+}
+
+function labeledItemRef(owner, id, label) {
+  const ref = itemRef(owner, id);
+  if (typeof label === "string" && label.trim()) opaqueRefLabels.set(ref, label.trim().slice(0, 200));
+  return ref;
 }
 
 function decisionRef(owner, origin, key) {
@@ -510,6 +519,135 @@ function safeSource(source) {
   return ["pane", "run-step", "status-fold", "backlog", "child-state", "structured-home"].includes(source)
     ? source
     : "authoritative current-state owner";
+}
+
+function agentActivity(state, detail, decisions = 0, stage = null, captainApproval = false) {
+  const normalized = safeState(state);
+  const doing = String(detail || "");
+  if (normalized === "unknown") {
+    return { activity: "unavailable", label: "Unavailable", detail: "Current activity could not be read." };
+  }
+  if (decisions > 0) {
+    return { activity: "waiting_on_decision", label: "Waiting on a decision", detail: "A decision is needed before work can continue." };
+  }
+  if (normalized === "captain_decision") {
+    return { activity: "waiting_on_decision", label: "Waiting on a decision", detail: "Work in this home needs a decision." };
+  }
+  if (normalized === "no_active_work") {
+    return { activity: "idle", label: "Idle", detail: "No active work is assigned in this home." };
+  }
+  if (/(?:running).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:running)/i.test(doing)) {
+    return { activity: "waiting_on_ci", label: "Waiting on checks", detail: "Automated checks are running." };
+  }
+  if (/(?:waiting|awaiting|pending).{0,20}(?:ci|checks)|(?:ci|checks).{0,20}(?:waiting|awaiting|pending)/i.test(doing)) {
+    return { activity: "waiting_on_ci", label: "Waiting on checks", detail: "Automated checks are pending." };
+  }
+  if (/(?:waiting|awaiting|pending|ready).{0,30}(?:captain|review|approvals?|merge)|(?:captain|review|approvals?|merge).{0,30}(?:waiting|awaiting|pending|ready)/i.test(doing)) {
+    return captainApproval
+      ? { activity: "waiting_on_review", label: "Waiting for your review or merge", detail: "Your review or merge is needed before work can continue." }
+      : { activity: "waiting", label: "Waiting", detail: "Review or merge is pending." };
+  }
+  if (stage === "validating_fixing" || /validat|fixing|review|\btest(?:ing)?\b|lint|document|rebase|pre-push/i.test(doing)) {
+    return { activity: "validating", label: "Validating", detail: "Review and checks are under way." };
+  }
+  if (normalized === "working" || normalized === "active_child_work") {
+    return { activity: "working", label: "Working", detail: "Actively working on the task." };
+  }
+  return { activity: "waiting", label: "Waiting", detail: "Waiting for the recorded condition to clear." };
+}
+
+function liveAgentRollCall(snapshot) {
+  const records = [];
+  let workerNumber = 0;
+  const addWorker = (owner, task, observedAt) => {
+    const state = task.current_state?.state || task.state || "unknown";
+    if (["done", "failed"].includes(state) || task.endpoint?.exists === false) return;
+    workerNumber += 1;
+    const title = task.backlog?.title || task.title || task.id || "Current task";
+    const decisions = Array.isArray(task.hints?.open_decisions)
+      ? task.hints.open_decisions.length
+      : Number(task.decisions || 0);
+    const stage = task.current_state ? taskStage(task) : null;
+    const captainApproval = task.approval_authority === "captain"
+      || task.captain_approval_required === true
+      || (task.yolo === "off" && task.approval_authority !== "firstmate" && task.captain_approval_required !== false);
+    const activity = agentActivity(state, task.current_state?.detail || task.doing, decisions, stage, captainApproval);
+    records.push({
+      agent: `Worker ${workerNumber}`,
+      role: "worker",
+      home: owner === "main" ? "Main home" : `Domain ${opaqueRef("home", owner)}`,
+      task: labeledItemRef(owner, task.id, title),
+      ...activity,
+      as_of: task.current_state?.observed_at || task.observed_at || observedAt,
+    });
+  };
+
+  for (const task of snapshot.tasks || []) {
+    if (task.kind !== "secondmate") addWorker("main", task, snapshot.generated);
+  }
+
+  for (const mate of snapshot.secondmate_current?.records || []) {
+    const home = `Domain ${opaqueRef("home", mate.id)}`;
+    const agentsOmitted = (mate.omitted || []).some((entry) => entry.surface === "agents")
+      || (Number.isInteger(mate.counts?.agents) && Array.isArray(mate.agents) && mate.counts.agents !== mate.agents.length);
+    const supervisorActivity = agentsOmitted
+      ? { activity: "unavailable", label: "Unavailable", detail: "Some worker details were outside this bounded reading." }
+      : agentActivity(mate.current?.state, mate.current?.reason);
+    records.push({
+      agent: "Supervisor",
+      role: "supervisor",
+      home,
+      task: mate.current?.state === "unknown" || agentsOmitted ? "Current home details unavailable" : "Coordinate this home's work",
+      ...supervisorActivity,
+      as_of: mate.freshness?.observed_at || snapshot.generated,
+    });
+    if (mate.provenance?.selected !== "structured-home") continue;
+    const projected = Array.isArray(mate.agents) ? mate.agents : [
+      ...(mate.active_children || []),
+      ...(mate.holds || []).filter((hold) => hold.source === "child-state"),
+    ];
+    const byId = new Map();
+    for (const task of projected) if (task?.id && !byId.has(task.id)) byId.set(task.id, task);
+    for (const task of byId.values()) addWorker(mate.id, task, mate.freshness?.observed_at || snapshot.generated);
+  }
+  const observedHomes = new Set((snapshot.secondmate_current?.records || []).map((mate) => mate.id));
+  for (const mate of snapshot.secondmate_current?.registry?.records || []) {
+    if (!mate?.id || observedHomes.has(mate.id)) continue;
+    records.push({
+      agent: "Supervisor",
+      role: "supervisor",
+      home: `Domain ${opaqueRef("home", mate.id)}`,
+      task: "Current home details unavailable",
+      activity: "unavailable",
+      label: "Unavailable",
+      detail: "This registered home was outside the bounded reading.",
+      as_of: snapshot.generated,
+    });
+  }
+  const registry = snapshot.secondmate_current?.registry;
+  if (registry?.available === false || registry?.input_truncated === true || registry?.records_truncated === true) {
+    const unavailable = registry.available === false;
+    const retained = Array.isArray(registry.records) ? registry.records.length : 0;
+    const inWindow = Number.isInteger(registry.records_in_window) ? registry.records_in_window : null;
+    const omitted = !unavailable && registry.input_truncated === false && inWindow !== null && inWindow > retained
+      ? inWindow - retained
+      : null;
+    records.push({
+      agent: omitted === null ? "Additional supervisors" : `${omitted} additional supervisor${omitted === 1 ? "" : "s"}`,
+      role: "supervisor",
+      home: "Registered homes outside reading",
+      task: "Current home details unavailable",
+      activity: "unavailable",
+      label: "Unavailable",
+      detail: unavailable
+        ? "The registered supervisor table could not be read; supervisor count is unavailable."
+        : omitted === null
+          ? "The bounded registry reading omitted additional identities; their count is unavailable."
+          : `${omitted} registered home ${omitted === 1 ? "identity was" : "identities were"} outside the bounded registry reading.`,
+      as_of: registry.freshness?.observed_at || snapshot.generated,
+    });
+  }
+  return { generated: snapshot.generated, records };
 }
 
 function safeDeliveryMode(mode) {
@@ -1330,6 +1468,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       || omittedSurfaces.has("active_children")
       || omittedSurfaces.has("decisions_open")
       || omittedSurfaces.has("queued")
+      || omittedSurfaces.has("agents")
       || !Number.isInteger(mate.counts?.active_children)
       || !Number.isInteger(mate.counts?.decisions_open)
       || !Number.isInteger(mate.counts?.holds)
@@ -1337,7 +1476,9 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       || mate.counts.active_children !== (mate.active_children || []).length
       || mate.counts.decisions_open !== (mate.decisions_open || []).length
       || mate.counts.holds !== (mate.holds || []).length
-      || mate.counts.queued !== (mate.queued || []).length;
+      || mate.counts.queued !== (mate.queued || []).length
+      || (Array.isArray(mate.agents)
+          && (!Number.isInteger(mate.counts?.agents) || mate.counts.agents !== mate.agents.length));
     if (mateIncomplete) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "structured home inventory incomplete");
     if (secondmateInventoryComplete && !mateIncomplete) authoritativeWaitOwners.add(mate.id);
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
@@ -1800,6 +1941,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       card.repo ? `project:${card.repo}` : `item:${card.id}`
     )
   );
+  const liveAgents = liveAgentRollCall(snapshot);
 
   const model = {
     schema: "fm-capacity.v1",
@@ -1826,6 +1968,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     pipeline,
     parked,
     recurring,
+    live_agents: liveAgents,
     lanes: {
       ephemeral_workers: {
         active: (snapshot.tasks || []).filter((task) => task.kind !== "secondmate" && ["working", "parked", "blocked", "paused"].includes(task.current_state?.state)).length,
@@ -2019,6 +2162,17 @@ function renderHtml(model, captainActions) {
   const blockedCount = model.pipeline.blocked.length;
   const waiting = queuedCount + readyCount + gatesCount + blockedCount;
   const total = working + waiting;
+  const liveAgentRows = (model.live_agents?.records || []).map((record) => {
+    const task = /^item-\d{2,}$/.test(record.task)
+      ? `<span class="item-id">${h(record.task)}</span>`
+      : h(record.task);
+    return `<li class="agent-row">
+      <span class="agent-name"><strong>${h(record.agent)}</strong><small>${h(record.home)}</small></span>
+      <span class="agent-task">${task}</span>
+      <span class="agent-activity activity-${h(record.activity)}"><strong>${h(record.label)}</strong><small>${h(record.detail)}</small></span>
+      <time datetime="${h(record.as_of)}">${h(record.as_of)}</time>
+    </li>`;
+  }).join("") || `<li class="empty">No live workers or supervisors are recorded.</li>`;
 
   const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
   const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
@@ -2218,6 +2372,19 @@ function renderHtml(model, captainActions) {
     .why-n{font-size:1.9rem;font-weight:800;line-height:1}
     .why-decide{color:var(--serious)}.why-blocked{color:var(--crit)}.why-self{color:var(--good)}.why-gates{color:var(--warn)}.why-ready{color:var(--blue)}.why-queued{color:var(--muted)}
     .why-l{font-size:.92rem;color:var(--ink2)}.why-l small{display:block;color:var(--muted);font-size:.76rem}
+    .band-agents{border-bottom:1px solid var(--line)}
+    .band-agents .kicker{color:var(--good)}
+    .agents-note{color:var(--ink2);font-size:.9rem;max-width:78ch;margin-top:.35rem}
+    .agents-head,.agent-row{display:grid;grid-template-columns:minmax(8rem,.7fr) minmax(12rem,1.25fr) minmax(11rem,1fr) minmax(11rem,.8fr);gap:.5rem 1.25rem;align-items:baseline;min-width:0}
+    .agents-head{margin-top:1.2rem;color:var(--muted);font-size:.7rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+    .agent-row{border-top:1px solid var(--hair);padding:.65rem 0}
+    .agent-row>*{min-width:0}
+    .agent-name strong,.agent-activity strong{display:block}
+    .agent-name small,.agent-activity small{display:block;color:var(--muted);font-size:.75rem;margin-top:.15rem}
+    .agent-task{font-weight:650}
+    .agent-activity strong{color:var(--ink2)}
+    .activity-working strong{color:var(--good)}.activity-validating strong{color:var(--blue)}.activity-waiting_on_ci strong{color:var(--warn)}.activity-waiting_on_decision strong{color:var(--serious)}.activity-unavailable strong{color:var(--crit)}
+    .agent-row time{color:var(--muted);font-size:.76rem}
     .band-quiet{border-top:1px solid var(--line);font-size:.88rem}
     .qhead{font-size:.76rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--hair);padding-bottom:.45rem;margin-top:2.4rem}
     .band-quiet>.qhead:first-child{margin-top:0}
@@ -2258,7 +2425,7 @@ function renderHtml(model, captainActions) {
     .parking .mreason,.parked-copy{color:var(--muted)}
     footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
     footer p{max-width:70rem;margin:.3rem auto}
-    @media(max-width:760px){.band{padding:1.25rem 1rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media(max-width:760px){.band{padding:1.25rem 1rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
     @media print{body,html{background:#fff;color:#111}.band-alarm{background:#fff}.prompt button{display:none}a{color:#0645ad}}
   </style>
 </head>
@@ -2290,6 +2457,13 @@ function renderHtml(model, captainActions) {
       </h2>
       ${meterBar}
       ${whyHtml}
+    </div></section>
+    <section class="band band-agents" aria-labelledby="live-agents-title"><div class="wrap">
+      <p class="kicker"><span>Live agents</span><span class="stamp">Reading generated ${h(model.live_agents?.generated || model.generated)}</span></p>
+      <h2 id="live-agents-title">What every agent is doing now</h2>
+      <p class="agents-note">Each row is a single bounded reading. Use Refresh capacity for a fresh reading; a file opened directly stays at the time shown here.</p>
+      <div class="agents-head" aria-hidden="true"><span>Agent</span><span>Task</span><span>Current activity</span><span>As of</span></div>
+      <ul class="agents-list">${liveAgentRows}</ul>
     </div></section>
     <section class="band band-quiet" aria-label="Reference detail"><div class="wrap">
       <h2 class="qhead">Also recommended · ranked by priority</h2>
@@ -2359,7 +2533,11 @@ function main() {
     const refs = {};
     for (const [key, ref] of opaqueRefs.entries()) {
       const separator = key.indexOf("\0");
-      refs[ref] = { kind: key.slice(0, separator), value: key.slice(separator + 1) };
+      refs[ref] = {
+        kind: key.slice(0, separator),
+        value: key.slice(separator + 1),
+        ...(opaqueRefLabels.has(ref) ? { label: opaqueRefLabels.get(ref) } : {}),
+      };
     }
     writePrivateAtomic(refsPath, `${JSON.stringify({ schema: "fm-capacity-refs.v1", generated: model.generated, refs }, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
   }
