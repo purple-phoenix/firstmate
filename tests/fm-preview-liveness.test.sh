@@ -51,7 +51,7 @@ reset_logs() {
 run_poll() {
   FM_TEST_GH_LOG="$GH_LOG" FM_TEST_CURL_LOG="$CURL_LOG" \
     FM_TEST_TAILSCALE_LOG="$TAILSCALE_LOG" FM_PR_POLL_TASK_ID=preview-task \
-    PATH="$FAKEBIN:$BASE_PATH" "$POLL" --validated \
+    FM_PR_POLL_STATE="$TMP_ROOT" PATH="$FAKEBIN:$BASE_PATH" "$POLL" --validated \
     github "$URL" github.com example/preview-app 42
 }
 
@@ -59,7 +59,7 @@ test_dead_preview_wakes() {
   local out
   reset_logs
   out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
-    FM_TEST_CURL_CODE=503 run_poll)
+    FM_TEST_CURL_CODE=503 FM_PREVIEW_TAILNET_IP=100.89.232.70 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "dead preview did not emit the exact task-and-PR wake"
   [ "$(wc -l < "$GH_LOG" | tr -d '[:space:]')" -eq 1 ] \
@@ -85,6 +85,42 @@ test_dead_preview_wakes() {
   pass "non-200 and zero-byte preview responses emit one task-and-PR wake"
 }
 
+test_dead_preview_deduplicates_until_change_or_recovery() {
+  local body out
+  body='Deduplicate https://preview.tailnet.ts.net:5443/'
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "first dead preview did not emit a wake"
+
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
+  [ -z "$out" ] || fail "unchanged dead preview emitted a duplicate wake"
+
+  out=$(FM_TEST_GH_BODY="$body Updated" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "PR body change did not start a new preview outage"
+
+  out=$(FM_TEST_GH_BODY="$body Updated" run_poll)
+  [ -z "$out" ] || fail "preview recovery emitted a wake"
+
+  out=$(FM_TEST_GH_BODY="$body Updated" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "preview failure after recovery did not start a new outage"
+  pass "dead preview wakes once until body change or recovery"
+}
+
+test_tailnet_override_must_match_local_host() {
+  local out
+  reset_logs
+  out=$(FM_TEST_GH_BODY='https://preview.tailnet.ts.net/' \
+    FM_PREVIEW_TAILNET_IP=100.89.232.71 run_poll)
+  [ -z "$out" ] || fail "foreign tailnet override emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "foreign tailnet override reached curl"
+  [ "$(wc -l < "$TAILSCALE_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "foreign tailnet override was not checked against the local host"
+  pass "tailnet override is accepted only when it matches the local host"
+}
+
 test_healthy_preview_is_silent() {
   local out
   reset_logs
@@ -101,6 +137,7 @@ test_closed_merged_and_draft_prs_skip_previews() {
   local out state
   for state in CLOSED MERGED; do
     reset_logs
+    printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
     out=$(FM_TEST_GH_STATE=$state \
       FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' run_poll)
     if [ "$state" = MERGED ]; then
@@ -110,17 +147,24 @@ test_closed_merged_and_draft_prs_skip_previews() {
     fi
     [ ! -s "$CURL_LOG" ] || fail "$state PR performed a preview probe"
     [ ! -s "$TAILSCALE_LOG" ] || fail "$state PR resolved a tailnet address"
+    [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
+      || fail "$state PR did not clear the preview outage marker"
   done
 
   reset_logs
+  printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
   out=$(FM_TEST_GH_DRAFT=true \
     FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' run_poll)
   [ -z "$out" ] || fail "draft PR emitted a preview wake"
   [ ! -s "$CURL_LOG" ] || fail "draft PR performed a preview probe"
   [ ! -s "$TAILSCALE_LOG" ] || fail "draft PR resolved a tailnet address"
+  [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
+    || fail "draft PR did not clear the preview outage marker"
   pass "closed, merged, and draft PRs do not probe previews"
 }
 
 test_dead_preview_wakes
+test_dead_preview_deduplicates_until_change_or_recovery
+test_tailnet_override_must_match_local_host
 test_healthy_preview_is_silent
 test_closed_merged_and_draft_prs_skip_previews

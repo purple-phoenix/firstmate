@@ -23,6 +23,7 @@ if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   path=$5
   number=$6
   task=${FM_PR_POLL_TASK_ID:-}
+  preview_state=${FM_PR_POLL_STATE:-}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -42,6 +43,7 @@ elif [ "$#" -eq 0 ]; then
   exec 3<&-
   task=${0##*/}
   task=${task%.check.sh}
+  preview_state=${data%/*}
 else
   exit 0
 fi
@@ -60,6 +62,11 @@ task_valid() {
   esac
 }
 
+preview_marker=
+if task_valid "$task" && [ -d "$preview_state" ] && [ ! -L "$preview_state" ]; then
+  preview_marker=$preview_state/$task.preview-outage
+fi
+
 tailnet_ipv4_valid() {
   local ip=$1 a b c d
   [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
@@ -71,22 +78,57 @@ tailnet_ipv4_valid() {
     && [ "$c" -le 255 ] && [ "$d" -le 255 ]
 }
 
+preview_outage_clear() {
+  [ -n "$preview_marker" ] || return 0
+  if [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ]; then
+    rm -f -- "$preview_marker" 2>/dev/null || true
+  fi
+}
+
+preview_outage_is_new() {
+  local body=$1 tmp
+  [ -n "$preview_marker" ] || return 1
+  if { [ -e "$preview_marker" ] || [ -L "$preview_marker" ]; } \
+    && { [ ! -f "$preview_marker" ] || [ -L "$preview_marker" ]; }; then
+    return 1
+  fi
+  umask 077
+  tmp=$(mktemp "$preview_state/.fm-preview-outage.XXXXXX") || return 1
+  if ! printf '%s\n%s' "$url" "$body" > "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [ -f "$preview_marker" ] && cmp -s "$tmp" "$preview_marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$preview_marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 probe_previews() {
-  local body=$1 links link authority preview_host port tailnet_ip result code bytes count
+  local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
+  local result code bytes count
   task_valid "$task" || return 0
   links=$(printf '%s\n' "$body" \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | awk '!seen[$0]++' \
     | head -n 8) || true
-  [ -n "$links" ] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  if [ -n "${FM_PREVIEW_TAILNET_IP:-}" ]; then
-    tailnet_ip=$FM_PREVIEW_TAILNET_IP
-  else
-    command -v tailscale >/dev/null 2>&1 || return 0
-    tailnet_ip=$(tailscale ip -4 2>/dev/null) || return 0
+  if [ -z "$links" ]; then
+    preview_outage_clear
+    return 0
   fi
-  tailnet_ipv4_valid "$tailnet_ip" || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v tailscale >/dev/null 2>&1 || return 0
+  local_tailnet_ip=$(tailscale ip -4 2>/dev/null) || return 0
+  tailnet_ipv4_valid "$local_tailnet_ip" || return 0
+  tailnet_ip=$local_tailnet_ip
+  if [ -n "${FM_PREVIEW_TAILNET_IP:-}" ]; then
+    [ "$FM_PREVIEW_TAILNET_IP" = "$local_tailnet_ip" ] || return 0
+    tailnet_ip=$FM_PREVIEW_TAILNET_IP
+  fi
 
   count=0
   while IFS= read -r link; do
@@ -118,12 +160,15 @@ probe_previews() {
       ''|*[!0-9]*) bytes=0 ;;
     esac
     if [ "$code" != 200 ] || [ "$bytes" -eq 0 ]; then
-      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
+      if preview_outage_is_new "$body"; then
+        printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
+      fi
       return 0
     fi
   done <<EOF
 $links
 EOF
+  preview_outage_clear
 }
 
 # Every component is revalidated here rather than trusted from the sidecar, and
@@ -154,10 +199,16 @@ case "$provider" in
     draft=${rest%%$'\t'*}
     body=${rest#*$'\t'}
     case "$state" in
-      MERGED) printf '%s\n' merged ;;
-      CLOSED) ;;
+      MERGED)
+        preview_outage_clear
+        printf '%s\n' merged
+        ;;
+      CLOSED) preview_outage_clear ;;
       OPEN)
-        [ "$draft" = false ] || exit 0
+        if [ "$draft" != false ]; then
+          preview_outage_clear
+          exit 0
+        fi
         probe_previews "$body"
         ;;
       *) exit 0 ;;
