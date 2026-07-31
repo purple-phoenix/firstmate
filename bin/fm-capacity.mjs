@@ -2853,7 +2853,7 @@ function renderHtml(model) {
           ${briefStuckMore ? `<details class="brief-more"><summary>Show ${h(briefStuckRows.length - 1)} more root cause${briefStuckRows.length === 2 ? "" : "s"}</summary><div class="rollcall blocked-items"><ul>${briefStuckMore}</ul></div></details>` : ""}
         </article>
         <article class="brief-card brief-card-shipped" aria-labelledby="shipped-title">
-          <p class="brief-question">4 · Shipped since your last reading</p>
+          <p class="brief-question">4 · Recent completions in this bounded reading</p>
           <div class="brief-answer"><span class="n">${h(brief.shipped.count)}</span><h2 id="shipped-title">recent completion${brief.shipped.count === 1 ? "" : "s"} in this bounded reading${brief.shipped.complete ? "" : " · observed minimum"}</h2></div>
           <ul class="brief-list">${briefShippedPrimary || `<li class="empty">No recent completions are in the bounded baseline.</li>`}</ul>
           <details class="brief-more"><summary>${briefShippedMore ? `Show ${h(briefShippedRows.length - 1)} more completion${briefShippedRows.length === 2 ? "" : "s"} and count basis` : "About this count"}</summary>${briefShippedMore ? `<ul class="brief-list">${briefShippedMore}</ul>` : ""}<p class="brief-basis">${h(brief.shipped.basis)}</p></details>
