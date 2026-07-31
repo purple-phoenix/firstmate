@@ -927,6 +927,16 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_grep '--muted:#66645f;--hair:#e1e0d9;--line:rgba(11,11,11,.10);--blue:#1b5fae;--good:#087708;--warn:#8a6200;--serious:#a54824;--crit:#ae2525' "$output" "light-mode text status tokens are not contrast-safe"
   assert_grep 'class="skip" href="#main"' "$output" "dashboard lacks a keyboard skip link"
   assert_grep '<body class="sev-' "$output" "dashboard lacks the severity-classed alarm band"
+  assert_grep '>1 · Needs your action now<' "$output" "dashboard lacks the first captain question"
+  assert_grep '>2 · Active people and current activity<' "$output" "dashboard lacks the second captain question"
+  assert_grep '>3 · Stuck work and root cause<' "$output" "dashboard lacks the third captain question"
+  assert_grep '>4 · Shipped since your last reading<' "$output" "dashboard lacks the fourth captain question"
+  assert_grep '<details class="operations">' "$output" "dashboard lacks the collapsed operational appendix"
+  assert_no_grep '<details class="operations" open' "$output" "operational appendix is expanded in the first viewport"
+  assert_grep '.brief-grid{grid-template-columns:1fr' "$output" "captain brief does not stack at the 320-390px viewport standard"
+  assert_grep '.band-brief{padding:.8rem;min-height:auto}' "$output" "mobile brief reserves a full extra viewport below the service bar"
+  assert_grep '@media(max-width:360px){.band-brief .kicker .stamp{display:none}}' "$output" "320px brief does not reclaim the optional timestamp row"
+  assert_grep '.brief-card{padding:.58rem .7rem' "$output" "captain brief lacks compact narrow-viewport cards"
   assert_grep 'id="needs-you"' "$output" "dashboard lacks the needs-you roll call"
   assert_grep 'id="blocked-items"' "$output" "dashboard lacks the blocked-items roll call"
   assert_grep 'class="meterbar"' "$output" "dashboard lacks the working-vs-waiting meter"
@@ -1443,13 +1453,7 @@ test_captain_kind_idea_hold_is_your_go_not_stuck() {
   assert_contains "$html" 'data-your-go-ref="item-' "captain idea hold lacks the service's your-go interaction anchor"
   assert_contains "$html" 'data-your-go-kind="review"' "captain idea hold row is not anchored as a your-go review row"
   assert_contains "$html" 'Prioritize or give your go on item-' "captain idea hold lacks an opaque choice reference"
-  case "$html" in
-    *'verb-blocked">Stuck'*)
-      # Stuck may still exist for other fixture rows; the idea hold must not be one.
-      printf '%s' "$html" | grep -F 'verb-blocked">Stuck' | grep -q 'held for your prioritization' &&
-        fail "captain idea hold rendered as STUCK" || true
-      ;;
-  esac
+  assert_contains "$html" 'verb-review">Needs you</span>' "captain idea hold is mislabeled as ordinary stuck work in the brief"
   pass "captain-kind idea holds render as waiting-on-your-go, not STUCK"
 }
 
@@ -1739,6 +1743,32 @@ test_current_identity_appears_in_one_stage() {
   pass "current work identities appear in exactly one pipeline stage"
 }
 
+test_captain_brief_reuses_canonical_model_truth() {
+  local home="$TMP_ROOT/captain-brief-home" snapshot="$TMP_ROOT/captain-brief-snapshot.json"
+  local environment="$TMP_ROOT/captain-brief-environment.json" output="$TMP_ROOT/captain-brief-home/data/captain-brief.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "captain-brief capacity run failed"
+  printf '%s' "$json" | jq -e '
+    [.pipeline | to_entries[] | select(.key != "recently_landed") | .value[].id] as $current
+    | [.captain_brief.needs_action.items[].work_ref] as $action_work
+    | [.captain_brief.stuck_work.items[].id] as $brief_stuck
+    | [.pipeline.blocked[].id] as $pipeline_stuck
+    | [.captain_brief.shipped.items[].id] as $brief_shipped
+    | [.pipeline.recently_landed[].id] as $pipeline_shipped
+    | [.captain_brief.active_people.items[] | select(.role == "worker") | .task] as $worker_tasks
+    | .captain_brief.needs_action.count == .measures.open_captain_actions
+      and ($action_work | all(. as $id | ($current | index($id)) != null))
+      and ($brief_stuck == $pipeline_stuck)
+      and .captain_brief.stuck_work.count == (.pipeline.blocked | length)
+      and ($brief_shipped == $pipeline_shipped)
+      and .captain_brief.shipped.count == (.pipeline.recently_landed | length)
+      and ($worker_tasks | all(. as $id | ([$current[] | select(. == $id)] | length) == 1))
+      and .captain_brief.active_people.total_visible == (.live_agents.records | length)
+  ' >/dev/null || fail "captain brief diverged from canonical pipeline or live-agent truth: $json"
+  pass "four-question brief reuses canonical one-stage work, live-agent, and landing projections"
+}
+
 test_delivery_gates_reconcile_forge_state() {
   local home="$TMP_ROOT/pr-truth-home" snapshot="$TMP_ROOT/pr-truth-snapshot.json"
   local environment="$TMP_ROOT/pr-truth-environment.json" output="$TMP_ROOT/pr-truth-home/data/pr-truth.html"
@@ -1887,10 +1917,10 @@ test_blocked_total_matches_manifest_truth() {
   mv "$snapshot.tmp" "$snapshot"
   "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" >/dev/null ||
     fail "blocked-total capacity run failed"
-  assert_grep '<span class="n">1</span> blocked total' "$output" "top blocked total contradicts the manifest"
-  assert_grep '1 blocked item is already shown under Needs You or automatic waits.' "$output" "captain-held blocked work is hidden by a false empty state"
+  assert_grep '<span class="n">1</span><h2 id="blocked-items-title">current item is stuck</h2>' "$output" "brief stuck total contradicts the manifest"
+  assert_grep 'Captain hold' "$output" "captain-held blocked work is hidden from the root-cause summary"
   assert_no_grep 'Nothing is stuck waiting on a person or a decision.' "$output" "dashboard still claims no decision-held work exists"
-  pass "top blocked total and manifest use the same truth"
+  pass "brief stuck total and manifest use the same truth"
 }
 
 test_unavailable_current_state_withholds_detail_and_eta() {
@@ -1929,6 +1959,7 @@ test_skill_discovery_and_read_mostly_contract
 test_classification_priority_overlap_and_idle_semantics
 test_live_agents_render_working_idle_and_unavailable_states
 test_current_identity_appears_in_one_stage
+test_captain_brief_reuses_canonical_model_truth
 test_delivery_gates_reconcile_forge_state
 test_merged_pr_current_task_truth_is_shared
 test_blocked_total_matches_manifest_truth

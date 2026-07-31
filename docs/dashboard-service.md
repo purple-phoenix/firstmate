@@ -9,7 +9,9 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 
 - Every current one-click-eligible `CAP-NN` action gets an "Approve & send" button.
 - A "Refresh capacity" button reruns `bin/fm-capacity.mjs` server-side and reloads the page; the service also reruns the producer automatically on the configured interval.
-- The producer assigns each current work identity to exactly one pipeline stage and counts each identity once in headline measures; the blocked headline includes captain-held and automatic-wait items even when their detail already appears in another dashboard band.
+- The producer's first viewport is a four-question captain brief: what needs the captain now, who is active and doing what, what is stuck and why, and what shipped in the bounded recent-completion reading.
+  Recommendations, automatic waits, the pipeline manifest, the full live roster, lanes, definition health, recurring work, parking, and landed history remain reachable in one collapsed operational appendix.
+- The producer assigns each current work identity to exactly one pipeline stage and counts each identity once in the captain brief and pipeline measures; the stuck-work answer includes captain-held and automatic-wait items even when their detail also answers another captain question.
 - Recorded GitHub pull-request URLs are reconciled through the producer's bounded `gh-axi` reads before they become current delivery gates, so a merged PR-only wait leaves current work, a closed PR requires delivery reconciliation rather than approval, and unreadable forge state stays explicitly unavailable.
 - The producer's Live Agents section shows each observed worker and readable registered domain supervisor with the task, a captain-language activity label, and the observation time.
   Main-home rows use the canonical current-state snapshot, readable secondmate homes contribute their bounded structured worker inventory, and an unreadable home stays visible as an unavailable supervisor rollup rather than disappearing or being guessed.

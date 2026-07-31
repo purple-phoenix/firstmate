@@ -16,8 +16,10 @@
  *
  * fm-capacity.v1 fields:
  *   generated, dashboard_path, provenance, measures, primary_bottleneck,
- *   pipeline, parked, recurring, live_agents, lanes, readiness, aging,
- *   recommendations, and omissions.
+ *   pipeline, parked, recurring, live_agents, captain_brief, lanes, readiness,
+ *   aging, recommendations, and omissions.
+ * captain_brief projects the four first-viewport answers from those canonical
+ * pipeline and live-agent collections; it does not derive work state again.
  * Pipeline stages are queued, ready, building, validating_fixing,
  * pr_ci_approval, blocked, and recently_landed.
  * Blocked and self-clearing cards carry a wait treatment (wait.class, copy,
@@ -108,11 +110,15 @@ The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
   generated, dashboard_path, provenance, measures, primary_bottleneck, pipeline,
-  parked, recurring, live_agents, lanes, readiness, aging, recommendations,
-  omissions. live_agents owns the generated time and a bounded worker/supervisor
-  roll call sourced from the same current-state snapshot. Pipeline owns queued,
-  ready, building, validating_fixing, pr_ci_approval, blocked, and recently_landed
-  arrays. Each recommendation owns id, classification, priority, evidence,
+  parked, recurring, live_agents, captain_brief, lanes, readiness, aging,
+  recommendations,
+  omissions. captain_brief projects the four first-viewport answers directly
+  from the canonical pipeline and live_agents collections: needs_action,
+  active_people, stuck_work, and shipped. live_agents owns the generated time
+  and a bounded worker/supervisor roll call sourced from the same current-state
+  snapshot. Pipeline owns queued, ready, building, validating_fixing,
+  pr_ci_approval, blocked, and recently_landed arrays. Each recommendation owns
+  id, classification, priority, evidence,
   expected_throughput_consequence, safety_authority_boundary,
   recommended_next_action, and prompt.
 
@@ -123,8 +129,9 @@ PARKING LOT
   waiting measures, attention summaries, aging, and wait/blocker treatments.
   Park reasons are withheld from this privacy-bounded artifact like every other
   hold reason; the authenticated dashboard service enriches them. The dashboard
-  renders parked items only inside one collapsed low-key parking-lot section at
-  the bottom, and renders no parking-lot section at all when nothing is parked.
+  renders parked items only inside one collapsed low-key parking-lot section in
+  the operational appendix, and renders no parking-lot section at all when
+  nothing is parked.
   Holds that match neither the parking nor recurring keys keep their normal
   treatment.
 
@@ -142,10 +149,10 @@ RECURRING
   date token, e.g. research-w4 matches done research-w3), with its completion
   date, an opaque ref, and whether a delivered artifact is on the books.
   Schedule hold reasons are withheld from this privacy-bounded artifact like
-  every other hold reason. The dashboard renders one calm bottom Recurring
-  section with a "next: <date>" chip per item, renders no section at all when
-  nothing recurs, and leaves enrichment plus the RUN NOW control to the
-  authenticated dashboard service. Any hold whose --until date has arrived is
+  every other hold reason. The dashboard renders one calm Recurring section in
+  the operational appendix with a "next: <date>" chip per item, renders no
+  section at all when nothing recurs, and leaves enrichment plus the RUN NOW
+  control to the authenticated dashboard service. Any hold whose --until date has arrived is
   inactive (tasks-axi date-gate semantics), so the item re-enters normal
   readiness classification instead of staying recurring or blocked, and a
   future-dated hold that also has an explicit dependency keeps the blocked
@@ -179,8 +186,8 @@ WAIT TREATMENT AND PROGRESS
   evidence shows the wait is on the captain (a pause reason naming the captain
   or addressing them directly, or an open PR plus a merge/review/approval-shaped
   reason) is a captain gate: it classifies as needs_actor with captain_gate=true,
-  renders in the needs-you band with a what-you-can-do line, and never gets a
-  progress bar or ETA, because a human decision has no duration model. A PR wait
+  renders in the needs-your-action brief with a what-you-can-do line, and never
+  gets a progress bar or ETA, because a human decision has no duration model. A PR wait
   is claimed only when an open PR is honestly evidenced (recorded pr= plus no
   merged signal, or equivalent positive open evidence such as the pause reason
   affirmatively saying the pull request is open or awaiting review/merge); a stale pr= from an already-merged delivery
@@ -2185,6 +2192,46 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     )
   );
   const liveAgents = liveAgentRollCall(snapshot);
+  // The brief is a projection of the already-classified canonical model.
+  // It never re-reads backlog or runtime state, and its work references point
+  // back to the same one-stage pipeline cards used by the manifest.
+  const needsActionItems = [
+    ...captainApprovalCards.map((card) => ({
+      ref: card.id,
+      work_ref: card.id,
+      kind: "approval",
+      owner: card.owner,
+      repo: card.repo,
+      reason: "Finished work is ready for your approval.",
+      waits_on: card.waits_on,
+      what_you_can_do: card.what_you_can_do,
+    })),
+    ...captainGateCards.map((card) => ({
+      ref: card.id,
+      work_ref: card.id,
+      kind: "review",
+      owner: card.owner,
+      repo: card.repo,
+      reason: "Paused work is waiting on you, not an automatic process.",
+      waits_on: card.waits_on,
+      what_you_can_do: card.what_you_can_do,
+    })),
+    ...decisions.map((action) => ({
+      ref: action.key,
+      work_ref: action.task,
+      kind: "decision",
+      owner: action.owner,
+      repo: null,
+      reason: action.reason,
+      waits_on: null,
+      what_you_can_do: null,
+    })),
+  ];
+  const activeStatusCounts = {};
+  for (const record of liveAgents.records) {
+    activeStatusCounts[record.activity] = (activeStatusCounts[record.activity] || 0) + 1;
+  }
+  const activePeopleCount = liveAgents.records.filter((record) => !["idle", "unavailable"].includes(record.activity)).length;
 
   const model = {
     schema: "fm-capacity.v1",
@@ -2203,7 +2250,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       independent_tasks_safe_to_start_now: executableReady.length,
       active_independent_work: activeIndependentKeys.size,
       waiting_work: pipeline.queued.length + pipeline.blocked.length + pipeline.pr_ci_approval.length,
-      open_captain_actions: decisions.length + captainApprovalCards.length + captainGateCards.length,
+      open_captain_actions: needsActionItems.length,
       recently_landed: pipeline.recently_landed.length,
       recently_landed_complete: recentLandingsComplete,
     },
@@ -2212,6 +2259,30 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     parked,
     recurring,
     live_agents: liveAgents,
+    captain_brief: {
+      needs_action: {
+        count: needsActionItems.length,
+        items: needsActionItems,
+      },
+      active_people: {
+        count: activePeopleCount,
+        total_visible: liveAgents.records.length,
+        status_counts: activeStatusCounts,
+        items: liveAgents.records,
+      },
+      stuck_work: {
+        count: pipeline.blocked.length,
+        items: pipeline.blocked,
+      },
+      shipped: {
+        count: pipeline.recently_landed.length,
+        complete: recentLandingsComplete,
+        basis: recentLandingsComplete
+          ? "Recent bounded completions; no browser visit timestamp is stored."
+          : "Observed minimum; some completion history is unavailable and no browser visit timestamp is stored.",
+        items: pipeline.recently_landed,
+      },
+    },
     lanes: {
       ephemeral_workers: {
         active: ephemeralActiveCount,
@@ -2395,9 +2466,10 @@ function copyPrompt(rec) {
   return `<div class="prompt"><code>${h(rec.prompt)}</code><button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button></div>`;
 }
 
-function renderHtml(model, captainActions) {
+function renderHtml(model) {
   const severity = severityFor(model);
   const primaryRec = model.recommendations.find((rec) => rec.id === model.primary_bottleneck.id) || null;
+  const brief = model.captain_brief;
   const working = model.pipeline.building.length + model.pipeline.validating_fixing.length;
   const gatesCount = model.pipeline.pr_ci_approval.length;
   const readyCount = model.pipeline.ready.length;
@@ -2418,7 +2490,6 @@ function renderHtml(model, captainActions) {
   }).join("") || `<li class="empty">No live workers or supervisors are recorded.</li>`;
 
   const captainDecisionCards = model.pipeline.blocked.filter((card) => card.reason === "Captain hold");
-  const captainApprovalCards = model.pipeline.pr_ci_approval.filter((card) => card.captain_approval_required === true);
   const captainGateCards = model.pipeline.blocked.filter((card) => card.captain_gate === true);
   const otherBlockedCards = model.pipeline.blocked.filter((card) => card.reason !== "Captain hold" && card.wait?.class !== "self_clearing" && card.captain_gate !== true);
   const selfClearingBlocked = model.pipeline.blocked.filter((card) => card.wait?.class === "self_clearing");
@@ -2426,22 +2497,54 @@ function renderHtml(model, captainActions) {
     ...model.pipeline.validating_fixing.filter((card) => card.wait?.class === "self_clearing"),
     ...selfClearingBlocked,
   ];
-  const needsYouCount = model.measures.open_captain_actions;
+  const needsYouCount = brief.needs_action.count;
   // Every needs-you row carries a data-your-go-ref validation anchor (with its
   // row flavor in data-your-go-kind), like data-parked-ref and
   // data-recurring-ref: rows stay identity-opaque here, and the authenticated
   // dashboard service resolves the anchors to render real interaction
   // controls for every item awaiting the captain.
-  const needsYouRows = [
-    ...captainApprovalCards.map((card) => `<li data-your-go-ref="${h(card.id)}" data-your-go-kind="approval"><span class="verb verb-approve">Approve</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Finished work is ready for your approval.</span></li>`),
-    ...captainGateCards.map((card) => `<li data-your-go-ref="${h(card.id)}" data-your-go-kind="review"><span class="verb verb-review">Review</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">Paused work is waiting on you, not an automatic process.${blockedContext(card)}</span></li>`),
-    ...captainActions.map((action) => `<li data-your-go-ref="${h(action.key)}" data-your-go-kind="decision"><span class="verb verb-decide">Decide</span><span class="who"><span class="item-id">${h(action.key)}</span> ${h(action.owner)} · work ${h(action.task)}</span><span class="why">${h(action.reason)}</span></li>`),
-  ].join("");
-  const blockedRows = otherBlockedCards.map((card) => `<li><span class="verb verb-blocked">Stuck</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`).join("");
-  const blockedShownElsewhere = blockedCount - otherBlockedCards.length;
-  const blockedSummary = `${blockedRows}${blockedShownElsewhere > 0
-    ? `<li class="empty">${h(blockedShownElsewhere)} blocked item${blockedShownElsewhere === 1 ? " is" : "s are"} already shown under Needs You or automatic waits.</li>`
-    : blockedRows ? "" : `<li class="empty">No current work is blocked.</li>`}`;
+  const needsYouRow = (item, interactive) => {
+    const verb = item.kind === "approval" ? "Approve" : item.kind === "review" ? "Review" : "Decide";
+    const who = item.kind === "decision"
+      ? `<span class="item-id">${h(item.ref)}</span> ${h(item.owner)} · work ${h(item.work_ref)}`
+      : `<span class="item-id">${h(item.work_ref)}</span> ${h(item.owner)}${item.repo ? ` · ${h(item.repo)}` : ""}`;
+    const context = blockedContext(item);
+    const anchor = interactive ? ` data-your-go-ref="${h(item.ref)}" data-your-go-kind="${h(item.kind)}"` : "";
+    return `<li${anchor}><span class="verb verb-${h(item.kind === "approval" ? "approve" : item.kind === "review" ? "review" : "decide")}">${verb}</span><span class="who">${who}</span><span class="why">${h(item.reason)}${context}</span></li>`;
+  };
+  const needsYouRowList = brief.needs_action.items.map((item) => needsYouRow(item, true));
+  const needsYouPrimary = brief.needs_action.items.length ? needsYouRow(brief.needs_action.items[0], false) : "";
+  const needsYouMore = needsYouRowList.join("");
+  const briefStuckRows = brief.stuck_work.items.map((card) => {
+    const heldForCaptain = card.reason === "Captain hold" || card.captain_gate === true;
+    return `<li><span class="verb ${heldForCaptain ? "verb-review" : "verb-blocked"}">${heldForCaptain ? "Needs you" : "Stuck"}</span><span class="who"><span class="item-id">${h(card.id)}</span> ${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</span><span class="why">${h(card.reason || "Unspecified gate")}${blockedContext(card)}</span></li>`;
+  });
+  const briefStuckPrimary = briefStuckRows.slice(0, 1).join("");
+  const briefStuckMore = briefStuckRows.slice(1).join("");
+  const briefAgentRows = brief.active_people.items.map((record) => {
+    const task = /^item-\d{2,}$/.test(record.task)
+      ? `<span class="item-id">${h(record.task)}</span>`
+      : h(record.task);
+    return `<li><span><strong>${h(record.agent)}</strong><small>${h(record.home)}</small></span><span>${task}<small class="activity-${h(record.activity)}">${h(record.label)}</small></span></li>`;
+  });
+  const briefAgentPrimary = briefAgentRows.slice(0, 1).join("");
+  const briefAgentMore = briefAgentRows.slice(1).join("");
+  const activityNames = {
+    working: "working",
+    validating: "validating",
+    waiting_on_ci: "waiting on checks",
+    waiting_on_review: "waiting for you",
+    waiting_on_decision: "waiting on a decision",
+    waiting: "waiting",
+    unavailable: "unavailable",
+    idle: "idle",
+  };
+  const briefActivityRollup = Object.entries(brief.active_people.status_counts)
+    .map(([activity, count]) => `${count} ${activityNames[activity] || activity.replaceAll("_", " ")}`)
+    .join(" · ");
+  const briefShippedRows = brief.shipped.items.map((card) => `<li><span><strong class="item-id">${h(card.id)}</strong><small>${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</small></span><span>${h(card.reason)}${card.artifact ? artifact(card.artifact) : ""}</span></li>`);
+  const briefShippedPrimary = briefShippedRows.slice(0, 1).join("");
+  const briefShippedMore = briefShippedRows.slice(1).join("");
 
   const blockedReasonCounts = new Map();
   for (const card of otherBlockedCards) {
@@ -2563,6 +2666,34 @@ function renderHtml(model, captainActions) {
     .sevbar{height:.7rem;background:var(--sev)}
     .band{padding:clamp(1.5rem,4vw,3.25rem) clamp(1rem,6vw,5rem)}
     .wrap{max-width:70rem;margin-left:auto;margin-right:auto}
+    .band-brief{padding-top:clamp(1rem,3vw,2rem);padding-bottom:clamp(1.15rem,3vw,2.2rem);min-height:calc(100svh - .7rem);display:flex;align-items:center}
+    .band-brief>.wrap{width:100%}
+    .brief-title{font-size:clamp(1.65rem,4vw,2.75rem);line-height:1.05;letter-spacing:-.025em}
+    .brief-intro{color:var(--ink2);font-size:.9rem;margin-top:.45rem}
+    .brief-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;margin-top:1rem;min-width:0}
+    .brief-card{min-width:0;border:1px solid var(--hair);background:color-mix(in srgb,var(--ink) 3%,var(--bg));padding:.85rem 1rem;display:flex;flex-direction:column;gap:.45rem}
+    .brief-card-action{border-color:color-mix(in srgb,var(--serious) 45%,var(--hair))}
+    .brief-card-stuck{border-color:color-mix(in srgb,var(--crit) 45%,var(--hair))}
+    .brief-question{color:var(--muted);font-size:.68rem;font-weight:800;letter-spacing:.13em;text-transform:uppercase}
+    .brief-answer{display:flex;align-items:baseline;gap:.55rem;min-width:0}
+    .brief-answer .n{font-size:2rem;font-weight:850;line-height:1;color:var(--ink)}
+    .brief-card-action .brief-answer .n{color:var(--serious)}.brief-card-stuck .brief-answer .n{color:var(--crit)}.brief-card-active .brief-answer .n{color:var(--good)}.brief-card-shipped .brief-answer .n{color:var(--blue)}
+    .brief-answer h2{font-size:1rem;line-height:1.15}
+    .brief-rollup,.brief-basis{color:var(--ink2);font-size:.76rem;min-width:0}
+    .brief-basis{color:var(--muted)}
+    .brief-card .rollcall{margin-top:0}
+    .brief-card .rollcall ul{margin-top:0}
+    .brief-card .rollcall li{grid-template-columns:4.2rem minmax(0,1fr);gap:.2rem .55rem;padding:.35rem 0;font-size:.82rem}
+    .brief-card .rollcall li .why{grid-column:2;font-size:.76rem}
+    .brief-list li{display:grid;grid-template-columns:minmax(5.8rem,.45fr) minmax(0,1fr);gap:.5rem;border-top:1px solid var(--hair);padding:.35rem 0;font-size:.78rem;min-width:0}
+    .brief-list li>*{min-width:0}.brief-list small{display:block;color:var(--muted);font-size:.68rem;margin-top:.08rem}
+    .brief-list .activity-working{color:var(--good)}.brief-list .activity-validating{color:var(--blue)}.brief-list .activity-waiting_on_ci{color:var(--warn)}.brief-list .activity-waiting_on_decision{color:var(--serious)}.brief-list .activity-unavailable{color:var(--crit)}
+    .brief-more{min-width:0}.brief-more summary{cursor:pointer;color:var(--muted);font-size:.7rem;font-weight:700;padding-top:.2rem}.brief-more[open] summary{margin-bottom:.2rem}
+    .operations{border-top:1px solid var(--line)}
+    .operations>summary{cursor:pointer;list-style:none;padding:1rem clamp(1rem,6vw,5rem);display:flex;justify-content:space-between;align-items:baseline;gap:1rem;color:var(--ink2);font-weight:800}
+    .operations>summary::-webkit-details-marker{display:none}.operations>summary::before{content:"+";color:var(--muted);margin-right:.65rem}.operations[open]>summary::before{content:"−"}
+    .operations>summary span{flex:1}.operations>summary small{color:var(--muted);font-weight:400;text-align:right}
+    .operations[open]>summary{border-bottom:1px solid var(--line)}
     .band-alarm{background:color-mix(in srgb,var(--sev) 13%,var(--bg));border-bottom:1px solid var(--line)}
     .kicker{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;color:var(--sev);font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:.76rem}
     .kicker .stamp{color:var(--muted);letter-spacing:.02em;text-transform:none;font-weight:400;font-size:.76rem;text-align:right}
@@ -2672,7 +2803,8 @@ function renderHtml(model, captainActions) {
     .parking .mreason,.parked-copy{color:var(--muted)}
     footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
     footer p{max-width:70rem;margin:.3rem auto}
-    @media(max-width:760px){.band{padding:1.25rem 1rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media(max-width:760px){.band{padding:1.25rem 1rem}.band-brief{padding:.8rem;min-height:auto}.brief-title{font-size:1.55rem}.brief-intro{display:none}.brief-grid{grid-template-columns:1fr;gap:.45rem;margin-top:.65rem}.brief-card{padding:.58rem .7rem;gap:.28rem}.brief-question{font-size:.6rem}.brief-answer .n{font-size:1.55rem}.brief-answer h2{font-size:.88rem}.brief-rollup,.brief-basis{font-size:.68rem}.brief-card .rollcall li{grid-template-columns:3.75rem minmax(0,1fr);padding:.25rem 0}.brief-card .rollcall li .why{display:none}.brief-card>.rollcall .who,.brief-card>.brief-list .item-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brief-list li{padding:.25rem 0}.brief-more summary{font-size:.66rem}.operations>summary{padding:.85rem 1rem;display:grid;grid-template-columns:auto minmax(0,1fr)}.operations>summary small{grid-column:2;text-align:left}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media(max-width:360px){.band-brief .kicker .stamp{display:none}}
     @media print{body,html{background:#fff;color:#111}.band-alarm{background:#fff}.prompt button{display:none}a{color:#0645ad}}
   </style>
 </head>
@@ -2680,56 +2812,83 @@ function renderHtml(model, captainActions) {
   <a class="skip" href="#main">Skip to dashboard</a>
   <div class="sevbar" aria-hidden="true"></div>
   <main id="main">
-    <section class="band band-alarm" aria-labelledby="headline"><div class="wrap">
-      <p class="kicker"><span>Primary bottleneck${model.primary_bottleneck.id ? `<span class="action-id">${h(model.primary_bottleneck.id)}</span>` : ""}</span><span class="stamp">Fleet capacity · generated ${h(model.generated)}</span></p>
-      <h1 class="headline" id="headline">${h(model.primary_bottleneck.classification)}</h1>
-      <p class="evidence">${h(primaryRec ? primaryRec.evidence : model.primary_bottleneck.evidence)}</p>
-      <div class="rollcall needs-you" id="needs-you">
-        <h2><span class="n">${h(needsYouCount)}</span> need${needsYouCount === 1 ? "s" : ""} you</h2>
-        <ul>${needsYouRows || `<li class="empty">Nothing is waiting on your decision or approval.</li>`}</ul>
-      </div>
-      <div class="rollcall blocked-items" id="blocked-items">
-        <h2><span class="n">${h(blockedCount)}</span> blocked total</h2>
-        <ul>${blockedSummary}</ul>
-      </div>
-      ${alarmTail}
-    </div></section>
-    ${selfWaitBand}
-    <section class="band band-meter" aria-labelledby="meter-title"><div class="wrap">
-      <p class="kicker">Working vs waiting</p>
-      <h2 class="split" id="meter-title">
-        <span class="pair"><span class="num num-working">${h(working)}</span><span class="lbl">working</span></span>
-        <span class="pair"><span class="num">${h(waiting)}</span><span class="lbl">waiting</span></span>
-        <span class="of">of ${h(total)} current item${total === 1 ? "" : "s"}</span>
-      </h2>
-      ${meterBar}
-      ${whyHtml}
-    </div></section>
-    <section class="band band-agents" aria-labelledby="live-agents-title"><div class="wrap">
-      <p class="kicker"><span>Live agents</span><span class="stamp">Reading generated ${h(model.live_agents?.generated || model.generated)}</span></p>
-      <h2 id="live-agents-title">What every agent is doing now</h2>
-      <p class="agents-note">Each row is a single bounded reading. Use Refresh capacity for a fresh reading; a file opened directly stays at the time shown here.</p>
-      <div class="agents-head" aria-hidden="true"><span>Agent</span><span>Task</span><span>Current activity</span><span>As of</span></div>
-      <ul class="agents-list">${liveAgentRows}</ul>
-    </div></section>
-    <section class="band band-quiet" aria-label="Reference detail"><div class="wrap">
-      <h2 class="qhead">Also recommended · ranked by priority</h2>
-      ${recs}
-      <h2 class="qhead">Manifest · every current item by stage</h2>
-      ${manifest}
-      <h2 class="qhead">Lanes</h2>
-      <div class="lanes-grid">
-        <div><h3>Ephemeral dispatch lanes</h3><p class="fine">Created on demand: ${h(model.lanes.ephemeral_workers.pool)}. Runtime backend ${h(model.lanes.ephemeral_workers.backend.name)}: ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><ul>${dispatchRows}</ul></div>
-        <div><h3>Persistent secondmates</h3><p class="fine">Healthy when idle unless grounded in-scope work is already ready.</p><ul>${mateRows}</ul></div>
-      </div>
-      <h2 class="qhead">Definition health and landed context</h2>
-      <div class="appendix">
-        <div><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
-        <div><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
+    <section class="band band-brief" aria-labelledby="brief-title"><div class="wrap">
+      <p class="kicker"><span>Captain brief</span><span class="stamp">One fleet reading · generated ${h(model.generated)}</span></p>
+      <h1 class="brief-title" id="brief-title">Your fleet in four answers</h1>
+      <p class="brief-intro">Current work uses one identity and one stage throughout this reading.</p>
+      <div class="brief-grid">
+        <article class="brief-card brief-card-action" id="needs-you" aria-labelledby="needs-you-title">
+          <p class="brief-question">1 · Needs your action now</p>
+          <div class="brief-answer"><span class="n">${h(needsYouCount)}</span><h2 id="needs-you-title">${needsYouCount === 1 ? "decision, review, or approval needs you" : "decisions, reviews, or approvals need you"}</h2></div>
+          <div class="rollcall needs-you"><ul>${needsYouPrimary || `<li class="empty">Nothing is waiting on your decision, review, or approval.</li>`}</ul></div>
+          ${needsYouMore ? `<details class="brief-more"><summary>Open ${h(needsYouRowList.length)} action${needsYouRowList.length === 1 ? "" : "s"}</summary><div class="rollcall needs-you"><ul>${needsYouMore}</ul></div></details>` : ""}
+        </article>
+        <article class="brief-card brief-card-active" aria-labelledby="active-people-title">
+          <p class="brief-question">2 · Active people and current activity</p>
+          <div class="brief-answer"><span class="n">${h(brief.active_people.count)}</span><h2 id="active-people-title">active now · ${h(brief.active_people.total_visible)} people visible</h2></div>
+          <p class="brief-rollup">${h(briefActivityRollup || "No current people are visible.")}</p>
+          <ul class="brief-list">${briefAgentPrimary || `<li class="empty">No live workers or supervisors are recorded.</li>`}</ul>
+          ${briefAgentMore ? `<details class="brief-more"><summary>Show ${h(briefAgentRows.length - 1)} more people</summary><ul class="brief-list">${briefAgentMore}</ul></details>` : ""}
+        </article>
+        <article class="brief-card brief-card-stuck" id="blocked-items" aria-labelledby="blocked-items-title">
+          <p class="brief-question">3 · Stuck work and root cause</p>
+          <div class="brief-answer"><span class="n">${h(brief.stuck_work.count)}</span><h2 id="blocked-items-title">${brief.stuck_work.count === 1 ? "current item is stuck" : "current items are stuck"}</h2></div>
+          <div class="rollcall blocked-items"><ul>${briefStuckPrimary || `<li class="empty">No current work is blocked.</li>`}</ul></div>
+          ${briefStuckMore ? `<details class="brief-more"><summary>Show ${h(briefStuckRows.length - 1)} more root cause${briefStuckRows.length === 2 ? "" : "s"}</summary><div class="rollcall blocked-items"><ul>${briefStuckMore}</ul></div></details>` : ""}
+        </article>
+        <article class="brief-card brief-card-shipped" aria-labelledby="shipped-title">
+          <p class="brief-question">4 · Shipped since your last reading</p>
+          <div class="brief-answer"><span class="n">${h(brief.shipped.count)}</span><h2 id="shipped-title">recent completion${brief.shipped.count === 1 ? "" : "s"} in this bounded reading${brief.shipped.complete ? "" : " · observed minimum"}</h2></div>
+          <ul class="brief-list">${briefShippedPrimary || `<li class="empty">No recent completions are in the bounded baseline.</li>`}</ul>
+          <details class="brief-more"><summary>${briefShippedMore ? `Show ${h(briefShippedRows.length - 1)} more completion${briefShippedRows.length === 2 ? "" : "s"} and count basis` : "About this count"}</summary>${briefShippedMore ? `<ul class="brief-list">${briefShippedMore}</ul>` : ""}<p class="brief-basis">${h(brief.shipped.basis)}</p></details>
+        </article>
       </div>
     </div></section>
-    ${recurringBand}
-    ${parkingLot}
+    <details class="operations">
+      <summary><span>Operational appendix</span><small>Recommendations, waits, pipeline, full roster, lanes, definition health, and landed history</small></summary>
+      <section class="band band-alarm" aria-labelledby="headline"><div class="wrap">
+        <p class="kicker"><span>Primary bottleneck${model.primary_bottleneck.id ? `<span class="action-id">${h(model.primary_bottleneck.id)}</span>` : ""}</span><span class="stamp">Fleet capacity · generated ${h(model.generated)}</span></p>
+        <h2 class="headline" id="headline">${h(model.primary_bottleneck.classification)}</h2>
+        <p class="evidence">${h(primaryRec ? primaryRec.evidence : model.primary_bottleneck.evidence)}</p>
+        ${alarmTail}
+      </div></section>
+      ${selfWaitBand}
+      <section class="band band-meter" aria-labelledby="meter-title"><div class="wrap">
+        <p class="kicker">Working vs waiting</p>
+        <h2 class="split" id="meter-title">
+          <span class="pair"><span class="num num-working">${h(working)}</span><span class="lbl">working</span></span>
+          <span class="pair"><span class="num">${h(waiting)}</span><span class="lbl">waiting</span></span>
+          <span class="of">of ${h(total)} current item${total === 1 ? "" : "s"}</span>
+        </h2>
+        ${meterBar}
+        ${whyHtml}
+      </div></section>
+      <section class="band band-agents" aria-labelledby="live-agents-title"><div class="wrap">
+        <p class="kicker"><span>Live agents</span><span class="stamp">Reading generated ${h(model.live_agents?.generated || model.generated)}</span></p>
+        <h2 id="live-agents-title">What every agent is doing now</h2>
+        <p class="agents-note">Each row is a single bounded reading. Use Refresh capacity for a fresh reading; a file opened directly stays at the time shown here.</p>
+        <div class="agents-head" aria-hidden="true"><span>Agent</span><span>Task</span><span>Current activity</span><span>As of</span></div>
+        <ul class="agents-list">${liveAgentRows}</ul>
+      </div></section>
+      <section class="band band-quiet" aria-label="Reference detail"><div class="wrap">
+        <h2 class="qhead">Also recommended · ranked by priority</h2>
+        ${recs}
+        <h2 class="qhead">Manifest · every current item by stage</h2>
+        ${manifest}
+        <h2 class="qhead">Lanes</h2>
+        <div class="lanes-grid">
+          <div><h3>Ephemeral dispatch lanes</h3><p class="fine">Created on demand: ${h(model.lanes.ephemeral_workers.pool)}. Runtime backend ${h(model.lanes.ephemeral_workers.backend.name)}: ${h(model.lanes.ephemeral_workers.backend.evidence)}. GitHub auth ${h(model.lanes.ephemeral_workers.github_auth.status)}.</p><ul>${dispatchRows}</ul></div>
+          <div><h3>Persistent secondmates</h3><p class="fine">Healthy when idle unless grounded in-scope work is already ready.</p><ul>${mateRows}</ul></div>
+        </div>
+        <h2 class="qhead">Definition health and landed context</h2>
+        <div class="appendix">
+          <div><h3>Backlog definition gaps</h3><ul class="clean-list">${gaps}</ul></div>
+          <div><h3>Recently landed${model.measures.recently_landed_complete ? "" : " (observed; incomplete)"}</h3><ul class="clean-list">${landed}</ul></div>
+        </div>
+      </div></section>
+      ${recurringBand}
+      ${parkingLot}
+    </details>
   </main>
   <footer><p>Provenance: ${h(model.provenance.fleet)}. ${h(model.provenance.decisions)} ${h(model.provenance.environment)}</p><p>This private dashboard contains bounded operational metadata only. It uses no CDN, remote asset, analytics, network service, or Lavish integration.</p></footer>
   <script>
@@ -2774,8 +2933,8 @@ function main() {
     }
   }
   const waitHistory = loadWaitHistory(waitHistoryPath);
-  const { model, captainActions } = classify(snapshot, environment, waitHistory);
-  writePrivateAtomic(output, renderHtml(model, captainActions), snapshot.fm_home || path.dirname(allowedData));
+  const { model } = classify(snapshot, environment, waitHistory);
+  writePrivateAtomic(output, renderHtml(model), snapshot.fm_home || path.dirname(allowedData));
   writePrivateAtomic(waitHistoryPath, `${JSON.stringify(waitHistory, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
   if (refsPath) {
     const refs = {};
