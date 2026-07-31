@@ -851,8 +851,8 @@ function taskStage(task) {
   const detail = task.current_state?.detail || "";
   const decision = (task.hints?.open_decisions || []).length > 0;
   const prState = task.pr?.reconciliation?.status || null;
+  if (prState === "merged" && (["done", "parked"].includes(state) || mergedPrOnlyGate(task))) return null;
   if (decision || ["blocked", "paused", "unknown", "failed"].includes(state)) return "blocked";
-  if (prState === "merged" && ["done", "parked"].includes(state)) return null;
   if (task.endpoint?.exists === false) return "blocked";
   if (prState === "closed") return "blocked";
   if (task.pr?.url && prState !== "merged" && (state === "done" || state === "parked")) return "pr_ci_approval";
@@ -863,7 +863,8 @@ function taskStage(task) {
 }
 
 function taskApprovalReady(task) {
-  if (task.pr?.reconciliation?.status === "unavailable") return false;
+  const prState = task.pr?.reconciliation?.status || null;
+  if (prState !== null && prState !== "open") return false;
   if (task.current_state?.state !== "done") return false;
   const detail = task.current_state?.detail || "";
   if (task.mode === "direct-PR") return Boolean(task.pr?.url);
@@ -1018,6 +1019,16 @@ function pauseReasonText(task) {
 function prRecorded(task) {
   const prUrl = typeof task.pr?.url === "string" && task.pr.url !== "" ? task.pr.url : null;
   return prUrl !== null || task.pr_present === true;
+}
+
+function mergedPrOnlyGate(task) {
+  const state = task.current_state?.state || "unknown";
+  if (!["paused", "blocked"].includes(state)) return false;
+  if ((task.hints?.open_decisions || []).some((decision) => decision.key && decision.key !== "default")) return false;
+  const reason = pauseReasonText(task);
+  const namedDecision = reason.match(/\b(?:captain(?:'s)?\s+)?([a-z0-9][\w-]*)\s+(?:decision|choice|order|go-ahead|sign-off)\b/i)?.[1];
+  if (namedDecision && !/^(?:merge|merging|review|approval|approve|pull|pr)$/i.test(namedDecision)) return false;
+  return !reason || PR_GATE_REASON.test(reason) || PR_TERMINAL_REASON.test(reason);
 }
 
 function hasOpenPrEvidence(task) {
@@ -1611,6 +1622,10 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     const scopeAvailable = typeof route.scope === "string" && route.scope.trim().length > 0;
     const mateUnknown = mate.current?.state === "unknown" || mate.provenance?.selected !== "structured-home";
     const omittedSurfaces = new Set((mate.omitted || []).map((entry) => entry.surface));
+    const endpointCoverageIncomplete = omittedSurfaces.has("endpoints")
+      || (Array.isArray(mate.endpoints)
+        && Number.isInteger(mate.counts?.endpoints)
+        && mate.counts.endpoints !== mate.endpoints.length);
     const mateIncomplete = mateUnknown
       || !Array.isArray(mate.active_children)
       || !Array.isArray(mate.decisions_open)
@@ -1619,6 +1634,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       || omittedSurfaces.has("active_children")
       || omittedSurfaces.has("decisions_open")
       || omittedSurfaces.has("queued")
+      || endpointCoverageIncomplete
       || omittedSurfaces.has("agents")
       || !Number.isInteger(mate.counts?.active_children)
       || !Number.isInteger(mate.counts?.decisions_open)
@@ -1709,7 +1725,9 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         secondmateGithubBoundDelivery.add(mate.id);
       }
       const detail = child.doing || child.state || "working";
-      const endpointUnavailable = endpointById.get(child.id)?.endpoint?.exists === false;
+      const endpoint = endpointById.get(child.id);
+      const endpointUnavailable = endpoint?.endpoint?.exists === false
+        || (endpointCoverageIncomplete && endpoint === undefined);
       const currentUnavailable = child.state === "unknown" || endpointUnavailable;
       const stage = currentUnavailable
         ? "blocked"

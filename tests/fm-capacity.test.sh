@@ -1756,19 +1756,22 @@ SH
       {"order":1,"state":"done","structured":true,"id":"merged-gate","title":"Already merged delivery","repo":"astroai","project_resolved":true,"kind":"ship","pr_url":"https://github.com/purple-phoenix/astroai/pull/97","completion":{"verb":"merged","date":"2026-07-28"}},
       {"order":2,"state":"in_flight","structured":true,"id":"blocked-open-gate","title":"Blocked open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
       {"order":3,"state":"in_flight","structured":true,"id":"unreadable-gate","title":"Unreadable delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
-      {"order":4,"state":"in_flight","structured":true,"id":"open-gate","title":"Open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"}
+      {"order":4,"state":"in_flight","structured":true,"id":"open-gate","title":"Open delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"},
+      {"order":5,"state":"in_flight","structured":true,"id":"closed-gate","title":"Closed delivery gate","repo":"astroai","project_resolved":true,"kind":"ship","since":"2026-07-29"}
     ]
     | .tasks = [
       {"id":"merged-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/97"},"backlog":{"id":"merged-gate","repo":"astroai","kind":"ship"}},
       {"id":"blocked-open-gate","kind":"ship","project":"astroai","current_state":{"state":"blocked","source":"run-step","detail":"waiting for dependency"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/98"},"backlog":{"id":"blocked-open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
       {"id":"unreadable-gate","kind":"ship","project":"astroai","current_state":{"state":"paused","source":"run-step","detail":"awaiting captain approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/99"},"backlog":{"id":"unreadable-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
-      {"id":"open-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/100"},"backlog":{"id":"open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}}
+      {"id":"open-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"checks green"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/100"},"backlog":{"id":"open-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}},
+      {"id":"closed-gate","kind":"ship","mode":"direct-PR","project":"astroai","current_state":{"state":"done","source":"run-step","detail":"ready for approval"},"endpoint":{"exists":true},"hints":{"open_decisions":[]},"pr":{"url":"https://github.com/purple-phoenix/astroai/pull/101"},"backlog":{"id":"closed-gate","repo":"astroai","kind":"ship","since":"2026-07-29"}}
     ]
     | .pr_reconciliation = {
         "purple-phoenix/astroai#97":{"exit_status":0,"stdout":"pull_request:\n  state: merged\n  merged: 2026-07-28T14:24:24Z\n"},
         "purple-phoenix/astroai#98":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
         "purple-phoenix/astroai#99":{"exit_status":1,"stdout":"","stderr":"unavailable"},
-        "purple-phoenix/astroai#100":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"}
+        "purple-phoenix/astroai#100":{"exit_status":0,"stdout":"pull_request:\n  state: open\n"},
+        "purple-phoenix/astroai#101":{"exit_status":0,"stdout":"pull_request:\n  state: closed\n"}
       }
     | .secondmate_current.registry.records = []
     | .secondmate_current.records = []
@@ -1784,11 +1787,11 @@ SH
     and (.pipeline.blocked | length) == 3
     and ([.pipeline.pr_ci_approval[] | select(.reason == "Forge-verified current state: open pull request")] | length) == 1
     and ([.pipeline.blocked[] | select(.reason == "Pull request state unavailable - the recorded delivery gate could not be verified" and .approval_ready == false and .captain_gate != true)] | length) == 1
-    and ([.pipeline.blocked[] | select(
-      .captain_gate == true
-      and ((.waits_on | join(" ")) | contains("awaiting captain approval"))
-      and ((((.waits_on | join(" ")) + " " + .what_you_can_do) | test("open pull request"; "i")) | not)
-    )] | length) == 1
+    and ([.pipeline.blocked[] | select(.reason == "Forge-verified pull request is closed - delivery reconciliation is required"
+      and .approval_ready == false
+      and .approval_authority == null
+      and .captain_approval_required == false)] | length) == 1
+    and ([.pipeline.blocked[] | select((.waits_on // [] | join(" ")) | contains("awaiting captain approval"))] | length) == 0
     and (.pipeline.recently_landed | length) == 1
     and (.recommendations | any(.id == "CAP-03"))
   ' >/dev/null || fail "forge reconciliation kept a merged gate current or hid an unreadable gate: $json"
@@ -1833,9 +1836,9 @@ test_unavailable_current_state_withholds_detail_and_eta() {
     | (.secondmate_current.records[] | select(.id == "design") | .active_children) = [
         {"id":"mate-unavailable","title":"Validate the unavailable domain task","repo":"delta","project_resolved":true,"kind":"ship","since":"2026-07-17","state":"working","source":"run-step","doing":"validating (fixing)"}
       ]
-    | (.secondmate_current.records[] | select(.id == "design") | .endpoints) = [
-        {"id":"mate-unavailable","state":"working","source":"run-step","endpoint":{"exists":false}}
-      ]
+    | (.secondmate_current.records[] | select(.id == "design") | .endpoints) = []
+    | (.secondmate_current.records[] | select(.id == "design") | .counts.endpoints) = 1
+    | (.secondmate_current.records[] | select(.id == "design") | .omitted) = [{"surface":"endpoints","count":1}]
     | (.secondmate_current.records[] | select(.id == "design") | .queued) = []
   ' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
