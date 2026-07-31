@@ -1135,6 +1135,9 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const mainRecords = snapshot.backlog?.records || [];
   const mainDone = mainRecords.filter((record) => record.state === "done" && record.structured);
   const mainTasks = (snapshot.tasks || []).filter((task) => task.kind !== "secondmate");
+  const supervisorTaskById = new Map((snapshot.tasks || [])
+    .filter((task) => task.kind === "secondmate")
+    .map((task) => [task.id, task]));
   const currentMainTasks = mainTasks.filter(currentTask);
   const allTaskById = new Map(mainTasks.map((task) => [task.id, task]));
   const taskById = new Map(currentMainTasks.map((task) => [task.id, task]));
@@ -1884,7 +1887,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       : mate
         ? "owning home did not report why its structured snapshot was unavailable"
         : "owning home was outside the bounded snapshot reading";
-    const parent = taskById.get(route.id);
+    const parent = supervisorTaskById.get(route.id);
     for (const decision of parent?.hints?.open_decisions || []) {
       if (!decision.key || decision.key === "default") continue;
       const origin = decision.origin || route.id;
