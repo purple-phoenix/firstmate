@@ -59,6 +59,7 @@ import process from "node:process";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { readDecisionDocument } from "./fm-decision-document.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -507,17 +508,20 @@ function yourGoEntries(dashboardHtml, refsFile) {
     const decision = decisionRef(entry);
     if (decision) {
       const holdId = decision.origin ? `${decision.origin}-decision-${decision.key}` : decision.key;
-      const row = backlogFor(decision.home).find((item) => item.id === holdId) || null;
+      const row = decision.home === "main"
+        ? backlogFor(decision.home).find((item) => item.id === holdId) || null
+        : null;
       const parsed = row ? titleAnnotations(row.title) : null;
       const reason = parsed?.fields["hold"] || null;
+      const detail = projectedDecisionDetail(entry, decision);
       entries.push({
         ref,
         row_kind: rowKind,
         target: "decision",
         identity: `${decision.home}/${decision.origin || ""}/${decision.key}`,
-        title: parsed?.title || decision.key,
+        title: detail.available ? detail.title : parsed?.title || decision.key,
         reason,
-        has_options: Boolean(decisionDocument(decision.home, decision.origin, decision.key)),
+        has_options: detail.available === true,
         ask: reason && DELIVERABLE_ASK.test(reason) ? reason : null,
       });
       continue;
@@ -592,44 +596,30 @@ function decisionHome(home) {
   return meta.home ? path.resolve(meta.home) : null;
 }
 
-function decisionDocument(home, origin, key) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key)) return null;
-  if (origin !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(origin)) return null;
-  const root = decisionHome(home);
-  if (!root) return null;
-  const file = origin === null
-    ? path.join(root, "data", "decisions", `${key}.md`)
-    : path.join(root, "data", origin, "decisions", `${key}.md`);
-  const text = readText(file, 131072);
-  if (!text) return null;
-  const title = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim();
-  const sections = text.split(/^##\s+Options\s*$/im);
-  if (!title || sections.length < 2) return null;
-  const context = sections[0].replace(/^#\s+.*$/m, "").trim().slice(0, 4000) || null;
-  const options = [];
-  let current = null;
-  for (const line of sections.slice(1).join("\n## Options\n").split("\n")) {
-    const marker = line.match(/^\s*-\s+(?:\[recommended\]\s*)?(.+?)(?:\s+-\s+(.+))?\s*$/i);
-    if (marker) {
-      current = {
-        text: marker[1].trim(),
-        impact: (marker[2] || "").trim(),
-        recommended: /^\s*-\s+\[recommended\]/i.test(line),
-      };
-      options.push(current);
-      continue;
-    }
-    if (current && /^\s{2,}\S/.test(line)) current.impact = `${current.impact} ${line.trim()}`.trim();
+function projectedDecisionDetail(entry, decision) {
+  if (decision.home === "main") {
+    const root = decisionHome(decision.home);
+    return root
+      ? readDecisionDocument(root, decision.origin, decision.key)
+      : { available: false, reason: "main decision home could not be resolved" };
   }
-  const boundedOptions = options
-    .filter((option) => option.text && option.impact)
-    .slice(0, 20)
-    .map((option) => ({ ...option, text: option.text.slice(0, 300), impact: option.impact.slice(0, 1200) }));
-  if (!context || boundedOptions.length === 0) return null;
+  const detail = entry?.decision_detail;
+  if (detail?.available === true
+    && typeof detail.title === "string"
+    && typeof detail.context === "string"
+    && Array.isArray(detail.options)
+    && detail.options.length > 0
+    && detail.options.every((option) => typeof option?.text === "string"
+      && typeof option?.impact === "string"
+      && typeof option?.recommended === "boolean")) {
+    return detail;
+  }
+  if (detail?.available === false && typeof detail.reason === "string" && detail.reason) return detail;
   return {
-    title,
-    context,
-    options: boundedOptions,
+    available: false,
+    reason: detail === undefined
+      ? "structured decision detail was not included in the bounded snapshot"
+      : "structured decision detail in the bounded snapshot was malformed",
   };
 }
 
@@ -671,7 +661,8 @@ function assembleDetail(ref) {
   const backlogItem = parseBacklog().find((item) => item.id === holdId) || null;
 
   if (owner === "decision") {
-    const document = decisionDocument(decision.home, decision.origin, decision.key);
+    const document = projectedDecisionDetail(entry, decision);
+    const remote = decision.home !== "main";
     return {
       type: "decision",
       ref,
@@ -679,11 +670,16 @@ function assembleDetail(ref) {
       decision_home: decision.home,
       decision_origin: decision.origin,
       decision_identity: `${decision.home}/${decision.origin || ""}/${decision.key}`,
-      title: document?.title || backlogItem?.title || id,
-      description: document?.context || null,
-      options: document?.options || [],
-      recent: statusTail(decision.origin || id),
-      note: document ? null : "This legacy decision has no structured options document; answer it in captain chat.",
+      title: document.available ? document.title : backlogItem?.title || id,
+      description: document.available ? document.context : null,
+      options: document.available ? document.options : [],
+      recent: remote ? [] : statusTail(decision.origin || id),
+      note: document.available
+        ? null
+        : remote
+          ? `Decision details unavailable: ${document.reason}.`
+          : "This legacy decision has no structured options document; answer it in captain chat.",
+      provenance_note: remote ? "This decision lives with a domain supervisor." : null,
     };
   }
   if (owner !== "main") {
@@ -936,6 +932,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-panel h2{font-size:clamp(1.4rem,3vw,2rem);font-weight:800;letter-spacing:-.02em;margin-top:.5rem;overflow-wrap:anywhere}
   .fmdash-panel h3{font-size:.74rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:1.4rem;border-bottom:1px solid var(--hair);padding-bottom:.35rem}
   .fmdash-panel p,.fmdash-panel pre,.fmdash-panel li{color:var(--ink2);font-size:.92rem;margin-top:.5rem}
+  .fmdash-panel .fmdash-provenance{color:var(--muted);font-size:.76rem}
   .fmdash-panel pre{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;border:1px solid var(--hair);padding:.6rem .8rem;overflow-x:auto}
   .fmdash-panel a{overflow-wrap:anywhere}
   .fmdash-option{border-bottom:1px solid var(--hair);padding:.7rem 0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.6rem;align-items:start}
@@ -1218,6 +1215,11 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       panel.appendChild(textBlock("h2", detail.title || detail.id));
       if (detail.title && detail.title !== detail.id) panel.appendChild(textBlock("p", detail.id));
       if (detail.note) panel.appendChild(textBlock("p", detail.note));
+      if (detail.provenance_note) {
+        const provenance = textBlock("p", detail.provenance_note);
+        provenance.className = "fmdash-provenance";
+        panel.appendChild(provenance);
+      }
       section("What it is", textBlock("pre", detail.description)).forEach((el) => panel.appendChild(el));
       section("Test plan", textBlock("pre", detail.test_plan)).forEach((el) => panel.appendChild(el));
       if (detail.pr) section("Pull request", linkBlock([detail.pr])).forEach((el) => panel.appendChild(el));
@@ -2019,7 +2021,7 @@ async function handle(req, res) {
         return;
       }
       const decision = decisionRef(entry);
-      if (decision && decisionDocument(decision.home, decision.origin, decision.key)) {
+      if (decision && projectedDecisionDetail(entry, decision).available) {
         sendJson(res, 409, { status: "refused", error: `${ref} has structured decision options; use the per-option approval flow` });
         return;
       }

@@ -93,9 +93,11 @@ be used for a normal /capacity run.
 
 --refs additionally writes the fm-capacity-refs.v1 sidecar this producer owns: the
 private mode-0600 mapping from every opaque dashboard reference (item-NN, project-NN,
-home-NN) to its real identity. The dashboard itself stays identity-opaque; the sidecar
-exists so the captain-authenticated tailnet dashboard service (bin/fm-dash-serve.mjs)
-can enrich the page and serve rich detail views without weakening the offline file.
+home-NN) to its real identity, plus bounded structured detail or a concrete
+unavailability reason for supervisor-home decisions. The dashboard itself stays
+identity-opaque; the sidecar exists so the captain-authenticated tailnet dashboard
+service (bin/fm-dash-serve.mjs) can enrich the page and serve rich detail views
+without weakening the offline file.
 The sidecar path must stay inside the effective state or data directory.
 
 MODEL fm-capacity.v1
@@ -469,6 +471,7 @@ function normalizeEnvironment(environment) {
 
 const opaqueRefs = new Map();
 const opaqueRefLabels = new Map();
+const opaqueRefMetadata = new Map();
 
 function opaqueRef(kind, value) {
   const key = `${kind}\0${String(value ?? "")}`;
@@ -491,6 +494,28 @@ function labeledItemRef(owner, id, label) {
 
 function decisionRef(owner, origin, key) {
   return opaqueRef("item", `decision/${owner}/${origin}/${key}`);
+}
+
+function rememberDecisionDetail(ref, detail) {
+  const normalized = detail?.available === true
+    && typeof detail.title === "string"
+    && typeof detail.context === "string"
+    && Array.isArray(detail.options)
+    ? {
+        available: true,
+        title: detail.title,
+        context: detail.context,
+        options: detail.options,
+      }
+    : {
+        available: false,
+        reason: typeof detail?.reason === "string" && detail.reason
+          ? detail.reason
+          : "structured decision detail was not included in the bounded snapshot",
+      };
+  const current = opaqueRefMetadata.get(ref)?.decision_detail;
+  if (current?.available === true && normalized.available !== true) return;
+  opaqueRefMetadata.set(ref, { decision_detail: normalized });
 }
 
 function backlogDecisionIdentity(record) {
@@ -953,9 +978,9 @@ function captainPrioritizationHold(record, now) {
   return activeHold(record, now) && record.hold_kind === "captain";
 }
 
-function captainPrioritizationCopy(record, owner) {
+function captainPrioritizationCopy(record, owner, projectedDecision = null) {
   if (record.kind === "captain") {
-    const decision = backlogDecisionIdentity(record);
+    const decision = projectedDecision || backlogDecisionIdentity(record);
     const ref = decisionRef(owner, decision.origin, decision.key);
     return {
       reason: "Captain hold",
@@ -1023,6 +1048,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
   const activeRuntimeBlockedMates = new Set();
   const secondmateGithubBoundActive = new Set();
   const secondmateGithubBoundDelivery = new Set();
+  const projectedRemoteDecisionRefs = new Set();
   let secondmateQueuedConsidered = 0;
   let readinessComplete = true;
 
@@ -1483,12 +1509,19 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     if (secondmateInventoryComplete && !mateIncomplete) authoritativeWaitOwners.add(mate.id);
     if (!scopeAvailable) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "registered routing scope unavailable");
     if (!runtime) markUnavailable(opaqueRef("home", mate.id), "persistent secondmate", "home-owned runtime lane evidence unavailable");
+    const mateDecisionById = new Map((mate.decisions_open || [])
+      .filter((decision) => decision.id)
+      .map((decision) => [decision.id, decision]));
     for (const decision of mate.decisions_open || []) {
       if (!decision.key || decision.key === "default") continue;
+      const origin = decision.origin || decision.id || mate.id;
+      const ref = decisionRef(mate.id, origin, decision.key);
+      rememberDecisionDetail(ref, decision.detail);
+      projectedRemoteDecisionRefs.add(ref);
       decisions.push({
         owner: ownerRef(mate.id),
         task: itemRef(mate.id, decision.id || mate.id),
-        key: decisionRef(mate.id, decision.origin || decision.id || mate.id, decision.key || decision.id || mate.id),
+        key: ref,
         reason: "Open decision raised by work already under way.",
       });
     }
@@ -1524,13 +1557,14 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       }
       const ageDays = dateAgeDays(hold.since, now);
       const captainHold = captainPrioritizationHold(holdRecord, now);
-      const copy = captainHold ? captainPrioritizationCopy(holdRecord, mate.id) : null;
+      const copy = captainHold ? captainPrioritizationCopy(holdRecord, mate.id, mateDecisionById.get(holdRecord.id)) : null;
       blockedRows.push({ id: itemRef(mate.id, hold.id), owner: ownerRef(mate.id), reason: captainHold ? "captain hold" : "structured wait gate" });
       const chain = captainHold ? null : describeBlockedRecord(hold, mate.id, [...(mate.holds || []), ...(mate.queued || [])], mateTaskEvidence);
       const holdCard = Object.assign(cardFromBacklog(holdRecord, mate.id, "blocked", copy?.reason || "Structured wait gate"), {
         waits_on: copy?.waits_on || chain.waits,
         what_you_can_do: copy?.what_you_can_do || chain.action,
       });
+      if (copy?.decision_ref) holdCard.id = copy.decision_ref;
       pipeline.blocked.push(holdCard);
       if (captainHold) {
         holdCard.wait = { class: "needs_actor" };
@@ -1594,13 +1628,14 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         // Secondmate decisions_open already supplies CAP-01 Decide rows for
         // kind=captain holds; do not double-count them here. Ship/scout
         // prioritization holds become captain_gate Review rows instead.
-        const copy = captainPrioritizationCopy(record, mate.id);
+        const copy = captainPrioritizationCopy(record, mate.id, mateDecisionById.get(record.id));
         blockedRows.push({ id: itemRef(mate.id, record.id), owner: ownerRef(mate.id), reason: "captain hold" });
         const mateHoldCard = Object.assign(cardFromBacklog(record, mate.id, "blocked", copy.reason), {
           waits_on: copy.waits_on,
           what_you_can_do: copy.what_you_can_do,
           wait: { class: "needs_actor" },
         });
+        if (copy.decision_ref) mateHoldCard.id = copy.decision_ref;
         if (!copy.decision_ref) mateHoldCard.captain_gate = true;
         pipeline.blocked.push(mateHoldCard);
         continue;
@@ -1663,6 +1698,33 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         dispatch: { valid: false, lanes: [] },
       },
     });
+  }
+
+  // A registered home can fall outside the bounded secondmate-home reading.
+  // Preserve any keyed parent-side decision fold as an explicitly unavailable
+  // captain row instead of silently dropping it or pretending its detail was
+  // read. This is fallback provenance only; readable structured-home rows win.
+  const observedMateIds = new Set((snapshot.secondmate_current?.records || []).map((mate) => mate.id));
+  for (const route of snapshot.secondmate_current?.registry?.records || []) {
+    if (!route?.id || observedMateIds.has(route.id)) continue;
+    const parent = taskById.get(route.id);
+    for (const decision of parent?.hints?.open_decisions || []) {
+      if (!decision.key || decision.key === "default") continue;
+      const origin = decision.origin || route.id;
+      const ref = decisionRef(route.id, origin, decision.key);
+      if (projectedRemoteDecisionRefs.has(ref)) continue;
+      rememberDecisionDetail(ref, {
+        available: false,
+        reason: "owning home was outside the bounded snapshot reading",
+      });
+      projectedRemoteDecisionRefs.add(ref);
+      decisions.push({
+        owner: ownerRef(route.id),
+        task: itemRef(route.id, origin),
+        key: ref,
+        reason: "Decision details unavailable because the owning home was outside the bounded reading.",
+      });
+    }
   }
 
   const chosenProjects = new Set(activeProjects);
@@ -2537,6 +2599,7 @@ function main() {
         kind: key.slice(0, separator),
         value: key.slice(separator + 1),
         ...(opaqueRefLabels.has(ref) ? { label: opaqueRefLabels.get(ref) } : {}),
+        ...(opaqueRefMetadata.get(ref) || {}),
       };
     }
     writePrivateAtomic(refsPath, `${JSON.stringify({ schema: "fm-capacity-refs.v1", generated: model.generated, refs }, null, 2)}\n`, snapshot.fm_home || path.dirname(allowedData));
