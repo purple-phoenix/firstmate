@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
+# Shared validation and atomic artifact helpers for PR watching on the
 # supported forges. Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
@@ -106,6 +106,20 @@ fm_task_id_path_safe() {
 fm_pr_task_id_valid() {
   local id=${1-}
   fm_task_id_path_safe "$id"
+}
+
+fm_pr_preview_outage_commit() {
+  local state=$1 id=$2 url=$3 pending marker state_device pending_url
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  pending="$state/$id.preview-outage-pending"
+  marker="$state/$id.preview-outage"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$pending" 600 "$state_device" || return 1
+  IFS= read -r pending_url < "$pending" || return 1
+  [ "$pending_url" = "$url" ] || return 1
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  mv -f -- "$pending" "$marker"
 }
 
 fm_task_id_creation_check() {

@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
+# It emits exactly one merged line for a merged PR or MR.
+# For an open, ready GitHub PR, the same single gh read also returns the body so
+# up to eight tailnet preview links can be probed with one-second connect and
+# two-second total timeouts.
+# A newly detected failed preview emits one line naming the task and PR; the
+# committed failed-link identity suppresses repeats until recovery or link change.
+# Every other error is silent, so a failed forge lookup can never be read as a
+# merge or dead preview.
+# Preview probes resolve the link host directly to this machine's Tailscale IPv4
+# address and never follow redirects, so they cannot escape to public services.
+# The provider-tagged identity is data in the sidecar and is never interpolated
+# into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
 set -u
@@ -16,6 +24,8 @@ if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   host=$4
   path=$5
   number=$6
+  task=${FM_PR_POLL_TASK_ID:-}
+  preview_state=${FM_PR_POLL_STATE:-}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -33,6 +43,9 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  task=${0##*/}
+  task=${task%.check.sh}
+  preview_state=${data%/*}
 else
   exit 0
 fi
@@ -44,6 +57,130 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
+
+task_valid() {
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+preview_marker=
+preview_pending=
+if task_valid "$task" && [ -d "$preview_state" ] && [ ! -L "$preview_state" ]; then
+  preview_marker=$preview_state/$task.preview-outage
+  preview_pending=$preview_state/$task.preview-outage-pending
+fi
+
+tailnet_ipv4_valid() {
+  local ip=$1 a b c d
+  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  a=${BASH_REMATCH[1]}
+  b=${BASH_REMATCH[2]}
+  c=${BASH_REMATCH[3]}
+  d=${BASH_REMATCH[4]}
+  [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] \
+    && [ "$c" -le 255 ] && [ "$d" -le 255 ]
+}
+
+preview_outage_clear() {
+  [ -n "$preview_marker" ] || return 0
+  if [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ]; then
+    rm -f -- "$preview_marker" 2>/dev/null || true
+  fi
+  if [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ]; then
+    rm -f -- "$preview_pending" 2>/dev/null || true
+  fi
+}
+
+preview_outage_stage_new() {
+  local failed_link=$1 tmp
+  [ -n "$preview_marker" ] && [ -n "$preview_pending" ] || return 1
+  if { [ -e "$preview_marker" ] || [ -L "$preview_marker" ]; } \
+    && { [ ! -f "$preview_marker" ] || [ -L "$preview_marker" ]; }; then
+    return 1
+  fi
+  if { [ -e "$preview_pending" ] || [ -L "$preview_pending" ]; } \
+    && { [ ! -f "$preview_pending" ] || [ -L "$preview_pending" ]; }; then
+    return 1
+  fi
+  umask 077
+  tmp=$(mktemp "$preview_state/.fm-preview-outage.XXXXXX") || return 1
+  if ! printf '%s\n%s' "$url" "$failed_link" > "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [ -f "$preview_marker" ] && cmp -s "$tmp" "$preview_marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$preview_pending"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+probe_previews() {
+  local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
+  local result code bytes count
+  task_valid "$task" || return 0
+  links=$(printf '%s\n' "$body" \
+    | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
+    | awk '!seen[$0]++' \
+    | head -n 8) || true
+  if [ -z "$links" ]; then
+    preview_outage_clear
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v tailscale >/dev/null 2>&1 || return 0
+  local_tailnet_ip=$(tailscale ip -4 2>/dev/null) || return 0
+  tailnet_ipv4_valid "$local_tailnet_ip" || return 0
+  tailnet_ip=$local_tailnet_ip
+  if [ -n "${FM_PREVIEW_TAILNET_IP:-}" ]; then
+    [ "$FM_PREVIEW_TAILNET_IP" = "$local_tailnet_ip" ] || return 0
+    tailnet_ip=$FM_PREVIEW_TAILNET_IP
+  fi
+
+  count=0
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    count=$((count + 1))
+    [ "$count" -le 8 ] || break
+    authority=${link#https://}
+    authority=${authority%%/*}
+    case "$authority" in
+      *:*) preview_host=${authority%:*}; port=${authority##*:} ;;
+      *) preview_host=$authority; port=443 ;;
+    esac
+    case "$port" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
+    result=$(curl -q --noproxy '*' --resolve "$preview_host:$port:$tailnet_ip" \
+      --connect-timeout 1 --max-time 2 -sS -o /dev/null \
+      -w '%{http_code} %{size_download}' "$link" 2>/dev/null) || result='000 0'
+    case "$result" in
+      *' '*) code=${result%% *}; bytes=${result#* } ;;
+      *) code=000; bytes=0 ;;
+    esac
+    case "$code" in
+      [0-9][0-9][0-9]) ;;
+      *) code=000 ;;
+    esac
+    case "$bytes" in
+      ''|*[!0-9]*) bytes=0 ;;
+    esac
+    if [ "$code" != 200 ] || [ "$bytes" -eq 0 ]; then
+      if preview_outage_stage_new "$link"; then
+        printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
+      fi
+      return 0
+    fi
+  done <<EOF
+$links
+EOF
+  preview_outage_clear
+}
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
@@ -62,8 +199,31 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    record=$(gh pr view "$url" --json state,isDraft,body \
+      --jq '[.state, .isDraft, .body] | @tsv' 2>/dev/null) || exit 0
+    case "$record" in
+      *$'\t'*$'\t'*) ;;
+      *) exit 0 ;;
+    esac
+    state=${record%%$'\t'*}
+    rest=${record#*$'\t'}
+    draft=${rest%%$'\t'*}
+    body=${rest#*$'\t'}
+    case "$state" in
+      MERGED)
+        preview_outage_clear
+        printf '%s\n' merged
+        ;;
+      CLOSED) preview_outage_clear ;;
+      OPEN)
+        if [ "$draft" != false ]; then
+          preview_outage_clear
+          exit 0
+        fi
+        probe_previews "$body"
+        ;;
+      *) exit 0 ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
