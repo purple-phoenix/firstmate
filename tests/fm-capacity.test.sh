@@ -721,6 +721,118 @@ test_supervisor_decision_detail_reaches_private_refs() {
   pass "supervisor decision detail reaches private refs and bounded omissions remain honest actionable rows"
 }
 
+# Screenshot regression: terminal_in_flight partial homes must keep both structured
+# decision documents (q2-product-decisions + legacy-attributable) and must not
+# re-emit stale parent-event no-context CAP rows for the same keys.
+test_terminal_in_flight_partial_home_keeps_both_decision_contexts() {
+  local home="$TMP_ROOT/terminal-partial-home" snapshot="$TMP_ROOT/terminal-partial-snapshot.json"
+  local environment="$TMP_ROOT/terminal-partial-environment.json"
+  local output="$TMP_ROOT/terminal-partial-home/data/terminal-partial.html"
+  local refs="$TMP_ROOT/terminal-partial-home/state/terminal-partial-refs.json"
+  local q2_ref legacy_ref parent_q2_ref parent_legacy_ref
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .secondmate_current.registry.records = [{"id":"astroai-mate","scope":"astro product domain","projects":["sample"]}]
+    | .secondmate_current.records = [{
+      "id":"astroai-mate",
+      "home":($home + "/astroai-mate"),
+      "current":{"state":"unknown","reason":"structured home state invalid: in-flight backlog item has terminal child state: astroai-reading-freshness-surface-r4=done, light-variant-chart-wheel-on-the-technic-0b=done"},
+      "invalidity":{"kind":"terminal_in_flight","ids":["astroai-reading-freshness-surface-r4","light-variant-chart-wheel-on-the-technic-0b"]},
+      "provenance":{"selected":"structured-home","summary_valid":false,"trust":"partial-structured","parent_event_role":"historical-only"},
+      "active_children":[],
+      "decisions_open":[
+        {
+          "id":"product-review-decision-q2",
+          "origin":"product-review",
+          "key":"q2-product-decisions",
+          "verb":"captain-hold",
+          "summary":"Choose Q2 product decisions",
+          "source":"backlog",
+          "detail":{
+            "available":true,
+            "title":"Q2 product decisions",
+            "context":"Choose how Q2 product work should prioritize.",
+            "options":[
+              {"text":"Ship core funnel first","impact":"Lowest risk path that unblocks revenue measurement.","recommended":true},
+              {"text":"Expand surface area now","impact":"Higher delivery cost with more open product questions.","recommended":false}
+            ]
+          }
+        },
+        {
+          "id":"attr-review-decision-legacy",
+          "origin":"attr-review",
+          "key":"legacy-attributable",
+          "verb":"captain-hold",
+          "summary":"Choose legacy attribution",
+          "source":"backlog",
+          "detail":{
+            "available":true,
+            "title":"Legacy attributable policy",
+            "context":"Choose how legacy attributable traffic is treated.",
+            "options":[
+              {"text":"Keep legacy channel mapping","impact":"Preserves historical reporting continuity.","recommended":true},
+              {"text":"Rebuild attribution from scratch","impact":"Cleaner model but breaks year-over-year comparability.","recommended":false}
+            ]
+          }
+        }
+      ],
+      "holds":[],
+      "queued":[
+        {"id":"product-review-decision-q2","title":"Choose Q2 product decisions","repo":"sample","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"choose product A or B","body_excerpt":"Origin: product-review\nDecision key: q2-product-decisions"},
+        {"id":"attr-review-decision-legacy","title":"Choose legacy attribution","repo":"sample","project_resolved":true,"kind":"captain","hold_kind":"captain","hold_reason":"choose attribution A or B","body_excerpt":"Origin: attr-review\nDecision key: legacy-attributable"}
+      ],
+      "landed":[],
+      "endpoints":[],
+      "counts":{"active_children":0,"decisions_open":2,"holds":0,"queued":2,"landed":0,"endpoints":0},
+      "omitted":[],
+      "parent_event":{"open_decisions":[
+        {"key":"q2-product-decisions","verb":"needs-decision","summary":"choose Q2 product direction"},
+        {"key":"legacy-attributable","verb":"needs-decision","summary":"choose legacy attribution policy"}
+      ]}
+    }]
+    | .secondmate_current.total = 1
+    | .secondmate_current.shown = 1
+    | .secondmate_current.truncated = 0
+    | .tasks = [
+      {"id":"astroai-mate","kind":"secondmate","hints":{"open_decisions":[
+        {"key":"q2-product-decisions","verb":"needs-decision","summary":"choose Q2 product direction"},
+        {"key":"legacy-attributable","verb":"needs-decision","summary":"choose legacy attribution policy"}
+      ]}}
+    ]
+  ' --arg home "$home" "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  jq '.secondmates = {"astroai-mate":{"backend":{"name":"tmux","available":true},"github_auth":{"status":"available"},"dispatch":{"config_present":true,"valid":true,"lanes":[{"harness":"codex","effort":"high","when":"default","available":true}]}}}' \
+    "$environment" > "$environment.tmp"
+  mv "$environment.tmp" "$environment"
+  "$CAPACITY" --snapshot "$snapshot" --environment "$environment" --output "$output" --refs "$refs" >/dev/null \
+    || fail "terminal_in_flight partial-home capacity run failed"
+  q2_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/astroai-mate/product-review/q2-product-decisions") | .key' "$refs")
+  legacy_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/astroai-mate/attr-review/legacy-attributable") | .key' "$refs")
+  parent_q2_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/astroai-mate/astroai-mate/q2-product-decisions") | .key' "$refs")
+  parent_legacy_ref=$(jq -r '.refs | to_entries[] | select(.value.value == "decision/astroai-mate/astroai-mate/legacy-attributable") | .key' "$refs")
+  [ -n "$q2_ref" ] && [ -n "$legacy_ref" ] || fail "partial-home structured decision refs were not preserved: $(jq -c '.refs | to_entries | map(.value.value)' "$refs")"
+  [ -z "$parent_q2_ref" ] || fail "stale parent-event q2-product-decisions reappeared despite partial structured-home: $parent_q2_ref"
+  [ -z "$parent_legacy_ref" ] || fail "stale parent-event legacy-attributable reappeared despite partial structured-home: $parent_legacy_ref"
+  jq -e '
+    (.refs[] | select(.value == "decision/astroai-mate/product-review/q2-product-decisions")
+      | .decision_detail.available == true
+        and .decision_detail.title == "Q2 product decisions"
+        and (.decision_detail.context | contains("Q2 product work should prioritize"))
+        and (.decision_detail.options | length) == 2
+        and (.decision_detail.options[] | select(.recommended == true) | .text) == "Ship core funnel first")
+    and (.refs[] | select(.value == "decision/astroai-mate/attr-review/legacy-attributable")
+      | .decision_detail.available == true
+        and .decision_detail.title == "Legacy attributable policy"
+        and (.decision_detail.context | contains("legacy attributable traffic"))
+        and (.decision_detail.options | length) == 2
+        and (.decision_detail.options[] | select(.recommended == true) | .text) == "Keep legacy channel mapping")
+  ' "$refs" >/dev/null || fail "partial-home structured decision detail was not preserved in private refs"
+  assert_grep "data-your-go-ref=\"$q2_ref\"" "$output" "q2-product-decisions row was dropped from the needs-you roll call"
+  assert_grep "data-your-go-ref=\"$legacy_ref\"" "$output" "legacy-attributable row was dropped from the needs-you roll call"
+  assert_no_grep 'owning home snapshot was unavailable' "$output" "partial structured-home decisions rendered as parent-event no-context rows"
+  pass "terminal_in_flight partial homes keep both structured decision contexts and suppress stale parent events"
+}
+
 test_approval_signal_and_max_effort_survive_safe_normalization() {
   local home="$TMP_ROOT/approval-home" snapshot="$TMP_ROOT/approval-snapshot.json" environment="$TMP_ROOT/approval-environment.json" output="$TMP_ROOT/approval-home/data/approval.html" json
   make_fixture "$home" "$snapshot" "$environment"
@@ -2038,6 +2150,7 @@ test_ready_selection_preserves_priority_and_order
 test_recent_landings_report_incomplete_projection
 test_secondmate_captain_holds_are_pipeline_waiting_work
 test_supervisor_decision_detail_reaches_private_refs
+test_terminal_in_flight_partial_home_keeps_both_decision_contexts
 test_approval_signal_and_max_effort_survive_safe_normalization
 test_unavailable_lanes_and_demand_shortage_are_distinct
 test_blocked_tasks_suppress_demand_shortage
