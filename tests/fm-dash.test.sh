@@ -19,10 +19,14 @@ command -v curl >/dev/null 2>&1 || { echo "skip: curl not found"; exit 0; }
 CAPTAIN="captain@example.com"
 SERVER_PID=""
 BROWSER_PROXY_PID=""
+BROWSER_PID=""
 
 cleanup() {
+  [ -z "$BROWSER_PID" ] || kill "$BROWSER_PID" 2>/dev/null || true
   [ -z "$BROWSER_PROXY_PID" ] || kill "$BROWSER_PROXY_PID" 2>/dev/null || true
   [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+  [ -z "$BROWSER_PID" ] || wait "$BROWSER_PID" 2>/dev/null || true
+  [ -z "$BROWSER_PROXY_PID" ] || wait "$BROWSER_PROXY_PID" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -1400,7 +1404,7 @@ test_acknowledgment_stacks_at_narrow_viewports() {
 }
 
 test_served_recommendation_fits_a_390px_browser() {
-  local browser_port chrome chrome_pid debug_port result tries=0
+  local browser_port chrome debug_port result tries=0
   chrome=$(find_chrome) || {
     pass "390px served recommendation browser check skipped because Chrome is unavailable"
     return
@@ -1447,10 +1451,10 @@ JS
     --remote-debugging-port="$debug_port" \
     --user-data-dir="$TMP_ROOT/chrome-390-profile" \
     "http://127.0.0.1:$browser_port/" >/dev/null 2>&1 &
-  chrome_pid=$!
+  BROWSER_PID=$!
   tries=0
   while ! curl -sf "http://127.0.0.1:$debug_port/json/list" >/dev/null 2>&1; do
-    kill -0 "$chrome_pid" 2>/dev/null || fail "Chrome stopped before its DevTools endpoint was ready"
+    kill -0 "$BROWSER_PID" 2>/dev/null || fail "Chrome stopped before its DevTools endpoint was ready"
     [ "$tries" -lt 100 ] || fail "Chrome DevTools endpoint did not become ready"
     sleep 0.1
     tries=$((tries + 1))
@@ -1485,11 +1489,23 @@ await command("Page.reload", { ignoreCache: true });
 const evaluated = await command("Runtime.evaluate", {
   awaitPromise: true,
   returnByValue: true,
-  expression: `new Promise((resolve) => {
+  expression: `new Promise((resolve, reject) => {
+    const deadline = performance.now() + 5000;
     const inspect = () => {
       const next = document.querySelector(".brief-next");
       const send = document.querySelector(".brief-next-control .fmdash-send");
-      if (!next || !send) { setTimeout(inspect, 25); return; }
+      if (!next || !send) {
+        if (performance.now() >= deadline) {
+          const missing = [
+            !next && ".brief-next",
+            !send && ".brief-next-control .fmdash-send",
+          ].filter(Boolean);
+          reject(new Error("missing layout selector(s): " + missing.join(", ")));
+          return;
+        }
+        setTimeout(inspect, 25);
+        return;
+      }
       requestAnimationFrame(() => requestAnimationFrame(() => {
         const nodes = [next, ...next.querySelectorAll("*")];
         const contained = nodes.every((node) => {
@@ -1509,12 +1525,16 @@ const evaluated = await command("Runtime.evaluate", {
     inspect();
   })`,
 });
+if (evaluated.exceptionDetails) {
+  throw new Error(evaluated.exceptionDetails.exception?.description || evaluated.exceptionDetails.text);
+}
 socket.close();
 process.stdout.write(JSON.stringify(evaluated.result.value));
 JS
   ) || fail "Chrome DevTools 390px layout probe failed"
-  kill "$chrome_pid" 2>/dev/null || true
-  wait "$chrome_pid" 2>/dev/null || true
+  kill "$BROWSER_PID" 2>/dev/null || true
+  wait "$BROWSER_PID" 2>/dev/null || true
+  BROWSER_PID=""
   kill "$BROWSER_PROXY_PID" 2>/dev/null || true
   wait "$BROWSER_PROXY_PID" 2>/dev/null || true
   BROWSER_PROXY_PID=""
