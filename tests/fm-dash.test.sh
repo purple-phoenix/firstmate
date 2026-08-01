@@ -18,12 +18,35 @@ command -v curl >/dev/null 2>&1 || { echo "skip: curl not found"; exit 0; }
 
 CAPTAIN="captain@example.com"
 SERVER_PID=""
+BROWSER_PROXY_PID=""
 
 cleanup() {
+  [ -z "$BROWSER_PROXY_PID" ] || kill "$BROWSER_PROXY_PID" 2>/dev/null || true
   [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
+
+find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
 make_fixture() {
   local home=$1 snapshot=$2 environment=$3
@@ -1376,6 +1399,135 @@ test_acknowledgment_stacks_at_narrow_viewports() {
   pass "acknowledged prompts stack in one explicit column at narrow viewports"
 }
 
+test_served_recommendation_fits_a_390px_browser() {
+  local browser_port chrome chrome_pid debug_port result tries=0
+  chrome=$(find_chrome) || {
+    pass "390px served recommendation browser check skipped because Chrome is unavailable"
+    return
+  }
+  browser_port=$(pick_port)
+  node - "$PORT" "$browser_port" "$CAPTAIN" <<'JS' &
+const http = require("node:http");
+const [upstreamPort, proxyPort, login] = process.argv.slice(2);
+http.createServer((request, response) => {
+  const upstream = http.request({
+    host: "127.0.0.1",
+    port: upstreamPort,
+    method: request.method,
+    path: request.url,
+    headers: { ...request.headers, host: `127.0.0.1:${upstreamPort}`, "Tailscale-User-Login": login },
+  }, (incoming) => {
+    const chunks = [];
+    incoming.on("data", (chunk) => chunks.push(chunk));
+    incoming.on("end", () => {
+      const body = Buffer.concat(chunks);
+      const headers = { ...incoming.headers };
+      response.writeHead(incoming.statusCode || 502, headers);
+      response.end(body);
+    });
+  });
+  upstream.on("error", () => {
+    response.writeHead(502, { "content-type": "text/plain" });
+    response.end("upstream unavailable");
+  });
+  request.pipe(upstream);
+}).listen(Number(proxyPort), "127.0.0.1");
+JS
+  BROWSER_PROXY_PID=$!
+  while ! curl -sf "http://127.0.0.1:$browser_port/healthz" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "authorized browser fixture proxy did not start"
+    sleep 0.1
+  done
+  debug_port=$(pick_port)
+  "$chrome" \
+    --headless=new \
+    --disable-gpu \
+    --no-sandbox \
+    --remote-debugging-port="$debug_port" \
+    --user-data-dir="$TMP_ROOT/chrome-390-profile" \
+    "http://127.0.0.1:$browser_port/" >/dev/null 2>&1 &
+  chrome_pid=$!
+  tries=0
+  while ! curl -sf "http://127.0.0.1:$debug_port/json/list" >/dev/null 2>&1; do
+    kill -0 "$chrome_pid" 2>/dev/null || fail "Chrome stopped before its DevTools endpoint was ready"
+    [ "$tries" -lt 100 ] || fail "Chrome DevTools endpoint did not become ready"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  result=$(node --experimental-websocket --input-type=module - "$debug_port" <<'JS'
+const port = process.argv[2];
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((entry) => entry.type === "page");
+if (!target) process.exit(1);
+const socket = new WebSocket(target.webSocketDebuggerUrl);
+await new Promise((resolve, reject) => {
+  socket.addEventListener("open", resolve, { once: true });
+  socket.addEventListener("error", reject, { once: true });
+});
+let sequence = 0;
+const pending = new Map();
+socket.addEventListener("message", (event) => {
+  const message = JSON.parse(event.data);
+  if (!message.id || !pending.has(message.id)) return;
+  const { resolve, reject } = pending.get(message.id);
+  pending.delete(message.id);
+  if (message.error) reject(new Error(message.error.message));
+  else resolve(message.result);
+});
+const command = (method, params = {}) => new Promise((resolve, reject) => {
+  const id = ++sequence;
+  pending.set(id, { resolve, reject });
+  socket.send(JSON.stringify({ id, method, params }));
+});
+await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+await command("Page.reload", { ignoreCache: true });
+const evaluated = await command("Runtime.evaluate", {
+  awaitPromise: true,
+  returnByValue: true,
+  expression: `new Promise((resolve) => {
+    const inspect = () => {
+      const next = document.querySelector(".brief-next");
+      const send = document.querySelector(".brief-next-control .fmdash-send");
+      if (!next || !send) { setTimeout(inspect, 25); return; }
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const nodes = [next, ...next.querySelectorAll("*")];
+        const contained = nodes.every((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.left >= -1 && rect.right <= window.innerWidth + 1;
+        });
+        const oneColumn = getComputedStyle(next).gridTemplateColumns.trim().split(/\\s+/).length === 1;
+        resolve({
+          actionReady: send.textContent === "Approve & send",
+          contained,
+          noPageOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+          oneColumn,
+          width: window.innerWidth,
+        });
+      }));
+    };
+    inspect();
+  })`,
+});
+socket.close();
+process.stdout.write(JSON.stringify(evaluated.result.value));
+JS
+  ) || fail "Chrome DevTools 390px layout probe failed"
+  kill "$chrome_pid" 2>/dev/null || true
+  wait "$chrome_pid" 2>/dev/null || true
+  kill "$BROWSER_PROXY_PID" 2>/dev/null || true
+  wait "$BROWSER_PROXY_PID" 2>/dev/null || true
+  BROWSER_PROXY_PID=""
+  printf '%s' "$result" | jq -e '
+    .width == 390
+    and .oneColumn == true
+    and .contained == true
+    and .noPageOverflow == true
+    and .actionReady == true
+  ' >/dev/null || fail "served Recommended next row or existing action control failed at 390px: $result"
+  pass "served Recommended next and its existing action path fit a 390px browser viewport"
+}
+
 test_service_contract_docs_and_ownership() {
   assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
   assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
@@ -1422,6 +1574,7 @@ test_installer_tracks_custom_serve_port
 test_launchd_env_and_degraded_render_selfcheck
 test_served_page_has_zero_copy_affordances
 test_acknowledgment_stacks_at_narrow_viewports
+test_served_recommendation_fits_a_390px_browser
 test_service_contract_docs_and_ownership
 
 echo "fm-dash tests passed"

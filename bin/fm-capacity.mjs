@@ -2252,6 +2252,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
       return activityPriority(a.record.activity) - activityPriority(b.record.activity) || a.index - b.index;
     })
     .map(({ record }) => record);
+  const interventionDependentCards = pipeline.blocked.filter((card) => card.wait?.class !== "self_clearing");
 
   const model = {
     schema: "fm-capacity.v1",
@@ -2291,8 +2292,8 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
         items: activePeople,
       },
       stuck_work: {
-        count: pipeline.blocked.length,
-        items: pipeline.blocked,
+        count: interventionDependentCards.length,
+        items: interventionDependentCards,
       },
       shipped: {
         count: pipeline.recently_landed.length,
@@ -2482,8 +2483,12 @@ function severityFor(model) {
   return "neutral";
 }
 
+function copyPromptButton(rec) {
+  return `<button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button>`;
+}
+
 function copyPrompt(rec) {
-  return `<div class="prompt"><code>${h(rec.prompt)}</code><button type="button" data-copy="${h(rec.prompt)}" aria-label="Copy ${h(rec.id)} follow-up prompt">Copy prompt</button></div>`;
+  return `<div class="prompt"><code>${h(rec.prompt)}</code>${copyPromptButton(rec)}</div>`;
 }
 
 function renderHtml(model) {
@@ -2565,6 +2570,11 @@ function renderHtml(model) {
   const briefShippedRows = brief.shipped.items.map((card) => `<li><span><strong class="item-id">${h(card.id)}</strong><small>${h(card.owner)}${card.repo ? ` · ${h(card.repo)}` : ""}</small></span><span>${h(card.reason)}${card.artifact ? artifact(card.artifact) : ""}</span></li>`);
   const briefShippedPrimary = briefShippedRows.slice(0, 1).join("");
   const briefShippedMore = briefShippedRows.slice(1).join("");
+  const briefRecommendedNext = primaryRec ? `<aside class="brief-next" aria-labelledby="brief-next-title">
+      <p class="brief-question" id="brief-next-title">Recommended next <span class="action-id">${h(primaryRec.id)}</span></p>
+      <p class="brief-next-action"><strong>${h(primaryRec.recommended_next_action)}</strong><small>${h(primaryRec.safety_authority_boundary)}</small></p>
+      <div class="brief-next-control">${copyPromptButton(primaryRec)}</div>
+    </aside>` : "";
 
   const blockedReasonCounts = new Map();
   for (const card of otherBlockedCards) {
@@ -2709,6 +2719,8 @@ function renderHtml(model) {
     .brief-list li>*{min-width:0}.brief-list small{display:block;color:var(--muted);font-size:.68rem;margin-top:.08rem}
     .brief-list .activity-working{color:var(--good)}.brief-list .activity-validating{color:var(--blue)}.brief-list .activity-waiting_on_ci{color:var(--warn)}.brief-list .activity-waiting_on_decision{color:var(--serious)}.brief-list .activity-unavailable{color:var(--crit)}
     .brief-more{min-width:0}.brief-more summary{cursor:pointer;color:var(--muted);font-size:.7rem;font-weight:700;padding-top:.2rem}.brief-more[open] summary{margin-bottom:.2rem}
+    .brief-next{display:grid;grid-template-columns:minmax(7rem,.25fr) minmax(0,1fr) auto;gap:.65rem 1rem;align-items:center;min-width:0;margin-top:.75rem;border:1px solid color-mix(in srgb,var(--blue) 45%,var(--hair));padding:.65rem .8rem}
+    .brief-next .action-id{margin-left:.35rem}.brief-next-action{min-width:0;font-size:.86rem}.brief-next-action small{display:block;color:var(--muted);font-size:.7rem;margin-top:.15rem}.brief-next-control{min-width:0}.brief-next-control button{border:1px solid var(--ink);background:var(--ink);color:var(--bg);font-weight:700;padding:.45rem .75rem;cursor:pointer;font-size:.78rem;white-space:nowrap}
     .dashboard-nav{display:flex;gap:.35rem;flex-wrap:wrap;padding:.65rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
     .dashboard-nav a{color:var(--ink2);font-size:.78rem;font-weight:750;text-decoration:none;border:1px solid var(--hair);padding:.38rem .75rem}
     .dashboard-nav a[aria-current="page"]{color:var(--bg);background:var(--ink);border-color:var(--ink)}
@@ -2825,7 +2837,7 @@ function renderHtml(model) {
     .parking .mreason,.parked-copy{color:var(--muted)}
     footer{padding:1.4rem clamp(1rem,6vw,5rem) 2rem;color:var(--muted);border-top:1px solid var(--line);font-size:.76rem}
     footer p{max-width:70rem;margin:.3rem auto}
-    @media(max-width:760px){.band{padding:1.25rem 1rem}.dashboard-nav{padding:.55rem 1rem;gap:.3rem}.dashboard-nav a{flex:1 1 auto;text-align:center;padding:.35rem .5rem}.band-brief{padding:.8rem;min-height:auto}.brief-title{font-size:1.55rem}.brief-intro{display:none}.brief-grid{grid-template-columns:1fr;gap:.45rem;margin-top:.65rem}.brief-card{padding:.58rem .7rem;gap:.28rem}.brief-question{font-size:.6rem}.brief-answer .n{font-size:1.55rem}.brief-answer h2{font-size:.88rem}.brief-rollup,.brief-basis{font-size:.68rem}.brief-card .rollcall li{grid-template-columns:3.75rem minmax(0,1fr);padding:.25rem 0}.brief-card .rollcall li .why{display:block;grid-column:1/-1;padding-left:0}.brief-card>.rollcall .who,.brief-card>.brief-list .item-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brief-list li{padding:.25rem 0}.brief-more summary{font-size:.66rem}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
+    @media(max-width:760px){.band{padding:1.25rem 1rem}.dashboard-nav{padding:.55rem 1rem;gap:.3rem}.dashboard-nav a{flex:1 1 auto;text-align:center;padding:.35rem .5rem}.band-brief{padding:.8rem;min-height:auto}.brief-title{font-size:1.55rem}.brief-intro{display:none}.brief-grid{grid-template-columns:1fr;gap:.45rem;margin-top:.65rem}.brief-card{padding:.58rem .7rem;gap:.28rem}.brief-question{font-size:.6rem}.brief-answer .n{font-size:1.55rem}.brief-answer h2{font-size:.88rem}.brief-rollup,.brief-basis{font-size:.68rem}.brief-card .rollcall li{grid-template-columns:3.75rem minmax(0,1fr);padding:.25rem 0}.brief-card .rollcall li .why{display:block;grid-column:1/-1;padding-left:0}.brief-card>.rollcall .who,.brief-card>.brief-list .item-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brief-list li{padding:.25rem 0}.brief-more summary{font-size:.66rem}.brief-next{grid-template-columns:minmax(0,1fr);gap:.35rem;padding:.55rem .7rem}.brief-next .action-id{margin-left:.25rem}.brief-next-control button{width:100%;white-space:normal}.rollcall li{grid-template-columns:4.4rem minmax(0,1fr)}.rollcall li .why{grid-column:2}.split{gap:.75rem 1.5rem}.split .num{font-size:2.6rem}.whys ul{gap:.9rem 1.5rem}.agents-head{display:none}.agent-row{grid-template-columns:minmax(7rem,.55fr) minmax(0,1fr)}.agent-activity,.agent-row time{grid-column:2}.mrow{grid-template-columns:minmax(0,1fr)}.mmeta{text-align:left}.lanes-grid,.appendix{grid-template-columns:1fr}.prompt{grid-template-columns:1fr}.prompt button{width:100%}.kicker{display:block}.kicker .stamp{display:block;text-align:left;margin-top:.3rem}}
     @media(max-width:360px){.band-brief .kicker .stamp{display:none}}
     @media print{body,html{background:#fff;color:#111}.band-alarm{background:#fff}.prompt button{display:none}a{color:#0645ad}}
   </style>
@@ -2861,7 +2873,7 @@ function renderHtml(model) {
         <article class="brief-card brief-card-stuck" id="blocked-items" aria-labelledby="blocked-items-title">
           <p class="brief-question">3 · Stuck work and root cause</p>
           <div class="brief-answer"><span class="n">${h(brief.stuck_work.count)}</span><h2 id="blocked-items-title">${brief.stuck_work.count === 1 ? "current item is stuck" : "current items are stuck"}</h2></div>
-          <div class="rollcall blocked-items"><ul>${briefStuckPrimary || `<li class="empty">No current work is blocked.</li>`}</ul></div>
+          <div class="rollcall blocked-items"><ul>${briefStuckPrimary || `<li class="empty">No current work requires intervention.</li>`}</ul></div>
           ${briefStuckMore ? `<details class="brief-more"><summary>Show ${h(briefStuckRows.length - 1)} more root cause${briefStuckRows.length === 2 ? "" : "s"}</summary><div class="rollcall blocked-items"><ul>${briefStuckMore}</ul></div></details>` : ""}
         </article>
         <article class="brief-card brief-card-shipped" aria-labelledby="shipped-title">
@@ -2871,6 +2883,7 @@ function renderHtml(model) {
           <details class="brief-more"><summary>${briefShippedMore ? `Show ${h(briefShippedRows.length - 1)} more completion${briefShippedRows.length === 2 ? "" : "s"} and count basis` : "About this count"}</summary>${briefShippedMore ? `<ul class="brief-list">${briefShippedMore}</ul>` : ""}<p class="brief-basis">${h(brief.shipped.basis)}</p></details>
         </article>
       </div>
+      ${briefRecommendedNext}
     </div></section>
     <section class="dashboard-page" id="work" data-dashboard-page="work" aria-labelledby="work-title" hidden>
       <header class="band page-intro"><div class="wrap"><h1 id="work-title">Work and flow</h1><p>Recommendations, waits, pipeline state, recurring work, parking, definition health, and landed history.</p></div></header>
