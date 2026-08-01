@@ -741,8 +741,139 @@ EOF
       and (.current.reason | contains("terminal child state"))
       and (.current.reason | contains("done=done"))
       and (.current.reason | contains("failed=failed"))
-  ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.summary_valid == false
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"terminal_in_flight",ids:["done","failed"]}
+  ' >/dev/null || fail "terminal in-flight child states were silently dropped or left the partial path: $canonical"
   pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
+}
+
+# Captain-visible dashboard regression: terminal_in_flight contradictions must not
+# discard independently trustworthy structured decisions or revive stale parent
+# events as no-context CAP rows (screenshot: q2-product-decisions + legacy-attributable).
+test_terminal_in_flight_keeps_structured_decisions_not_parent_events() {
+  local home fakebin mate canonical json
+  home=$(make_home terminal-partial-decisions)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/terminal-partial-astroai-home"
+  make_valid_secondmate_home astroai-mate "$mate"
+  append_secondmate_registry "$home" astroai-mate "$mate"
+  fm_write_secondmate_meta "$home/state/astroai-mate.meta" "$mate" "firstmate:fm-astroai-mate" sample
+  cat > "$home/state/astroai-mate.status" <<'EOF'
+needs-decision [key=q2-product-decisions]: choose Q2 product direction
+needs-decision [key=legacy-attributable]: choose legacy attribution policy
+EOF
+  mkdir -p "$mate/projects/done-a" "$mate/projects/done-b" \
+    "$mate/data/product-review/decisions" "$mate/data/attr-review/decisions"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] astroai-reading-freshness-surface-r4 - Reading freshness (repo: sample) (kind: ship)
+- [ ] light-variant-chart-wheel-on-the-technic-0b - Light variant chart (repo: sample) (kind: ship)
+
+## Queued
+- [ ] product-review-decision-q2 - Choose Q2 product decisions (repo: sample) (kind: captain) (hold: choose product A or B) (hold-kind: captain)
+  Origin: product-review
+  Decision key: q2-product-decisions
+- [ ] attr-review-decision-legacy - Choose legacy attribution (repo: sample) (kind: captain) (hold: choose attribution A or B) (hold-kind: captain)
+  Origin: attr-review
+  Decision key: legacy-attributable
+
+## Done
+EOF
+  cat > "$mate/data/product-review/decisions/q2-product-decisions.md" <<'EOF'
+# Q2 product decisions
+
+Choose how Q2 product work should prioritize.
+
+## Options
+- [recommended] Ship core funnel first - Lowest risk path that unblocks revenue measurement.
+- Expand surface area now - Higher delivery cost with more open product questions.
+EOF
+  cat > "$mate/data/attr-review/decisions/legacy-attributable.md" <<'EOF'
+# Legacy attributable policy
+
+Choose how legacy attributable traffic is treated.
+
+## Options
+- [recommended] Keep legacy channel mapping - Preserves historical reporting continuity.
+- Rebuild attribution from scratch - Cleaner model but breaks year-over-year comparability.
+EOF
+  fm_write_meta "$mate/state/astroai-reading-freshness-surface-r4.meta" \
+    "window=firstmate:fm-r4" "worktree=$mate/projects/done-a" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$mate/state/light-variant-chart-wheel-on-the-technic-0b.meta" \
+    "window=firstmate:fm-0b" "worktree=$mate/projects/done-b" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'done: complete\n' > "$mate/state/astroai-reading-freshness-surface-r4.status"
+  printf 'done: complete\n' > "$mate/state/light-variant-chart-wheel-on-the-technic-0b.status"
+
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "astroai-mate")
+    | .current.state == "unknown"
+      and (.current.reason | contains("terminal child state"))
+      and (.current.reason | contains("astroai-reading-freshness-surface-r4=done"))
+      and (.current.reason | contains("light-variant-chart-wheel-on-the-technic-0b=done"))
+      and .provenance.selected == "structured-home"
+      and .provenance.summary_valid == false
+      and .provenance.trust == "partial-structured"
+      and .invalidity.kind == "terminal_in_flight"
+      and ([.decisions_open[].key] | sort) == ["legacy-attributable","q2-product-decisions"]
+      and (.decisions_open[] | select(.key == "q2-product-decisions")
+        | .detail.available == true
+          and .detail.title == "Q2 product decisions"
+          and (.detail.context | contains("Q2 product work should prioritize"))
+          and (.detail.options | length) == 2
+          and (.detail.options[] | select(.recommended == true) | .text) == "Ship core funnel first")
+      and (.decisions_open[] | select(.key == "legacy-attributable")
+        | .detail.available == true
+          and .detail.title == "Legacy attributable policy"
+          and (.detail.context | contains("legacy attributable traffic"))
+          and (.detail.options | length) == 2
+          and (.detail.options[] | select(.recommended == true) | .text) == "Keep legacy channel mapping")
+      and (.parent_event.open_decisions | any(.key == "q2-product-decisions"))
+      and (.parent_event.open_decisions | any(.key == "legacy-attributable"))
+  ' >/dev/null || fail "terminal_in_flight lost structured decision detail or left partial path: $canonical"
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "astroai-mate/product-review-decision-q2"
+      and .key == "q2-product-decisions" and .owner == "astroai-mate" and .verb == "captain-hold"))
+      and (.decisions_open | any(.[]; .id == "astroai-mate/attr-review-decision-legacy"
+        and .key == "legacy-attributable" and .owner == "astroai-mate" and .verb == "captain-hold"))
+      and (.secondmates | any(.id == "astroai-mate" and .state == "unknown"
+        and (.reason | contains("terminal child state"))))
+  ' >/dev/null || fail "bearings projection dropped partial-home structured decisions: $json"
+
+  # Disconfirming case: orphan_in_flight remains strict (no structured surfaces).
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ordinary-orphan - Unowned release task (repo: sample) (kind: ship)
+
+## Queued
+- [ ] product-review-decision-q2 - Choose Q2 product decisions (repo: sample) (kind: captain) (hold: choose product A or B) (hold-kind: captain)
+  Origin: product-review
+  Decision key: q2-product-decisions
+
+## Done
+EOF
+  rm -f "$mate/state/astroai-reading-freshness-surface-r4.meta" \
+    "$mate/state/astroai-reading-freshness-surface-r4.status" \
+    "$mate/state/light-variant-chart-wheel-on-the-technic-0b.meta" \
+    "$mate/state/light-variant-chart-wheel-on-the-technic-0b.status"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "astroai-mate")
+    | .current.state == "unknown"
+      and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
+      and .provenance.selected != "structured-home"
+      and .decisions_open == []
+  ' >/dev/null || fail "orphan_in_flight no longer stayed strict after partial-structured allowlist: $canonical"
+  pass "terminal_in_flight keeps structured decision detail and does not revive parent events; orphan stays strict"
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {
@@ -1923,6 +2054,7 @@ test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
+test_terminal_in_flight_keeps_structured_decisions_not_parent_events
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only

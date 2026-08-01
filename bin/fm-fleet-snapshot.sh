@@ -65,7 +65,7 @@
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes with an unknown current classification are partial, not
-#     unreadable, and retain independently trustworthy structured surfaces.
+#     unreadable; docs/architecture.md owns the partial-structured trust contract.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -1304,9 +1304,13 @@ secondmate_current_json() {  # <parent-tasks-json>
           if [ "$summary_valid" != true ]; then
             summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
             summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
-            if [ "$summary_invalidity" != child_current_unavailable ]; then
-              reason="structured home state invalid: $summary_reason"
-            fi
+            # Partial-structured trust: docs/architecture.md "Registered secondmate
+            # current state" owns the allowlist. Keep independently trustworthy
+            # structured surfaces instead of falling back to parent events.
+            case "$summary_invalidity" in
+              child_current_unavailable|terminal_in_flight) : ;;
+              *) reason="structured home state invalid: $summary_reason" ;;
+            esac
           fi
         fi
       fi
