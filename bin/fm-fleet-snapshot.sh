@@ -65,9 +65,7 @@
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes with an unknown current classification are partial, not
-#     unreadable, and retain independently trustworthy structured surfaces when
-#     the invalidity is only child_current_unavailable or terminal_in_flight
-#     (docs/architecture.md owns that partial-structured allowlist).
+#     unreadable; docs/architecture.md owns the partial-structured trust contract.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
