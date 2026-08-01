@@ -1043,6 +1043,9 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_grep '>2 · Active people and current activity<' "$output" "dashboard lacks the second captain question"
   assert_grep '>3 · Stuck work and root cause<' "$output" "dashboard lacks the third captain question"
   assert_grep '>4 · Recent completions in this bounded reading<' "$output" "dashboard lacks the honest bounded fourth captain question"
+  assert_grep 'class="brief-next"' "$output" "captain brief lacks the projected primary recommendation"
+  assert_grep '>Recommended next <span class="action-id">CAP-' "$output" "captain brief recommendation lacks the existing stable action ID"
+  assert_grep 'class="brief-next-control"><button type="button" data-copy="Approve CAP-' "$output" "captain brief recommendation bypasses the existing stable action path"
   assert_no_grep 'since your last reading' "$output" "dashboard fabricates a visit-relative completion window"
   assert_grep 'aria-label="Dashboard pages"' "$output" "dashboard lacks focused page navigation"
   assert_grep 'data-dashboard-page="brief"' "$output" "dashboard lacks its captain brief page"
@@ -1054,6 +1057,8 @@ test_html_is_private_escaped_accessible_and_responsive() {
   assert_grep '.band-brief{padding:.8rem;min-height:auto}' "$output" "mobile brief reserves a full extra viewport below the service bar"
   assert_grep '@media(max-width:360px){.band-brief .kicker .stamp{display:none}}' "$output" "320px brief does not reclaim the optional timestamp row"
   assert_grep '.brief-card{padding:.58rem .7rem' "$output" "captain brief lacks compact narrow-viewport cards"
+  assert_grep '.brief-next{grid-template-columns:minmax(0,1fr)' "$output" "recommended next does not stack at the 390px viewport standard"
+  assert_grep '.brief-next-control button{width:100%;white-space:normal}' "$output" "recommended next action can overflow at 390px"
   assert_grep '.brief-card .rollcall li .why{display:block;grid-column:1/-1' "$output" "mobile brief hides root causes or decision controls"
   assert_no_grep '.brief-card .rollcall li .why{display:none}' "$output" "mobile brief still hides root causes and decision controls"
   assert_grep '<div class="rollcall needs-you"><ul><li data-your-go-ref=' "$output" "the visible primary action lacks its direct interaction anchor"
@@ -1431,6 +1436,10 @@ test_wait_classes_render_distinct_treatments() {
       and .wait.kind == "dependency"
       and ((.waits_on | join(" ")) | contains("currently working"))))
     and (.pipeline.blocked | all(.wait.class == "self_clearing" or .wait.class == "needs_actor"))
+    and (.captain_brief.stuck_work.items | length) > 0
+    and (.captain_brief.stuck_work.items | all(.wait.class != "self_clearing"))
+    and .captain_brief.stuck_work.count == ([.pipeline.blocked[] | select(.wait.class != "self_clearing")] | length)
+    and ([.pipeline.blocked[] | select(.wait.class == "self_clearing")] | length) > 0
   ' >/dev/null || fail "wait classifications are wrong: $json"
   html=$(cat "$output")
   assert_contains "$html" 'id="selfwait-items"' "dashboard lacks the calm self-clearing wait group"
@@ -1444,10 +1453,49 @@ test_wait_classes_render_distinct_treatments() {
   assert_contains "$html" 'time unknown' "a no-history wait does not admit its unknown duration"
   assert_contains "$html" 'wbar-unknown' "a no-history wait renders a determinate bar"
   assert_contains "$html" 'waiting on their own' "the waiting breakdown lacks the self-clearing line"
+  assert_contains "$html" 'id="stage-blocked"' "self-clearing waits left the Work manifest"
   case "$html" in
     *'% done'*) fail "a wait with no recorded history fabricated a percentage" ;;
   esac
   pass "self-clearing and needs-actor waits render distinct honest treatments"
+}
+
+test_brief_stuck_excludes_self_clearing_work_and_reuses_primary_action() {
+  local home="$TMP_ROOT/brief-self-clearing-home" snapshot="$TMP_ROOT/brief-self-clearing-snapshot.json"
+  local environment="$TMP_ROOT/brief-self-clearing-environment.json" output="$TMP_ROOT/brief-self-clearing-home/data/brief-self-clearing.html" json
+  make_fixture "$home" "$snapshot" "$environment"
+  jq '
+    .backlog.records = [
+      {"order":0,"state":"in_flight","structured":true,"id":"automatic-wait","title":"Wait for the release window","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-20","body_excerpt":"Acceptance criteria: release window opens."}
+    ]
+    | .tasks = [
+      {"id":"automatic-wait","kind":"ship","project":"alpha","current_state":{"state":"paused","source":"status-fold","detail":"upstream release window"},"endpoint":{"exists":true,"agent_alive":"not_checked"},"hints":{"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}},"backlog":{"id":"automatic-wait","title":"Wait for the release window","repo":"alpha","project_resolved":true,"kind":"ship","since":"2026-07-20"}}
+    ]
+    | .secondmate_current = {"registry":{"available":true,"complete":true,"records":[]},"records":[],"total":0,"shown":0,"truncated":0}
+  ' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  json=$("$CAPACITY" --json --snapshot "$snapshot" --environment "$environment" --output "$output") ||
+    fail "self-clearing brief capacity run failed"
+  printf '%s' "$json" | jq -e '
+    (.pipeline.blocked | length) == 1
+    and .pipeline.blocked[0].wait.class == "self_clearing"
+    and .captain_brief.stuck_work.count == 0
+    and .captain_brief.stuck_work.items == []
+    and .primary_bottleneck.id == "CAP-05"
+    and (.captain_brief | has("recommended_next") | not)
+  ' >/dev/null || fail "brief stuck projection or model schema changed incorrectly: $json"
+  assert_grep 'No current work requires intervention.' "$output" "brief calls a self-clearing wait stuck"
+  assert_grep 'id="selfwait-items"' "$output" "self-clearing wait disappeared from the Work page"
+  assert_grep 'id="stage-blocked"' "$output" "self-clearing wait disappeared from the Work manifest"
+  node - "$output" <<'JS' || fail "brief recommendation did not reuse the exact primary CAP action path"
+const html = require("node:fs").readFileSync(process.argv[2], "utf8");
+const row = html.match(/<aside class="brief-next"[\s\S]*?<\/aside>/)?.[0] || "";
+if (!row.includes("CAP-05")) process.exit(1);
+if (!row.includes("Review the highest-impact gate and only mark work independent when evidence supports it.")) process.exit(1);
+const prompts = [...html.matchAll(/data-copy="([^"]*CAP-05[^"]*)"/g)].map((match) => match[1]);
+if (prompts.length !== 2 || new Set(prompts).size !== 1) process.exit(1);
+JS
+  pass "brief excludes self-clearing waits and projects only the existing primary stable action"
 }
 
 test_captain_gated_pauses_need_action_without_eta() {
@@ -1921,7 +1969,7 @@ test_captain_brief_reuses_canonical_model_truth() {
     | [.captain_brief.needs_action.items[] | select(.kind == "decision" and .work_ref != null)] as $projected_decisions
     | [.captain_brief.needs_action.items[] | select(.kind == "decision" and .work_ref == null)] as $fallback_decisions
     | [.captain_brief.stuck_work.items[].id] as $brief_stuck
-    | [.pipeline.blocked[].id] as $pipeline_stuck
+    | [.pipeline.blocked[] | select(.wait.class != "self_clearing") | .id] as $pipeline_stuck
     | [.captain_brief.shipped.items[].id] as $brief_shipped
     | [.pipeline.recently_landed[].id] as $pipeline_shipped
     | [.captain_brief.active_people.items[] | select(.role == "worker") | .task] as $worker_tasks
@@ -1931,7 +1979,8 @@ test_captain_brief_reuses_canonical_model_truth() {
       and ($fallback_decisions | length) == 1
       and ($fallback_decisions[0].reason | contains("unavailable"))
       and ($brief_stuck == $pipeline_stuck)
-      and .captain_brief.stuck_work.count == (.pipeline.blocked | length)
+      and .captain_brief.stuck_work.count == ([.pipeline.blocked[] | select(.wait.class != "self_clearing")] | length)
+      and (.captain_brief.stuck_work.items | all(.wait.class != "self_clearing"))
       and ($brief_shipped == $pipeline_shipped)
       and .captain_brief.shipped.count == (.pipeline.recently_landed | length)
       and ($worker_tasks | all(. as $id | ([$current[] | select(. == $id)] | length) == 1))
@@ -2133,6 +2182,7 @@ test_live_agents_render_working_idle_and_unavailable_states
 test_current_identity_appears_in_one_stage
 test_captain_brief_prioritizes_active_people
 test_captain_brief_reuses_canonical_model_truth
+test_brief_stuck_excludes_self_clearing_work_and_reuses_primary_action
 test_delivery_gates_reconcile_forge_state
 test_merged_pr_current_task_truth_is_shared
 test_blocked_total_matches_manifest_truth

@@ -37,7 +37,7 @@ render_run_name() {
 }
 
 test_signature_sequence_at_fixed_head() {
-  signature_result "Synthetic body\n$MARKER" || fail "signed opened event must succeed"
+  signature_result "Synthetic body\n\n## Pipeline\n\n$MARKER" || fail "signed opened event must succeed"
   if signature_result 'Synthetic unsigned edit'; then
     fail "unsigned edited event must fail"
   fi
