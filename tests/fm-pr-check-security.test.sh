@@ -2618,8 +2618,10 @@ test_teardown_removes_poll_artifacts() {
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'committed outage\n' > "$dir/home/state/task-a.preview-outage"
   printf 'pending outage\n' > "$dir/home/state/task-a.preview-outage-pending"
+  printf 'unconfirmed failure\n' > "$dir/home/state/task-a.preview-suspect"
   chmod 0600 "$dir/home/state/task-a.preview-outage" \
-    "$dir/home/state/task-a.preview-outage-pending"
+    "$dir/home/state/task-a.preview-outage-pending" \
+    "$dir/home/state/task-a.preview-suspect"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
@@ -2641,6 +2643,8 @@ SH
   [ ! -e "$dir/home/state/task-a.preview-outage" ] || fail "teardown left the preview outage marker"
   [ ! -e "$dir/home/state/task-a.preview-outage-pending" ] \
     || fail "teardown left the pending preview outage"
+  [ ! -e "$dir/home/state/task-a.preview-suspect" ] \
+    || fail "teardown left the unconfirmed preview failure record"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
@@ -2701,7 +2705,7 @@ SH
   [ "$(cat "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123")" = 'noncanonical evidence' ] \
     || fail "teardown removed noncanonical quarantine evidence"
 
-  for artifact in check.sh pr-poll preview-outage preview-outage-pending; do
+  for artifact in check.sh pr-poll preview-outage preview-outage-pending preview-suspect; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \

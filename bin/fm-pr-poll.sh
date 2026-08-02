@@ -4,12 +4,29 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
+# A link that fails that first budget is retried once at two-second connect and
+# five-second total timeouts, because a loaded host can push an otherwise healthy
+# tailnet round trip past the first budget while the service answers in
+# milliseconds. Both budgets are fixed, and preview probing stops without a
+# verdict once it passes PREVIEW_DEADLINE_SECS, which keeps the work inside the
+# watcher's per-check ceiling instead of trading one wrong alert for an
+# unbounded wait.
+# A link still failing after the retry is corroborated once against local
+# evidence bound to that exact captain-facing authority: the loopback proxy
+# target Tailscale currently serves for it must answer 200 with a body on the
+# same path. Corroboration only defers - it records the failure and stays silent
+# for one check interval - so the next failing poll wakes firstmate anyway. A
+# missing or non-loopback serve mapping, an unreadable mapping, or a loopback
+# target that does not answer alerts on the first failing poll instead.
 # A newly detected failed preview emits one line naming the task and PR; the
 # committed failed-link identity suppresses repeats until recovery or link change.
 # Every other error is silent, so a failed forge lookup can never be read as a
 # merge or dead preview.
 # Preview probes resolve the link host directly to this machine's Tailscale IPv4
 # address and never follow redirects, so they cannot escape to public services.
+# The corroborating probe is accepted only against a http://127.0.0.1:<port>
+# target read fresh from tailscale serve on every poll, so local evidence can
+# never be borrowed from another preview or a stale mapping.
 # The provider-tagged identity is data in the sidecar and is never interpolated
 # into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
@@ -17,6 +34,21 @@
 set -u
 LC_ALL=C
 export LC_ALL
+
+# Probe budgets. The first pair is the captain-facing fast path; the second is
+# the single bounded retry that absorbs a loaded tailnet round trip. The
+# deadline covers preview probing only, measured from a baseline this script
+# sets itself. It is checked before the retry and before corroboration, so the
+# longest probing run is the deadline plus one of those steps, which leaves the
+# forge read headroom under the default 30-second FM_CHECK_TIMEOUT.
+PREVIEW_CONNECT_SECS=1
+PREVIEW_MAX_SECS=2
+PREVIEW_RETRY_CONNECT_SECS=2
+PREVIEW_RETRY_MAX_SECS=5
+PREVIEW_LOCAL_CONNECT_SECS=1
+PREVIEW_LOCAL_MAX_SECS=2
+PREVIEW_TAILSCALE_SECS=3
+PREVIEW_DEADLINE_SECS=18
 
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
@@ -66,9 +98,11 @@ task_valid() {
 
 preview_marker=
 preview_pending=
+preview_suspect=
 if task_valid "$task" && [ -d "$preview_state" ] && [ ! -L "$preview_state" ]; then
   preview_marker=$preview_state/$task.preview-outage
   preview_pending=$preview_state/$task.preview-outage-pending
+  preview_suspect=$preview_state/$task.preview-suspect
 fi
 
 tailnet_ipv4_valid() {
@@ -82,6 +116,9 @@ tailnet_ipv4_valid() {
     && [ "$c" -le 255 ] && [ "$d" -le 255 ]
 }
 
+# Recovery, a link change, and every non-open-ready PR state retire the whole
+# preview record for this task, including the unconfirmed-failure record, so a
+# later failure starts from a clean slate rather than inheriting an old verdict.
 preview_outage_clear() {
   [ -n "$preview_marker" ] || return 0
   if [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ]; then
@@ -90,6 +127,166 @@ preview_outage_clear() {
   if [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ]; then
     rm -f -- "$preview_pending" 2>/dev/null || true
   fi
+  if [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ]; then
+    rm -f -- "$preview_suspect" 2>/dev/null || true
+  fi
+}
+
+# True when this exact PR and preview link already failed a previous poll while
+# local evidence still corroborated them. That is the second consecutive
+# captain-facing failure, so the deferral is spent and the wake is due.
+preview_record_matches() {
+  local record=$1 failed_link=$2 recorded_url recorded_link
+  [ -n "$record" ] || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  {
+    IFS= read -r recorded_url || return 1
+    IFS= read -r recorded_link || [ -n "$recorded_link" ] || return 1
+  } < "$record" 2>/dev/null
+  [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
+}
+
+preview_suspect_matches() {
+  preview_record_matches "$preview_suspect" "$1"
+}
+
+preview_pending_matches() {
+  preview_record_matches "$preview_pending" "$1"
+}
+
+preview_outage_clear_changed() {
+  local failed_link=$1
+  if { [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ] \
+      && ! preview_record_matches "$preview_marker" "$failed_link"; } \
+    || { [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ] \
+      && ! preview_record_matches "$preview_pending" "$failed_link"; } \
+    || { [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ] \
+      && ! preview_record_matches "$preview_suspect" "$failed_link"; }; then
+    preview_outage_clear
+  fi
+}
+
+preview_suspect_record() {
+  local failed_link=$1 tmp
+  [ -n "$preview_suspect" ] || return 1
+  if { [ -e "$preview_suspect" ] || [ -L "$preview_suspect" ]; } \
+    && { [ ! -f "$preview_suspect" ] || [ -L "$preview_suspect" ]; }; then
+    return 1
+  fi
+  umask 077
+  tmp=$(mktemp "$preview_state/.fm-preview-suspect.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$url" "$failed_link" > "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$preview_suspect"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Run a read-only local command under a wall clock when a timeout tool is
+# installed. Without one the watcher's FM_CHECK_TIMEOUT ceiling stays the only
+# bound, which is why no probe budget below depends on this helper alone.
+preview_bounded() {
+  local secs=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# One bounded HTTP probe: success is exactly a 200 carrying a body, matching the
+# captain's own definition of a usable preview. Extra curl arguments, such as
+# the tailnet --resolve pin, are passed through ahead of the fixed budget.
+preview_http_ok() {
+  local connect=$1 max=$2 target=$3 result code bytes
+  shift 3
+  result=$(curl -q --noproxy '*' "$@" \
+    --connect-timeout "$connect" --max-time "$max" -sS -o /dev/null \
+    -w '%{http_code} %{size_download}' "$target" 2>/dev/null) || result='000 0'
+  case "$result" in
+    *' '*) code=${result%% *}; bytes=${result#* } ;;
+    *) code=000; bytes=0 ;;
+  esac
+  case "$code" in
+    [0-9][0-9][0-9]) ;;
+    *) code=000 ;;
+  esac
+  case "$bytes" in
+    ''|*[!0-9]*) bytes=0 ;;
+  esac
+  [ "$code" = 200 ] && [ "$bytes" -gt 0 ]
+}
+
+# Echo the loopback proxy target Tailscale currently serves for exactly this
+# preview authority. The mapping is read fresh on every poll and matched on the
+# full host:port with a whole-authority "/" handler, so evidence can never be
+# borrowed from another preview, a sub-path mount, or a remembered mapping.
+preview_serve_target() {
+  local want=$1 serve line authority current='' handler rest target
+  serve=$(preview_bounded "$PREVIEW_TAILSCALE_SECS" tailscale serve status 2>/dev/null) \
+    || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      https://*)
+        authority=${line#https://}
+        authority=${authority%%[[:space:]]*}
+        authority=${authority%%/*}
+        case "$authority" in
+          *:*) ;;
+          *) authority=$authority:443 ;;
+        esac
+        current=$authority
+        ;;
+      '|--'*)
+        [ "$current" = "$want" ] || continue
+        rest=${line#'|--'}
+        rest=${rest#"${rest%%[![:space:]]*}"}
+        handler=${rest%%[[:space:]]*}
+        [ "$handler" = / ] || continue
+        rest=${rest#"$handler"}
+        rest=${rest#"${rest%%[![:space:]]*}"}
+        case "$rest" in
+          proxy[[:space:]]*) ;;
+          *) continue ;;
+        esac
+        target=${rest#proxy}
+        target=${target#"${target%%[![:space:]]*}"}
+        target=${target%%[[:space:]]*}
+        printf '%s\n' "$target"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$serve
+EOF
+  return 1
+}
+
+# Evidence against alerting on one slow captain-facing probe, never evidence
+# that an unreachable preview URL is healthy: it buys a single check interval.
+# A missing, non-loopback, or unreadable mapping and a loopback target that does
+# not answer all count as no corroboration, so the alert stays prompt whenever
+# the local side is genuinely gone, replaced, or unmapped.
+preview_local_evidence() {
+  local preview_host=$1 port=$2 link_path=$3 target local_port
+  target=$(preview_serve_target "$preview_host:$port") || return 1
+  case "$target" in
+    http://127.0.0.1:*) ;;
+    *) return 1 ;;
+  esac
+  local_port=${target##*:}
+  case "$local_port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$local_port" -ge 1 ] && [ "$local_port" -le 65535 ] || return 1
+  preview_http_ok "$PREVIEW_LOCAL_CONNECT_SECS" "$PREVIEW_LOCAL_MAX_SECS" \
+    "$target$link_path"
 }
 
 preview_outage_stage_new() {
@@ -121,7 +318,7 @@ preview_outage_stage_new() {
 
 probe_previews() {
   local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
-  local result code bytes count
+  local link_path count
   task_valid "$task" || return 0
   links=$(printf '%s\n' "$body" \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
@@ -133,7 +330,8 @@ probe_previews() {
   fi
   command -v curl >/dev/null 2>&1 || return 0
   command -v tailscale >/dev/null 2>&1 || return 0
-  local_tailnet_ip=$(tailscale ip -4 2>/dev/null) || return 0
+  local_tailnet_ip=$(preview_bounded "$PREVIEW_TAILSCALE_SECS" tailscale ip -4 2>/dev/null) \
+    || return 0
   tailnet_ipv4_valid "$local_tailnet_ip" || return 0
   tailnet_ip=$local_tailnet_ip
   if [ -n "${FM_PREVIEW_TAILNET_IP:-}" ]; then
@@ -141,12 +339,21 @@ probe_previews() {
     tailnet_ip=$FM_PREVIEW_TAILNET_IP
   fi
 
+  # Own the probe deadline's baseline rather than inheriting one: bash adopts an
+  # environment SECONDS, and an inherited value would silently skip every probe
+  # below instead of bounding it.
+  SECONDS=0
   count=0
   while IFS= read -r link; do
     [ -n "$link" ] || continue
     count=$((count + 1))
     [ "$count" -le 8 ] || break
     authority=${link#https://}
+    link_path=${authority#*/}
+    case "$authority" in
+      */*) link_path=/$link_path ;;
+      *) link_path=/ ;;
+    esac
     authority=${authority%%/*}
     case "$authority" in
       *:*) preview_host=${authority%:*}; port=${authority##*:} ;;
@@ -156,26 +363,29 @@ probe_previews() {
       ''|*[!0-9]*) continue ;;
     esac
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
-    result=$(curl -q --noproxy '*' --resolve "$preview_host:$port:$tailnet_ip" \
-      --connect-timeout 1 --max-time 2 -sS -o /dev/null \
-      -w '%{http_code} %{size_download}' "$link" 2>/dev/null) || result='000 0'
-    case "$result" in
-      *' '*) code=${result%% *}; bytes=${result#* } ;;
-      *) code=000; bytes=0 ;;
-    esac
-    case "$code" in
-      [0-9][0-9][0-9]) ;;
-      *) code=000 ;;
-    esac
-    case "$bytes" in
-      ''|*[!0-9]*) bytes=0 ;;
-    esac
-    if [ "$code" != 200 ] || [ "$bytes" -eq 0 ]; then
-      if preview_outage_stage_new "$link"; then
-        printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
-      fi
+    preview_http_ok "$PREVIEW_CONNECT_SECS" "$PREVIEW_MAX_SECS" "$link" \
+      --resolve "$preview_host:$port:$tailnet_ip" && continue
+    # The captain-facing path missed the fast budget. Everything below stops
+    # once the poll runs out of its deadline, leaving state and silence intact
+    # so the next poll decides rather than this one guessing.
+    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
+    preview_http_ok "$PREVIEW_RETRY_CONNECT_SECS" "$PREVIEW_RETRY_MAX_SECS" "$link" \
+      --resolve "$preview_host:$port:$tailnet_ip" && continue
+    if preview_pending_matches "$link"; then
+      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
       return 0
     fi
+    preview_outage_clear_changed "$link"
+    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
+    if preview_local_evidence "$preview_host" "$port" "$link_path" \
+      && ! preview_suspect_matches "$link" \
+      && preview_suspect_record "$link"; then
+      return 0
+    fi
+    if preview_outage_stage_new "$link"; then
+      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
+    fi
+    return 0
   done <<EOF
 $links
 EOF
