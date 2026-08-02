@@ -549,7 +549,7 @@ test_probe_deadline_baseline_is_not_inherited() {
 # The self-hosting regression: this repository's own PR documented the poll,
 # and an evidence URL inside a fence became the preview the poll then monitored.
 test_fenced_and_prose_links_are_distinguished() {
-  local out
+  local extraction_evidence out
   reset_preview_state
   reset_logs
   printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
@@ -561,12 +561,35 @@ test_fenced_and_prose_links_are_distinguished() {
   [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
     || fail "a PR declaring no preview kept a committed outage identity"
   [ ! -e "$SUSPECT" ] || fail "a fenced transcript example was recorded as a failure"
+  if [ -n "${FM_TEST_EVIDENCE_LOG:-}" ]; then
+    extraction_evidence=${FM_TEST_EVIDENCE_LOG%.txt}-extraction.txt
+    {
+      printf 'FENCED FIXTURE BODY\n'
+      printf 'watcher_output=%s\n' "${out:-<silent>}"
+      printf 'captain_facing_probes=%s\n' \
+        "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')"
+      printf 'tailnet_lookups=%s\n' \
+        "$(wc -l < "$TAILSCALE_LOG" | tr -d '[:space:]')"
+      printf 'committed_identity=%s\n\n' \
+        "$(test -e "$TMP_ROOT/preview-task.preview-outage" && printf present || printf cleared)"
+    } > "$extraction_evidence"
+  fi
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$DIFFERENTLY_WORDED_PREVIEW_BODY" run_poll)
   [ -z "$out" ] || fail "a differently worded healthy declaration emitted a wake"
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "a differently worded prose declaration was not monitored"
+  if [ -n "${FM_TEST_EVIDENCE_LOG:-}" ]; then
+    {
+      printf 'FREE-FORM PROSE DECLARATION\n'
+      printf 'watcher_output=%s\n' "${out:-<silent>}"
+      printf 'captain_facing_probes=%s\n' \
+        "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')"
+      printf 'probe (fixture scheme defanged to hxxps)\n'
+      sed 's|https://|hxxps://|g' "$CURL_LOG"
+    } >> "$extraction_evidence"
+  fi
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$CONTAINER_LIKE_CODE_BODY" run_poll)
