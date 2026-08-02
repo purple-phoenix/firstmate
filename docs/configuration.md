@@ -371,6 +371,60 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram captain channel (config/telegram.json)
+
+The Telegram channel gives the captain a private one-to-one chat with their own firstmate from a phone.
+[`telegram-channel.md`](telegram-channel.md) owns the setup walkthrough, supported message types, privacy limitation, troubleshooting, and opt-out; this section owns the schema and local state.
+
+The channel is inert until three separate steps complete, and each refuses until its predecessor has, so a half-configured channel can never accept a message: a bot token is stored, the captain's numeric identity is paired, and the channel is explicitly enabled.
+`config/telegram.json` (gitignored, mode 0600) is the whole configuration:
+
+```json
+{
+  "schema": "fm-telegram.v1",
+  "enabled": false,
+  "user_id": 100000000,
+  "chat_id": 100000000,
+  "bot_id": 200000000,
+  "bot_username": "example_bot",
+  "token_owner": "keychain",
+  "paired_at": 1785000000
+}
+```
+
+`user_id` and `chat_id` are the entire ingress allowlist: an update is accepted only when it is a plain `message` in a `private` chat whose chat id and sender id both match exactly, the sender is not a bot, and the message carries no forward marker, `via_bot`, `sender_chat`, or `story` field.
+A config missing either identity is treated as not enabled regardless of the `enabled` flag.
+Everything else is dropped without a reply and without storing its text; only a bounded refusal counter is kept.
+
+`token_owner` selects where the bot token lives.
+`keychain` (the default, macOS only) stores it in the login keychain under service `firstmate-telegram-bot`, keyed per home so two homes keep independent bots; the token is handed to `security` on standard input through its prompt path, never as an argument.
+`file` is the documented weaker fallback and the only option off macOS: a gitignored mode-0600 `config/telegram-token` that anything able to read the home's config directory can read.
+The token is never a process argument, never printed, never written to a log or a durable record, and never embedded in the generated watcher check; every Bot API request passes its token-bearing URL to `curl` through a mode-0600 config file.
+
+Enabling writes `state/fm-telegram.check.sh`, a byte-static shim pinning this home and `bin/fm-tg-poll.sh`, and registers it through `bin/fm-check-register.sh`, so the watcher runs it on the ordinary `FM_CHECK_INTERVAL` cadence and rejects it if its bytes change.
+Enabling also calls the Bot API's `deleteWebhook`, so `getUpdates` long polling is structurally the only transport: no port is opened, no webhook exists, and nothing sits between the home and Telegram.
+An armed channel counts as a supervision need in `bin/fm-supervision-lib.sh`, exactly like an X-mode relay poll, so a Telegram-only home keeps one live supervision cycle with an empty fleet.
+
+Durable state lives under the mode-0700 `state/tg/` subtree this channel owns outright:
+
+- `state/tg/cursor` - the Telegram update offset.
+- `state/tg/inbox/<request_id>.json` (`fm-telegram-request.v1`) - one accepted message; `state/tg/inbox/archive/` keeps the newest 50 claimed ones.
+- `state/tg/sent/<key>.json` (`fm-telegram-sent.v1`) - the reply ledger.
+- `state/tg/outbox/<key>.json` (`fm-telegram-outbox.v1`) - `FM_TG_DRY_RUN` previews.
+- `state/tg/poll.error` and `state/tg/rejects` - the deduplicated last poll failure and the refusal counter.
+
+Ingress is crash-safe by ordering: each accepted update is committed to the inbox with a create-only claim BEFORE the cursor advances, so a crash in between replays the update onto the existing record instead of losing or duplicating it.
+Egress is at-most-once by the same mechanism: `bin/fm-tg-reply.sh` claims `state/tg/sent/<key>.json` before any network call and refuses a second reply for a key it has already delivered.
+A definite refusal clears the claim so the message can be retried; an ambiguous outcome - a timeout, or a server error after the request went out - is recorded as ambiguous and refused until an explicit `--resend`, because the client will not guess whether Telegram delivered it and never falls back to another channel.
+Replies are sent as plain text with no `parse_mode`, so message content is delivered literally and no chunk boundary can split markup; a reply longer than `FM_TG_REPLY_MAX_CHARS` is split on paragraph, line, and word boundaries, capped at `FM_TG_REPLY_MAX_CHUNKS` messages, and the last retained message is marked with an ellipsis.
+
+When a Telegram message starts work that cannot finish in the same turn, `bin/fm-tg-link.sh` records that message's identity on the task as `tg_request=`, `tg_request_ts=`, and `tg_updates=` in `state/<id>.meta`, so a later session reports the outcome to the same conversation without relying on anyone's memory.
+`bin/fm-tg-reply.sh --task <id>` resolves that link and derives a distinct ledger key per update (`tg-<update_id>.u<n>`), which is what lets a retry be refused as a duplicate while a genuinely new milestone is not.
+Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3); `--final` is never rationed, always sends, and then clears the link.
+
+The poll wakes firstmate with `tg-message <n> pending` while messages are unclaimed, or reports a distinct configuration or transport failure once as `tg-mode-error ...` until it clears.
+The `telegram-captain-channel` skill owns what firstmate does with either wake.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -419,6 +473,17 @@ FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; val
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
+FM_TG_API_BASE=https://api.telegram.org   # Telegram Bot API root; overridden only to point tests at a loopback fake
+FM_TG_POLL_TIMEOUT=10   # seconds of Telegram long poll per check; clamped to 20 so it stays inside FM_CHECK_TIMEOUT
+FM_TG_HTTP_TIMEOUT=     # seconds allowed per Bot API call; unset defaults to FM_TG_POLL_TIMEOUT + 8, and 20 elsewhere
+FM_TG_POLL_BATCH=20     # updates requested per poll; clamped to 1..100
+FM_TG_MAX_REQUEST_CHARS=4096   # longest accepted captain message; longer ones are recorded as oversized without their text
+FM_TG_REPLY_MAX_CHARS=3500   # per-message split budget for replies; clamped to 200..4096
+FM_TG_REPLY_MAX_CHUNKS=6   # maximum messages in one split reply; clamped to 1..20
+FM_TG_DRY_RUN=          # truthy records replies to state/tg/outbox/ instead of sending them
+FM_TG_PAIR_WAIT=60      # default seconds bin/fm-tg-setup.sh pair listens for the captain's /start
+FM_TG_TASK_UPDATE_MAX=3   # captain-facing updates allowed per Telegram-linked task before its final outcome
+FM_TG_SECURITY_BIN=security   # keychain client used by the token owner, mainly for tests
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for the Stop auto-arm's claim, health, or fresh rewake epoch before re-blocking

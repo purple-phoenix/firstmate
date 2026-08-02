@@ -3,8 +3,9 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
+# work (a state/<id>.meta exists) or an inbound captain channel armed - an X-mode
+# relay poll (state/x-watch.check.sh) or the Telegram channel
+# (state/fm-telegram.check.sh) - and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
 # bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
@@ -41,7 +42,11 @@ fm_supervision_status() {
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ]; then
+  # An armed inbound captain channel needs a live cycle even with an empty fleet:
+  # without one, nothing polls it and a message sits unseen until the next session.
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
+    || [ -f "$state/x-watch.check.sh" ] \
+    || [ -f "$state/fm-telegram.check.sh" ]; then
     FM_SUP_NEEDED=true
   fi
 
