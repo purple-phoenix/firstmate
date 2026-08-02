@@ -42,14 +42,20 @@ HEALTHY_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
 # quotes a probe command, and no preview declaration anywhere.
 # shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 FENCED_EVIDENCE_BODY='## Intent\n\nStop false preview alerts under host load.\n\n<details>\n<summary>Evidence: exact durable watcher wake, probes, and committed state</summary>\n\n```text\nPINNED PREVIEW PROBE\n-q --noproxy * --resolve fixture.tailnet.ts.net:9443:100.89.232.70 --connect-timeout 1 --max-time 2 -sS -o /dev/null -w %{http_code} %{size_download} https://fixture.tailnet.ts.net:9443/\nWATCHER OUTPUT\npreview-dead: task=preview-task pr=https://github.com/example/preview-app/pull/42\n```\n</details>\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 FOUR_BACKTICK_BODY='````text\nA nested Markdown example follows.\n```sh\ncurl https://fixture.tailnet.ts.net:9443/\n```\n````\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 LITERAL_BACKSLASH_N_BODY='```text\ntranscript preserves the two characters \\n```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
 INDENTED_NON_FENCE_BODY='    ```example\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 BACKTICK_INFO_NON_FENCE_BODY='```example`info\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 BLOCKQUOTED_FENCE_BODY='> ```text\n> https://fixture.tailnet.ts.net:9443/\n> ````\n'
 BLOCKQUOTED_DECLARATION_BODY='> Preview URL: https://preview.tailnet.ts.net:5443/\n'
 LIST_CONTAINER_BODY='- Preview URL: https://preview.tailnet.ts.net:5443/\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 CONTAINER_LIKE_CODE_BODY='```text\n- ```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 LABELED_FENCED_BODY='```text\nPreview URL: https://fixture.tailnet.ts.net:9443/\n```\n'
 DIFFERENTLY_WORDED_PREVIEW_BODY='Staging review is live at https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
