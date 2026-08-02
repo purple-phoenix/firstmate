@@ -9,10 +9,11 @@
 # examples whose hosts do not exist, and a PR that documents this poll would
 # otherwise monitor its own fixture host.
 # The GitHub @tsv body field is decoded before filtering while preserving an
-# already multiline body and escaped backslashes. A fence may have at most three
-# leading spaces, and a backtick fence's info string cannot contain a backtick.
-# It closes only on the opening marker character repeated at least as many times;
-# an unterminated fence removes the rest of the body, matching the forge's rendering.
+# already multiline body and escaped backslashes. Repeated blockquote and list
+# container prefixes are removed before both fence recognition and link extraction.
+# A fence may have at most three leading spaces, and a backtick fence's info string
+# cannot contain a backtick. It closes only on the opening marker character repeated
+# at least as many times; an unterminated fence removes the rest of the body.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -356,11 +357,49 @@ probe_previews() {
   esac
   links=$(printf '%s\n' "$decoded_body" \
     | awk '
+      function normalize_container(line, leading, rest, first, marker_end, i, padding) {
+        while (1) {
+          leading = 0
+          while (leading < 4 && substr(line, leading + 1, 1) == " ") leading++
+          if (leading > 3) return line
+          rest = substr(line, leading + 1)
+          if (substr(rest, 1, 1) == ">") {
+            rest = substr(rest, 2)
+            if (substr(rest, 1, 1) == " ") rest = substr(rest, 2)
+            line = rest
+            continue
+          }
+          first = substr(rest, 1, 1)
+          marker_end = 0
+          if ((first == "-" || first == "+" || first == "*") \
+              && substr(rest, 2, 1) ~ /[[:space:]]/) {
+            marker_end = 1
+          } else if (first ~ /[0-9]/) {
+            i = 1
+            while (i <= 9 && substr(rest, i, 1) ~ /[0-9]/) i++
+            if (i >= 2 && i <= 10 \
+                && (substr(rest, i, 1) == "." || substr(rest, i, 1) == ")") \
+                && substr(rest, i + 1, 1) ~ /[[:space:]]/) marker_end = i
+          }
+          if (!marker_end) return line
+          rest = substr(rest, marker_end + 1)
+          if (substr(rest, 1, 1) == "\t") {
+            line = substr(rest, 2)
+            continue
+          }
+          padding = 0
+          while (substr(rest, padding + 1, 1) == " ") padding++
+          if (padding < 1) return line
+          if (padding <= 4) line = substr(rest, padding + 1)
+          else line = substr(rest, 2)
+        }
+      }
       {
+        normalized = normalize_container($0)
         leading = 0
-        while (substr($0, leading + 1, 1) == " ") leading++
+        while (substr(normalized, leading + 1, 1) == " ") leading++
         candidate = leading <= 3
-        trimmed = substr($0, leading + 1)
+        trimmed = substr(normalized, leading + 1)
         delimiter = substr(trimmed, 1, 1)
         if (candidate && (delimiter == "`" || delimiter == "~")) {
           length_now = 0
@@ -381,7 +420,7 @@ probe_previews() {
             next
           }
         }
-        if (!fenced) print
+        if (!fenced) print normalized
       }
     ' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \

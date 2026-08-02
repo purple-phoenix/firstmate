@@ -45,6 +45,9 @@ FOUR_BACKTICK_BODY='````text\nA nested Markdown example follows.\n```sh\ncurl ht
 LITERAL_BACKSLASH_N_BODY='```text\ntranscript preserves the two characters \\n```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
 INDENTED_NON_FENCE_BODY='    ```example\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
 BACKTICK_INFO_NON_FENCE_BODY='```example`info\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+BLOCKQUOTED_FENCE_BODY='> ```text\n> https://fixture.tailnet.ts.net:9443/\n> ````\n'
+BLOCKQUOTED_DECLARATION_BODY='> Preview URL: https://preview.tailnet.ts.net:5443/\n'
+LIST_CONTAINER_BODY='- ```text\n  https://fixture.tailnet.ts.net:9443/\n  ```\n- Preview URL: https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 
@@ -589,6 +592,31 @@ EOF
   pass "non-fence backtick lines preserve following prose declarations"
 }
 
+test_container_fences_and_declarations() {
+  local out
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$BLOCKQUOTED_FENCE_BODY" run_poll)
+  [ -z "$out" ] || fail "a blockquoted fenced example emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "a blockquoted fenced fixture was probed"
+  [ ! -s "$TAILSCALE_LOG" ] || fail "a blockquoted fenced fixture resolved a tailnet address"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$BLOCKQUOTED_DECLARATION_BODY" run_poll)
+  [ -z "$out" ] || fail "a healthy blockquoted declaration emitted a wake"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "a blockquoted prose declaration was not monitored"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$LIST_CONTAINER_BODY" run_poll)
+  [ -z "$out" ] || fail "a list-contained healthy declaration emitted a wake"
+  ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
+    || fail "a list-contained fenced fixture was probed"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "a list-contained prose declaration was not monitored"
+  reset_preview_state
+  pass "container fences stay hidden while prose declarations stay monitored"
+}
+
 # Disconfirming cases: the prose declaration a ready PR actually carries stays
 # monitored, including when the same body also quotes fixture hosts in a fence.
 test_declared_preview_links_stay_monitored() {
@@ -632,6 +660,7 @@ test_declared_preview_links_stay_monitored() {
 
 test_fenced_example_links_are_not_previews
 test_non_fence_backtick_lines_preserve_declarations
+test_container_fences_and_declarations
 test_declared_preview_links_stay_monitored
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
