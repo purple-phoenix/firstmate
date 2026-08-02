@@ -4,8 +4,8 @@
 # The watcher itself already has coverage proving any non-empty authenticated
 # PR-poll result becomes a check wake.
 # This suite owns the preview-specific contract: one GitHub read supplies state,
-# draft status, and body; tailnet links outside fenced blocks on open ready PRs
-# are probed; curl is pinned to this host's tailnet IPv4 address with short
+# draft status, and body; only canonical labeled preview declarations on open
+# ready PRs are probed; curl is pinned to this host's tailnet IPv4 address with short
 # timeouts; a non-200 or empty response emits one task-and-PR wake line; and a
 # healthy preview stays silent.
 # It also owns the false-alert boundary: a captain-facing probe that misses the
@@ -57,7 +57,9 @@ LIST_CONTAINER_BODY='- Preview URL: https://preview.tailnet.ts.net:5443/\n'
 CONTAINER_LIKE_CODE_BODY='```text\n- ```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
 # shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 LABELED_FENCED_BODY='```text\nPreview URL: https://fixture.tailnet.ts.net:9443/\n```\n'
-DIFFERENTLY_WORDED_PREVIEW_BODY='Staging review is live at https://preview.tailnet.ts.net:5443/\n'
+# A bare tailnet URL with no canonical label. Monitoring it is the deliberate
+# compatibility loss of the declaration contract; the header owns that boundary.
+UNLABELED_PROSE_BODY='Staging review is live at https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 BOLD_DECLARED_PREVIEW_BODY='## Tailscale Preview\n\n**Preview URL:** https://preview.tailnet.ts.net:5443/\n\n**Visual evidence report:** https://preview.tailnet.ts.net:5443/__review__/evidence\n\n**Feature testing report:** https://preview.tailnet.ts.net:5443/__review__/feature-report\n'
@@ -582,13 +584,14 @@ test_fenced_and_prose_links_are_distinguished() {
   fi
 
   reset_logs
-  out=$(FM_TEST_GH_BODY="$DIFFERENTLY_WORDED_PREVIEW_BODY" run_poll)
-  [ -z "$out" ] || fail "a differently worded healthy declaration emitted a wake"
-  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
-    || fail "a differently worded prose declaration was not monitored"
+  out=$(FM_TEST_GH_BODY="$UNLABELED_PROSE_BODY" FM_TEST_CURL_CODE=503 \
+    FM_TEST_CURL_BYTES=0 run_poll)
+  [ -z "$out" ] || fail "an unlabeled prose URL emitted a wake"
+  [ ! -s "$CURL_LOG" ] \
+    || fail "an unlabeled prose URL was monitored despite the declaration contract"
   if [ -n "${FM_TEST_EVIDENCE_LOG:-}" ]; then
     {
-      printf 'FREE-FORM PROSE DECLARATION\n'
+      printf 'UNLABELED PROSE URL (intentionally not monitored)\n'
       printf 'watcher_output=%s\n' "${out:-<silent>}"
       printf 'captain_facing_probes=%s\n' \
         "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')"
@@ -604,12 +607,15 @@ test_fenced_and_prose_links_are_distinguished() {
   [ ! -s "$TAILSCALE_LOG" ] \
     || fail "container-like transcript text resolved a tailnet address"
 
+  # The documented residual of recognizing declarations instead of parsing
+  # Markdown: a transcript that quotes a canonical declaration line verbatim is
+  # still monitored. Published transcripts defang the scheme of any example
+  # preview URL so this stays theoretical rather than self-inflicted.
   reset_logs
   out=$(FM_TEST_GH_BODY="$LABELED_FENCED_BODY" run_poll)
-  [ -z "$out" ] || fail "a canonical label inside a fenced transcript emitted a wake"
-  [ ! -s "$CURL_LOG" ] || fail "a canonical label inside a fenced transcript was probed"
-  [ ! -s "$TAILSCALE_LOG" ] \
-    || fail "a canonical label inside a fenced transcript resolved a tailnet address"
+  [ -z "$out" ] || fail "a healthy quoted declaration emitted a wake"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "a quoted canonical declaration did not follow the declaration contract"
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$FOUR_BACKTICK_BODY" run_poll)
@@ -627,7 +633,7 @@ test_fenced_and_prose_links_are_distinguished() {
   [ ! -s "$TAILSCALE_LOG" ] \
     || fail "a literal backslash-n transcript resolved a tailnet address"
   reset_preview_state
-  pass "fenced examples are ignored while prose declarations are monitored"
+  pass "unlabeled and example URLs are ignored while labeled declarations are monitored"
 }
 
 test_declarations_after_synthetic_code_are_monitored() {
@@ -643,7 +649,7 @@ four-space-indented backtick line|$INDENTED_NON_FENCE_BODY
 backtick in fence info string|$BACKTICK_INFO_NON_FENCE_BODY
 EOF
   reset_preview_state
-  pass "prose declarations after synthetic code stay monitored"
+  pass "labeled declarations after synthetic code stay monitored"
 }
 
 test_container_fences_and_declarations() {
@@ -666,7 +672,7 @@ test_container_fences_and_declarations() {
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "a list-contained prose declaration was not monitored"
   reset_preview_state
-  pass "container declarations stay monitored while fenced fixtures stay ignored"
+  pass "labeled declarations in containers stay monitored while unlabeled fixtures stay ignored"
 }
 
 # Disconfirming cases: every declaration a ready PR carries stays
@@ -717,7 +723,7 @@ test_declared_preview_links_stay_monitored() {
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "a real-newline body did not monitor its declared preview"
   reset_preview_state
-  pass "declared preview, visual evidence, and feature report links stay monitored"
+  pass "plain and bold canonical declarations stay monitored for all three labels"
 }
 
 test_fenced_and_prose_links_are_distinguished

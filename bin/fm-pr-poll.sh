@@ -4,11 +4,17 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# Tailnet links in prose outside fenced blocks count as previews, regardless of
-# declaration wording. Repeated blockquote or list prefixes are normalized so
-# their fences are removed too, while four-space-indented code stays excluded.
-# The GitHub @tsv body field is decoded before extraction while preserving an
-# already multiline body and escaped backslashes.
+# Only a canonical labeled declaration is monitored: a "Preview URL",
+# "Visual evidence report", or "Feature testing report" label, plain or bold,
+# followed by a tailnet link. Everything else in a body is ignored, including
+# transcripts, command output, and worked examples, so a PR that documents this
+# poll cannot make the watcher monitor its own fixture host.
+# This is a deliberate compatibility boundary: a bare tailnet URL with no label
+# is no longer monitored, and a PR that wants monitoring must declare it.
+# Recognizing declarations rather than excluding examples is what keeps this one
+# grep instead of a Markdown block parser; the residual is that a body quoting a
+# canonical declaration line verbatim inside a transcript is still monitored, so
+# published transcripts defang the scheme of any example preview URL.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -323,107 +329,11 @@ preview_outage_stage_new() {
 
 probe_previews() {
   local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
-  local decoded_body link_path count
+  local link_path count
   task_valid "$task" || return 0
-  # The header owns preview-declaration extraction mechanics.
-  case "$body" in
-    *$'\n'*) decoded_body=$body ;;
-    *)
-      decoded_body=$(printf '%s\n' "$body" | awk '
-        {
-          decoded = ""
-          for (i = 1; i <= length($0); i++) {
-            char = substr($0, i, 1)
-            if (char != "\\" || i == length($0)) {
-              decoded = decoded char
-              continue
-            }
-            escaped = substr($0, ++i, 1)
-            if (escaped == "n") decoded = decoded "\n"
-            else if (escaped == "r") decoded = decoded "\r"
-            else if (escaped == "t") decoded = decoded "\t"
-            else if (escaped == "\\") decoded = decoded "\\"
-            else decoded = decoded "\\" escaped
-          }
-          print decoded
-        }
-      ')
-      ;;
-  esac
-  links=$(printf '%s\n' "$decoded_body" \
-    | awk '
-      function normalize_container(line, leading, rest, first, marker_end, i, padding) {
-        while (1) {
-          leading = 0
-          while (leading < 4 && substr(line, leading + 1, 1) == " ") leading++
-          if (leading > 3) return line
-          rest = substr(line, leading + 1)
-          if (substr(rest, 1, 1) == ">") {
-            rest = substr(rest, 2)
-            if (substr(rest, 1, 1) == " ") rest = substr(rest, 2)
-            line = rest
-            continue
-          }
-          first = substr(rest, 1, 1)
-          marker_end = 0
-          if ((first == "-" || first == "+" || first == "*") \
-              && substr(rest, 2, 1) ~ /[[:space:]]/) {
-            marker_end = 1
-          } else if (first ~ /[0-9]/) {
-            i = 1
-            while (i <= 9 && substr(rest, i, 1) ~ /[0-9]/) i++
-            if (i >= 2 && i <= 10 \
-                && (substr(rest, i, 1) == "." || substr(rest, i, 1) == ")") \
-                && substr(rest, i + 1, 1) ~ /[[:space:]]/) marker_end = i
-          }
-          if (!marker_end) return line
-          rest = substr(rest, marker_end + 1)
-          if (substr(rest, 1, 1) == "\t") {
-            line = substr(rest, 2)
-            continue
-          }
-          padding = 0
-          while (substr(rest, padding + 1, 1) == " ") padding++
-          if (padding < 1) return line
-          if (padding <= 4) line = substr(rest, padding + 1)
-          else line = substr(rest, 2)
-        }
-      }
-      {
-        source = $0
-        if (!fenced || opener_container) raw = normalize_container(source)
-        else raw = source
-        leading = 0
-        while (substr(raw, leading + 1, 1) == " ") leading++
-        candidate = leading <= 3
-        trimmed = substr(raw, leading + 1)
-        delimiter = substr(trimmed, 1, 1)
-        if (candidate && (delimiter == "`" || delimiter == "~")) {
-          length_now = 0
-          while (substr(trimmed, length_now + 1, 1) == delimiter) length_now++
-          remainder = substr(trimmed, length_now + 1)
-          valid_opener = delimiter != "`" || remainder !~ /`/
-          if (!fenced && length_now >= 3 && valid_opener) {
-            fenced = 1
-            opener = delimiter
-            opener_length = length_now
-            opener_container = raw != source
-            next
-          }
-          if (fenced && delimiter == opener && length_now >= opener_length \
-              && remainder ~ /^[[:space:]]*$/) {
-            fenced = 0
-            opener = ""
-            opener_length = 0
-            opener_container = 0
-            next
-          }
-        }
-        if (fenced) next
-        if (leading > 3) next
-        print substr(raw, leading + 1)
-      }
-    ' \
+  # The header owns which declarations are monitored.
+  links=$(printf '%s\n' "$body" \
+    | grep -Eio '(\*\*)?(Preview URL|Visual evidence report|Feature testing report):(\*\*)?[[:space:]]+https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | awk '!seen[$0]++' \
     | head -n 8) || true
