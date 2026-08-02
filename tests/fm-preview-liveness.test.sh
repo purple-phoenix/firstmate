@@ -215,6 +215,34 @@ test_pending_outage_bypasses_new_corroboration() {
   pass "a matching pending outage retries before local corroboration"
 }
 
+test_link_change_retires_stale_preview_identity() {
+  local body_a body_b out
+  body_a='Review https://preview.tailnet.ts.net:5443/'
+  body_b='Review https://replacement.tailnet.ts.net:5443/'
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$body_a" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "initial preview outage did not emit a wake"
+  commit_outage || fail "initial preview outage did not commit"
+
+  out=$(FM_TEST_GH_BODY="$body_b" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
+    FM_TEST_CURL_RC=28 \
+    FM_TEST_TAILSCALE_SERVE='https://replacement.tailnet.ts.net:5443 (tailnet only)
+|-- / proxy http://127.0.0.1:5443' run_poll)
+  [ -z "$out" ] || fail "corroborated replacement preview emitted a wake"
+  [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
+    || fail "replacement preview retained the earlier committed outage"
+  [ -f "$SUSPECT" ] \
+    || fail "replacement preview did not record its corroborated deferral"
+
+  out=$(FM_TEST_GH_BODY="$body_a" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "stale replacement state suppressed the earlier preview outage"
+  reset_preview_state
+  pass "preview link changes retire stale outage identities"
+}
+
 test_tailnet_override_must_match_local_host() {
   local out
   reset_logs
@@ -496,6 +524,7 @@ test_probe_deadline_baseline_is_not_inherited() {
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
 test_pending_outage_bypasses_new_corroboration
+test_link_change_retires_stale_preview_identity
 test_tailnet_override_must_match_local_host
 test_healthy_preview_is_silent
 test_closed_merged_and_draft_prs_skip_previews

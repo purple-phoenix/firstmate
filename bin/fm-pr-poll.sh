@@ -135,24 +135,35 @@ preview_outage_clear() {
 # True when this exact PR and preview link already failed a previous poll while
 # local evidence still corroborated them. That is the second consecutive
 # captain-facing failure, so the deferral is spent and the wake is due.
-preview_suspect_matches() {
-  local failed_link=$1 recorded_url recorded_link
-  [ -n "$preview_suspect" ] || return 1
-  [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ] || return 1
-  { IFS= read -r recorded_url && IFS= read -r recorded_link; } < "$preview_suspect" \
-    2>/dev/null || return 1
-  [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
-}
-
-preview_pending_matches() {
-  local failed_link=$1 recorded_url recorded_link
-  [ -n "$preview_pending" ] || return 1
-  [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ] || return 1
+preview_record_matches() {
+  local record=$1 failed_link=$2 recorded_url recorded_link
+  [ -n "$record" ] || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
   {
     IFS= read -r recorded_url || return 1
     IFS= read -r recorded_link || [ -n "$recorded_link" ] || return 1
-  } < "$preview_pending" 2>/dev/null
+  } < "$record" 2>/dev/null
   [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
+}
+
+preview_suspect_matches() {
+  preview_record_matches "$preview_suspect" "$1"
+}
+
+preview_pending_matches() {
+  preview_record_matches "$preview_pending" "$1"
+}
+
+preview_outage_clear_changed() {
+  local failed_link=$1
+  if { [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ] \
+      && ! preview_record_matches "$preview_marker" "$failed_link"; } \
+    || { [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ] \
+      && ! preview_record_matches "$preview_pending" "$failed_link"; } \
+    || { [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ] \
+      && ! preview_record_matches "$preview_suspect" "$failed_link"; }; then
+    preview_outage_clear
+  fi
 }
 
 preview_suspect_record() {
@@ -364,6 +375,7 @@ probe_previews() {
       printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
       return 0
     fi
+    preview_outage_clear_changed "$link"
     [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
     if preview_local_evidence "$preview_host" "$port" "$link_path" \
       && ! preview_suspect_matches "$link" \
