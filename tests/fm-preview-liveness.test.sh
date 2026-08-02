@@ -48,11 +48,13 @@ INDENTED_NON_FENCE_BODY='    ```example\nPreview URL: https://preview.tailnet.ts
 BACKTICK_INFO_NON_FENCE_BODY='```example`info\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
 BLOCKQUOTED_FENCE_BODY='> ```text\n> https://fixture.tailnet.ts.net:9443/\n> ````\n'
 BLOCKQUOTED_DECLARATION_BODY='> Preview URL: https://preview.tailnet.ts.net:5443/\n'
-LIST_CONTAINER_BODY='- ```text\n  https://fixture.tailnet.ts.net:9443/\n  ```\n- Preview URL: https://preview.tailnet.ts.net:5443/\n'
+LIST_CONTAINER_BODY='- Preview URL: https://preview.tailnet.ts.net:5443/\n'
 CONTAINER_LIKE_CODE_BODY='```text\n- ```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
+LABELED_FENCED_BODY='```text\nPreview URL: https://fixture.tailnet.ts.net:9443/\n```\n'
 UNLABELED_PREVIEW_BODY='Review at https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
+BOLD_DECLARED_PREVIEW_BODY='## Tailscale Preview\n\n**Preview URL:** https://preview.tailnet.ts.net:5443/\n\n**Visual evidence report:** https://preview.tailnet.ts.net:5443/__review__/evidence\n\n**Feature testing report:** https://preview.tailnet.ts.net:5443/__review__/feature-report\n'
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
@@ -574,6 +576,13 @@ test_unlabeled_and_synthetic_links_are_not_previews() {
     || fail "container-like transcript text resolved a tailnet address"
 
   reset_logs
+  out=$(FM_TEST_GH_BODY="$LABELED_FENCED_BODY" run_poll)
+  [ -z "$out" ] || fail "a canonical label inside a fenced transcript emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "a canonical label inside a fenced transcript was probed"
+  [ ! -s "$TAILSCALE_LOG" ] \
+    || fail "a canonical label inside a fenced transcript resolved a tailnet address"
+
+  reset_logs
   out=$(FM_TEST_GH_BODY="$FOUR_BACKTICK_BODY" run_poll)
   [ -z "$out" ] || fail "a declaration beside nested example code emitted a wake"
   ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
@@ -625,8 +634,6 @@ test_container_fences_and_declarations() {
   reset_logs
   out=$(FM_TEST_GH_BODY="$LIST_CONTAINER_BODY" run_poll)
   [ -z "$out" ] || fail "a list-contained healthy declaration emitted a wake"
-  ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
-    || fail "a list-contained unlabeled fixture was probed"
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "a list-contained canonical declaration was not monitored"
   reset_preview_state
@@ -647,6 +654,16 @@ test_declared_preview_links_stay_monitored() {
     "the declared visual evidence report was not monitored"
   assert_grep 'https://preview.tailnet.ts.net:5443/__review__/feature-report' "$CURL_LOG" \
     "the declared feature testing report was not monitored"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$BOLD_DECLARED_PREVIEW_BODY" run_poll)
+  [ -z "$out" ] || fail "healthy bold canonical declarations emitted a wake"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 3 ] \
+    || fail "the three bold canonical declarations were not all probed"
+  assert_grep 'https://preview.tailnet.ts.net:5443/__review__/evidence' "$CURL_LOG" \
+    "the bold visual evidence declaration was not monitored"
+  assert_grep 'https://preview.tailnet.ts.net:5443/__review__/feature-report' "$CURL_LOG" \
+    "the bold feature testing declaration was not monitored"
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$DECLARED_PREVIEW_BODY$FENCED_EVIDENCE_BODY" run_poll)

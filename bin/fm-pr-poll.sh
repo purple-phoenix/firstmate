@@ -4,10 +4,12 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# Only tailnet links on lines beginning with "Preview URL:", "Visual evidence
-# report:", or "Feature testing report:" count as previews. Those canonical
-# labels may follow repeated blockquote or list prefixes and up to three spaces.
-# Bare, unlabeled, transcript, and example links are intentionally ignored.
+# Only tailnet links on lines beginning with the plain or bold canonical labels
+# "Preview URL:", "Visual evidence report:", and "Feature testing report:"
+# count as previews. The bold forms wrap the whole label and colon in ** markers.
+# Labels may follow repeated blockquote or list prefixes and up to three spaces.
+# Bare and unlabeled links are intentionally ignored. Top-level fenced blocks
+# are removed as a secondary guard without parsing container or Markdown nesting.
 # The GitHub @tsv body field is decoded before extraction while preserving an
 # already multiline body and escaped backslashes.
 # A link that fails that first budget is retried once at two-second connect and
@@ -391,12 +393,40 @@ probe_previews() {
         }
       }
       {
+        raw = $0
+        leading = 0
+        while (substr(raw, leading + 1, 1) == " ") leading++
+        candidate = leading <= 3
+        trimmed = substr(raw, leading + 1)
+        delimiter = substr(trimmed, 1, 1)
+        if (candidate && (delimiter == "`" || delimiter == "~")) {
+          length_now = 0
+          while (substr(trimmed, length_now + 1, 1) == delimiter) length_now++
+          remainder = substr(trimmed, length_now + 1)
+          valid_opener = delimiter != "`" || remainder !~ /`/
+          if (!fenced && length_now >= 3 && valid_opener) {
+            fenced = 1
+            opener = delimiter
+            opener_length = length_now
+            next
+          }
+          if (fenced && delimiter == opener && length_now >= opener_length \
+              && remainder ~ /^[[:space:]]*$/) {
+            fenced = 0
+            opener = ""
+            opener_length = 0
+            next
+          }
+        }
+        if (fenced) next
         normalized = normalize_container($0)
         leading = 0
         while (substr(normalized, leading + 1, 1) == " ") leading++
         if (leading > 3) next
         declaration = substr(normalized, leading + 1)
-        if (declaration ~ /^(Preview URL|Visual evidence report|Feature testing report):[[:space:]]*/) \
+        plain = declaration ~ /^(Preview URL|Visual evidence report|Feature testing report):[[:space:]]*/
+        bold = declaration ~ /^\*\*(Preview URL|Visual evidence report|Feature testing report):\*\*[[:space:]]*/
+        if (plain || bold) \
           print declaration
       }
     ' \
