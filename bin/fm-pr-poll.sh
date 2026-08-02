@@ -4,12 +4,9 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# Only tailnet links on lines beginning with the plain or bold canonical labels
-# "Preview URL:", "Visual evidence report:", and "Feature testing report:"
-# count as previews. The bold forms wrap the whole label and colon in ** markers.
-# Labels may follow repeated blockquote or list prefixes and up to three spaces.
-# Bare and unlabeled links are intentionally ignored. Top-level fenced blocks
-# are removed as a secondary guard without parsing container or Markdown nesting.
+# Tailnet links in prose outside fenced blocks count as previews, regardless of
+# declaration wording. Repeated blockquote or list prefixes are normalized so
+# their fences are removed too, while four-space-indented code stays excluded.
 # The GitHub @tsv body field is decoded before extraction while preserving an
 # already multiline body and escaped backslashes.
 # A link that fails that first budget is retried once at two-second connect and
@@ -393,7 +390,9 @@ probe_previews() {
         }
       }
       {
-        raw = $0
+        source = $0
+        if (!fenced || opener_container) raw = normalize_container(source)
+        else raw = source
         leading = 0
         while (substr(raw, leading + 1, 1) == " ") leading++
         candidate = leading <= 3
@@ -408,6 +407,7 @@ probe_previews() {
             fenced = 1
             opener = delimiter
             opener_length = length_now
+            opener_container = raw != source
             next
           }
           if (fenced && delimiter == opener && length_now >= opener_length \
@@ -415,19 +415,13 @@ probe_previews() {
             fenced = 0
             opener = ""
             opener_length = 0
+            opener_container = 0
             next
           }
         }
         if (fenced) next
-        normalized = normalize_container($0)
-        leading = 0
-        while (substr(normalized, leading + 1, 1) == " ") leading++
         if (leading > 3) next
-        declaration = substr(normalized, leading + 1)
-        plain = declaration ~ /^(Preview URL|Visual evidence report|Feature testing report):[[:space:]]*/
-        bold = declaration ~ /^\*\*(Preview URL|Visual evidence report|Feature testing report):\*\*[[:space:]]*/
-        if (plain || bold) \
-          print declaration
+        print substr(raw, leading + 1)
       }
     ' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
