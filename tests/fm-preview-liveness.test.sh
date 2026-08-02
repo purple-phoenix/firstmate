@@ -34,6 +34,15 @@ URL=https://github.com/example/preview-app/pull/42
 # The serve mapping this host publishes for the preview authority used below.
 HEALTHY_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
 |-- / proxy http://127.0.0.1:5443'
+# The forge returns the body as one tab-separated field with newlines escaped,
+# so these fixtures carry literal backslash-n exactly as the poll receives them.
+# FENCED_EVIDENCE_BODY is the shape that made this repository's own PR monitor a
+# fixture host: an intent section plus a details block whose fenced transcript
+# quotes a probe command, and no preview declaration anywhere.
+# shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
+FENCED_EVIDENCE_BODY='## Intent\n\nStop false preview alerts under host load.\n\n<details>\n<summary>Evidence: exact durable watcher wake, probes, and committed state</summary>\n\n```text\nPINNED PREVIEW PROBE\n-q --noproxy * --resolve fixture.tailnet.ts.net:9443:100.89.232.70 --connect-timeout 1 --max-time 2 -sS -o /dev/null -w %{http_code} %{size_download} https://fixture.tailnet.ts.net:9443/\nWATCHER OUTPUT\npreview-dead: task=preview-task pr=https://github.com/example/preview-app/pull/42\n```\n</details>\n'
+# The declaration a real ready PR carries, in prose and outside every fence.
+DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
@@ -346,12 +355,16 @@ test_dead_preview_reaches_durable_wake_queue_once() {
   [ "$(wc -l < "$GH_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "end-to-end watcher used more than one GitHub read"
   if [ -n "${FM_TEST_EVIDENCE_LOG:-}" ]; then
+    # This transcript is published in the PR body that ships this poll. The
+    # fixture scheme is defanged so no parser, including the one already armed
+    # in a home running an older poll, can read the evidence as a live preview
+    # declaration. Host, port, tailnet pin, and both budgets stay exact.
     {
       printf 'WATCHER OUTPUT\n%s\n\n' "$out"
       printf 'GITHUB READ\n'
       cat "$GH_LOG"
-      printf '\nPINNED PREVIEW PROBE\n'
-      cat "$CURL_LOG"
+      printf '\nPINNED PREVIEW PROBE (fixture host, scheme defanged to hxxps)\n'
+      sed 's|https://|hxxps://|g' "$CURL_LOG"
       printf '\nDURABLE WAKE QUEUE\n'
       cat "$state/.wake-queue"
       printf '\nOUTAGE STATE\ncommitted=%s pending=%s\n' \
@@ -521,6 +534,68 @@ test_probe_deadline_baseline_is_not_inherited() {
   pass "the probe deadline measures from a baseline the poll sets itself"
 }
 
+# The self-hosting regression: this repository's own PR documented the poll,
+# and its fenced evidence transcript became the preview the poll then monitored.
+test_fenced_example_links_are_not_previews() {
+  local out
+  reset_preview_state
+  reset_logs
+  printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
+  out=$(FM_TEST_GH_BODY="$FENCED_EVIDENCE_BODY" FM_TEST_CURL_CODE=503 \
+    FM_TEST_CURL_BYTES=0 run_poll)
+  [ -z "$out" ] || fail "a fenced transcript example was monitored as a preview"
+  [ ! -s "$CURL_LOG" ] || fail "a fenced transcript example was probed"
+  [ ! -s "$TAILSCALE_LOG" ] || fail "a fenced transcript example resolved a tailnet address"
+  [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
+    || fail "a PR declaring no preview kept a committed outage identity"
+  [ ! -e "$SUSPECT" ] || fail "a fenced transcript example was recorded as a failure"
+  reset_preview_state
+  pass "fenced evidence and transcript examples never become monitored previews"
+}
+
+# Disconfirming cases: the prose declaration a ready PR actually carries stays
+# monitored, including when the same body also quotes fixture hosts in a fence.
+test_declared_preview_links_stay_monitored() {
+  local out
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$DECLARED_PREVIEW_BODY" run_poll)
+  [ -z "$out" ] || fail "a healthy declared preview emitted a wake"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 3 ] \
+    || fail "the declared preview, visual evidence, and feature report were not all probed"
+  assert_grep 'https://preview.tailnet.ts.net:5443/__review__/evidence' "$CURL_LOG" \
+    "the declared visual evidence report was not monitored"
+  assert_grep 'https://preview.tailnet.ts.net:5443/__review__/feature-report' "$CURL_LOG" \
+    "the declared feature testing report was not monitored"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$DECLARED_PREVIEW_BODY$FENCED_EVIDENCE_BODY" run_poll)
+  [ -z "$out" ] || fail "a declared preview beside fenced evidence emitted a wake"
+  ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
+    || fail "a fenced fixture host was probed alongside a real declaration"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 3 ] \
+    || fail "fenced evidence changed which declared links were monitored"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$DECLARED_PREVIEW_BODY$FENCED_EVIDENCE_BODY" \
+    FM_TEST_CURL_CODE=503 FM_TEST_CURL_BYTES=0 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "a genuinely dead declared preview stopped waking"
+  reset_preview_state
+
+  # The same declaration delivered with real newlines rather than the forge's
+  # escaped field must resolve identically.
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$(printf 'Preview URL: https://preview.tailnet.ts.net:5443/\n')" run_poll)
+  [ -z "$out" ] || fail "a real-newline body emitted a wake for a healthy preview"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "a real-newline body did not monitor its declared preview"
+  reset_preview_state
+  pass "declared preview, visual evidence, and feature report links stay monitored"
+}
+
+test_fenced_example_links_are_not_previews
+test_declared_preview_links_stay_monitored
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
 test_pending_outage_bypasses_new_corroboration

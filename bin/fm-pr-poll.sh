@@ -4,6 +4,10 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
+# Only links a PR declares in prose count as previews. Fenced blocks are removed
+# before extraction because they carry transcripts, command output, and worked
+# examples whose hosts do not exist, and a PR that documents this poll would
+# otherwise monitor its own fixture host.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -320,7 +324,17 @@ probe_previews() {
   local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
   local link_path count
   task_valid "$task" || return 0
+  # A PR declares its previews in prose - "Preview URL:", "Visual evidence
+  # report:", "Feature testing report:" - while fenced blocks carry transcripts,
+  # command output, and worked examples whose hosts do not exist. Only the prose
+  # is a preview declaration, so fenced content is removed before extraction;
+  # otherwise a PR that documents this very poll monitors its own fixture host.
+  # The forge returns the body as one tab-separated field with newlines escaped,
+  # so line structure is restored first and a body that already has real
+  # newlines passes through unchanged.
   links=$(printf '%s\n' "$body" \
+    | awk '{ gsub(/\\n/, "\n"); print }' \
+    | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | awk '!seen[$0]++' \
     | head -n 8) || true
