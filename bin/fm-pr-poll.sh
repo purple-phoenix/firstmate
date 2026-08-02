@@ -4,11 +4,11 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# Only a canonical labeled declaration is monitored: a "Preview URL",
-# "Visual evidence report", or "Feature testing report" label, plain or bold,
-# followed by a tailnet link. Everything else in a body is ignored, including
-# transcripts, command output, and worked examples, so a PR that documents this
-# poll cannot make the watcher monitor its own fixture host.
+# Only a canonical labeled declaration is monitored: a case-insensitive
+# "Preview URL", "Visual evidence report", or "Feature testing report" label,
+# plain or bold, immediately followed by a tailnet link. Unlabeled links in
+# transcripts, command output, and worked examples are ignored, so a PR that
+# documents this poll cannot make the watcher monitor its own fixture host.
 # This is a deliberate compatibility boundary: a bare tailnet URL with no label
 # is no longer monitored, and a PR that wants monitoring must declare it.
 # Recognizing declarations rather than excluding examples is what keeps this one
