@@ -9,9 +9,10 @@
 # examples whose hosts do not exist, and a PR that documents this poll would
 # otherwise monitor its own fixture host.
 # The GitHub @tsv body field is decoded before filtering while preserving an
-# already multiline body and escaped backslashes. A fence closes only on the
-# opening marker character repeated at least as many times; an unterminated
-# fence removes the rest of the body, matching the forge's rendering.
+# already multiline body and escaped backslashes. A fence may have at most three
+# leading spaces, and a backtick fence's info string cannot contain a backtick.
+# It closes only on the opening marker character repeated at least as many times;
+# an unterminated fence removes the rest of the body, matching the forge's rendering.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -356,20 +357,24 @@ probe_previews() {
   links=$(printf '%s\n' "$decoded_body" \
     | awk '
       {
-        trimmed = $0
-        sub(/^[[:space:]]*/, "", trimmed)
+        leading = 0
+        while (substr($0, leading + 1, 1) == " ") leading++
+        candidate = leading <= 3
+        trimmed = substr($0, leading + 1)
         delimiter = substr(trimmed, 1, 1)
-        if (delimiter == "`" || delimiter == "~") {
+        if (candidate && (delimiter == "`" || delimiter == "~")) {
           length_now = 0
           while (substr(trimmed, length_now + 1, 1) == delimiter) length_now++
-          if (!fenced && length_now >= 3) {
+          remainder = substr(trimmed, length_now + 1)
+          valid_opener = delimiter != "`" || remainder !~ /`/
+          if (!fenced && length_now >= 3 && valid_opener) {
             fenced = 1
             opener = delimiter
             opener_length = length_now
             next
           }
           if (fenced && delimiter == opener && length_now >= opener_length \
-              && substr(trimmed, length_now + 1) ~ /^[[:space:]]*$/) {
+              && remainder ~ /^[[:space:]]*$/) {
             fenced = 0
             opener = ""
             opener_length = 0

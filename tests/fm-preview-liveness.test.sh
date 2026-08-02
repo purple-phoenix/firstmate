@@ -43,6 +43,8 @@ HEALTHY_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
 FENCED_EVIDENCE_BODY='## Intent\n\nStop false preview alerts under host load.\n\n<details>\n<summary>Evidence: exact durable watcher wake, probes, and committed state</summary>\n\n```text\nPINNED PREVIEW PROBE\n-q --noproxy * --resolve fixture.tailnet.ts.net:9443:100.89.232.70 --connect-timeout 1 --max-time 2 -sS -o /dev/null -w %{http_code} %{size_download} https://fixture.tailnet.ts.net:9443/\nWATCHER OUTPUT\npreview-dead: task=preview-task pr=https://github.com/example/preview-app/pull/42\n```\n</details>\n'
 FOUR_BACKTICK_BODY='````text\nA nested Markdown example follows.\n```sh\ncurl https://fixture.tailnet.ts.net:9443/\n```\n````\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
 LITERAL_BACKSLASH_N_BODY='```text\ntranscript preserves the two characters \\n```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
+INDENTED_NON_FENCE_BODY='    ```example\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+BACKTICK_INFO_NON_FENCE_BODY='```example`info\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 
@@ -571,6 +573,22 @@ test_fenced_example_links_are_not_previews() {
   pass "fenced examples preserve delimiter nesting and literal backslash sequences"
 }
 
+test_non_fence_backtick_lines_preserve_declarations() {
+  local body label out
+  while IFS='|' read -r label body; do
+    reset_logs
+    out=$(FM_TEST_GH_BODY="$body" run_poll)
+    [ -z "$out" ] || fail "$label emitted a wake for a healthy preview"
+    [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+      || fail "$label swallowed a following prose declaration"
+  done <<EOF
+four-space-indented backtick line|$INDENTED_NON_FENCE_BODY
+backtick in fence info string|$BACKTICK_INFO_NON_FENCE_BODY
+EOF
+  reset_preview_state
+  pass "non-fence backtick lines preserve following prose declarations"
+}
+
 # Disconfirming cases: the prose declaration a ready PR actually carries stays
 # monitored, including when the same body also quotes fixture hosts in a fence.
 test_declared_preview_links_stay_monitored() {
@@ -613,6 +631,7 @@ test_declared_preview_links_stay_monitored() {
 }
 
 test_fenced_example_links_are_not_previews
+test_non_fence_backtick_lines_preserve_declarations
 test_declared_preview_links_stay_monitored
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
