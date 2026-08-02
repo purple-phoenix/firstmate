@@ -8,6 +8,10 @@
 # before extraction because they carry transcripts, command output, and worked
 # examples whose hosts do not exist, and a PR that documents this poll would
 # otherwise monitor its own fixture host.
+# The GitHub @tsv body field is decoded before filtering while preserving an
+# already multiline body and escaped backslashes. A fence closes only on the
+# opening marker character repeated at least as many times; an unterminated
+# fence removes the rest of the body, matching the forge's rendering.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -322,19 +326,59 @@ preview_outage_stage_new() {
 
 probe_previews() {
   local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
-  local link_path count
+  local decoded_body link_path count
   task_valid "$task" || return 0
-  # A PR declares its previews in prose - "Preview URL:", "Visual evidence
-  # report:", "Feature testing report:" - while fenced blocks carry transcripts,
-  # command output, and worked examples whose hosts do not exist. Only the prose
-  # is a preview declaration, so fenced content is removed before extraction;
-  # otherwise a PR that documents this very poll monitors its own fixture host.
-  # The forge returns the body as one tab-separated field with newlines escaped,
-  # so line structure is restored first and a body that already has real
-  # newlines passes through unchanged.
-  links=$(printf '%s\n' "$body" \
-    | awk '{ gsub(/\\n/, "\n"); print }' \
-    | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced' \
+  # The header owns preview-declaration extraction mechanics.
+  case "$body" in
+    *$'\n'*) decoded_body=$body ;;
+    *)
+      decoded_body=$(printf '%s\n' "$body" | awk '
+        {
+          decoded = ""
+          for (i = 1; i <= length($0); i++) {
+            char = substr($0, i, 1)
+            if (char != "\\" || i == length($0)) {
+              decoded = decoded char
+              continue
+            }
+            escaped = substr($0, ++i, 1)
+            if (escaped == "n") decoded = decoded "\n"
+            else if (escaped == "r") decoded = decoded "\r"
+            else if (escaped == "t") decoded = decoded "\t"
+            else if (escaped == "\\") decoded = decoded "\\"
+            else decoded = decoded "\\" escaped
+          }
+          print decoded
+        }
+      ')
+      ;;
+  esac
+  links=$(printf '%s\n' "$decoded_body" \
+    | awk '
+      {
+        trimmed = $0
+        sub(/^[[:space:]]*/, "", trimmed)
+        delimiter = substr(trimmed, 1, 1)
+        if (delimiter == "`" || delimiter == "~") {
+          length_now = 0
+          while (substr(trimmed, length_now + 1, 1) == delimiter) length_now++
+          if (!fenced && length_now >= 3) {
+            fenced = 1
+            opener = delimiter
+            opener_length = length_now
+            next
+          }
+          if (fenced && delimiter == opener && length_now >= opener_length \
+              && substr(trimmed, length_now + 1) ~ /^[[:space:]]*$/) {
+            fenced = 0
+            opener = ""
+            opener_length = 0
+            next
+          }
+        }
+        if (!fenced) print
+      }
+    ' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | awk '!seen[$0]++' \
     | head -n 8) || true

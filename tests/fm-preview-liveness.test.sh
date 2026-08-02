@@ -41,6 +41,8 @@ HEALTHY_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
 # quotes a probe command, and no preview declaration anywhere.
 # shellcheck disable=SC2016  # Fixture body text quoted verbatim; nothing expands.
 FENCED_EVIDENCE_BODY='## Intent\n\nStop false preview alerts under host load.\n\n<details>\n<summary>Evidence: exact durable watcher wake, probes, and committed state</summary>\n\n```text\nPINNED PREVIEW PROBE\n-q --noproxy * --resolve fixture.tailnet.ts.net:9443:100.89.232.70 --connect-timeout 1 --max-time 2 -sS -o /dev/null -w %{http_code} %{size_download} https://fixture.tailnet.ts.net:9443/\nWATCHER OUTPUT\npreview-dead: task=preview-task pr=https://github.com/example/preview-app/pull/42\n```\n</details>\n'
+FOUR_BACKTICK_BODY='````text\nA nested Markdown example follows.\n```sh\ncurl https://fixture.tailnet.ts.net:9443/\n```\n````\nPreview URL: https://preview.tailnet.ts.net:5443/\n'
+LITERAL_BACKSLASH_N_BODY='```text\ntranscript preserves the two characters \\n```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 
@@ -549,8 +551,24 @@ test_fenced_example_links_are_not_previews() {
   [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
     || fail "a PR declaring no preview kept a committed outage identity"
   [ ! -e "$SUSPECT" ] || fail "a fenced transcript example was recorded as a failure"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$FOUR_BACKTICK_BODY" run_poll)
+  [ -z "$out" ] || fail "a nested fence example emitted a wake"
+  ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
+    || fail "a shorter nested delimiter closed a four-backtick fence"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "a four-backtick fence hid the following prose declaration"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$LITERAL_BACKSLASH_N_BODY" run_poll)
+  [ -z "$out" ] || fail "a literal backslash-n transcript emitted a wake"
+  [ ! -s "$CURL_LOG" ] \
+    || fail "TSV decoding manufactured a fence boundary from literal backslash-n text"
+  [ ! -s "$TAILSCALE_LOG" ] \
+    || fail "a literal backslash-n transcript resolved a tailnet address"
   reset_preview_state
-  pass "fenced evidence and transcript examples never become monitored previews"
+  pass "fenced examples preserve delimiter nesting and literal backslash sequences"
 }
 
 # Disconfirming cases: the prose declaration a ready PR actually carries stays
