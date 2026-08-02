@@ -176,6 +176,34 @@ test_dead_preview_deduplicates_until_link_change_or_recovery() {
   pass "dead preview remains retryable until its queued wake commits"
 }
 
+test_pending_outage_bypasses_new_corroboration() {
+  local body out
+  body='Retry https://preview.tailnet.ts.net:5443/'
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "first dead preview did not emit a wake"
+  [ -f "$TMP_ROOT/preview-task.preview-outage-pending" ] \
+    || fail "first dead preview did not stage its outage candidate"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
+    FM_TEST_CURL_RC=28 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "local corroboration suppressed an uncommitted outage retry"
+  [ ! -e "$SUSPECT" ] \
+    || fail "an uncommitted outage retry created a corroboration record"
+  ! grep -q '^serve status$' "$TAILSCALE_LOG" \
+    || fail "an uncommitted outage retry consulted local corroboration"
+
+  commit_outage || fail "retried outage candidate did not commit"
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
+  [ -z "$out" ] || fail "committed retried outage emitted a duplicate wake"
+  reset_preview_state
+  pass "a matching pending outage retries before local corroboration"
+}
+
 test_tailnet_override_must_match_local_host() {
   local out
   reset_logs
@@ -456,6 +484,7 @@ test_probe_deadline_baseline_is_not_inherited() {
 
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
+test_pending_outage_bypasses_new_corroboration
 test_tailnet_override_must_match_local_host
 test_healthy_preview_is_silent
 test_closed_merged_and_draft_prs_skip_previews

@@ -144,6 +144,17 @@ preview_suspect_matches() {
   [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
 }
 
+preview_pending_matches() {
+  local failed_link=$1 recorded_url recorded_link
+  [ -n "$preview_pending" ] || return 1
+  [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ] || return 1
+  {
+    IFS= read -r recorded_url || return 1
+    IFS= read -r recorded_link || [ -n "$recorded_link" ] || return 1
+  } < "$preview_pending" 2>/dev/null
+  [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
+}
+
 preview_suspect_record() {
   local failed_link=$1 tmp
   [ -n "$preview_suspect" ] || return 1
@@ -350,6 +361,10 @@ probe_previews() {
     preview_http_ok "$PREVIEW_RETRY_CONNECT_SECS" "$PREVIEW_RETRY_MAX_SECS" "$link" \
       --resolve "$preview_host:$port:$tailnet_ip" && continue
     [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
+    if preview_pending_matches "$link"; then
+      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
+      return 0
+    fi
     if preview_local_evidence "$preview_host" "$port" "$link_path" \
       && ! preview_suspect_matches "$link" \
       && preview_suspect_record "$link"; then
