@@ -99,6 +99,7 @@ state/               volatile runtime signals; gitignored
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
   <id>.preview-outage  private committed ready-preview outage identity used to suppress duplicate wakes
   <id>.preview-outage-pending  private outage candidate committed only after its wake is durably queued
+  <id>.preview-suspect  private record of one unconfirmed ready-preview failure that local evidence still corroborates; the next failing check wakes anyway
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs

@@ -7,6 +7,11 @@
 # draft status, and body; only open ready PRs are probed; curl is pinned to this
 # host's tailnet IPv4 address with short timeouts; a non-200 or empty response
 # emits one task-and-PR wake line; and a healthy preview stays silent.
+# It also owns the false-alert boundary: a captain-facing probe that misses the
+# fast budget is retried once and then corroborated against the loopback target
+# Tailscale serves for that exact preview, which defers a single check interval
+# and never suppresses a second failure, a dead or replaced listener, or an
+# absent, non-loopback, or mismatched serve mapping.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -21,7 +26,12 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 GH_LOG="$TMP_ROOT/gh.log"
 CURL_LOG="$TMP_ROOT/curl.log"
 TAILSCALE_LOG="$TMP_ROOT/tailscale.log"
+CURL_SEQ="$TMP_ROOT/curl.seq"
+SUSPECT="$TMP_ROOT/preview-task.preview-suspect"
 URL=https://github.com/example/preview-app/pull/42
+# The serve mapping this host publishes for the preview authority used below.
+HEALTHY_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
+|-- / proxy http://127.0.0.1:5443'
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
@@ -30,15 +40,40 @@ printf '%s\t%s\t%s\n' \
   "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_DRAFT:-false}" "${FM_TEST_GH_BODY:-}"
 SH
 
+# "serve status" answers with whatever mapping the case declares, defaulting to
+# no mapping at all so an undeclared case keeps the prompt-alert behavior.
 cat > "$FAKEBIN/tailscale" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TAILSCALE_LOG"
+if [ "${1:-}" = serve ]; then
+  [ -z "${FM_TEST_TAILSCALE_SERVE:-}" ] || printf '%s\n' "$FM_TEST_TAILSCALE_SERVE"
+  exit "${FM_TEST_TAILSCALE_SERVE_RC:-0}"
+fi
 printf '%s\n' "${FM_TEST_TAILSCALE_IP:-100.89.232.70}"
 SH
 
+# Loopback targets answer from their own knobs so a case can hold the local
+# service healthy while the captain-facing round trip is slow, or kill the
+# listener while the mapping stays published. Tailnet probes past the first
+# attempt in a poll use the retry knobs, defaulting to the first attempt's
+# result so an unchanged case still fails both budgets.
 cat > "$FAKEBIN/curl" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_CURL_LOG"
+target=${!#}
+case "$target" in
+  http://127.0.0.1:*)
+    printf '%s %s' "${FM_TEST_LOOPBACK_CODE:-200}" "${FM_TEST_LOOPBACK_BYTES:-7}"
+    exit "${FM_TEST_LOOPBACK_RC:-0}"
+    ;;
+esac
+attempt=$(($(cat "$FM_TEST_CURL_SEQ" 2>/dev/null || printf 0) + 1))
+printf '%s\n' "$attempt" > "$FM_TEST_CURL_SEQ"
+if [ "$attempt" -gt 1 ]; then
+  printf '%s %s' "${FM_TEST_CURL_RETRY_CODE:-${FM_TEST_CURL_CODE:-200}}" \
+    "${FM_TEST_CURL_RETRY_BYTES:-${FM_TEST_CURL_BYTES:-7}}"
+  exit "${FM_TEST_CURL_RETRY_RC:-${FM_TEST_CURL_RC:-0}}"
+fi
 printf '%s %s' "${FM_TEST_CURL_CODE:-200}" "${FM_TEST_CURL_BYTES:-7}"
 exit "${FM_TEST_CURL_RC:-0}"
 SH
@@ -51,10 +86,17 @@ reset_logs() {
 }
 
 run_poll() {
+  : > "$CURL_SEQ"
   FM_TEST_GH_LOG="$GH_LOG" FM_TEST_CURL_LOG="$CURL_LOG" \
-    FM_TEST_TAILSCALE_LOG="$TAILSCALE_LOG" FM_PR_POLL_TASK_ID=preview-task \
+    FM_TEST_TAILSCALE_LOG="$TAILSCALE_LOG" FM_TEST_CURL_SEQ="$CURL_SEQ" \
+    FM_PR_POLL_TASK_ID=preview-task \
     FM_PR_POLL_STATE="$TMP_ROOT" PATH="$FAKEBIN:$BASE_PATH" "$POLL" --validated \
     github "$URL" github.com example/preview-app 42
+}
+
+reset_preview_state() {
+  rm -f "$TMP_ROOT/preview-task.preview-outage" \
+    "$TMP_ROOT/preview-task.preview-outage-pending" "$SUSPECT"
 }
 
 commit_outage() {
@@ -253,9 +295,174 @@ test_dead_preview_reaches_durable_wake_queue_once() {
   pass "dead preview produces exactly one durable watcher wake naming its task and PR"
 }
 
+# The reported false alert: the listener never restarted, loopback answered in
+# milliseconds, and the tailnet round trip simply missed a two-second budget on
+# a loaded host. One bounded retry inside the same poll absorbs it.
+test_bounded_retry_absorbs_a_slow_tailnet_probe() {
+  local out
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_CURL_RETRY_CODE=200 FM_TEST_CURL_RETRY_BYTES=4096 \
+    FM_TEST_CURL_RETRY_RC=0 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "a preview that answered on the bounded retry emitted a wake"
+  [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 2 ] \
+    || fail "slow preview probe was not retried exactly once"
+  assert_grep '--connect-timeout 2 --max-time 5' "$CURL_LOG" \
+    "the retry did not use the bounded larger budget"
+  [ "$(grep -c -- '--resolve preview.tailnet.ts.net:5443:100.89.232.70' "$CURL_LOG")" -eq 2 ] \
+    || fail "the retry was not pinned to the host tailnet IPv4 address"
+  [ ! -e "$SUSPECT" ] || fail "a recovered retry left an unconfirmed-failure record"
+  [ ! -e "$TMP_ROOT/preview-task.preview-outage-pending" ] \
+    || fail "a recovered retry staged a preview outage"
+  pass "a slow tailnet round trip that answers on one bounded retry stays silent"
+}
+
+# Corroboration buys exactly one check interval and never more: the second
+# consecutive captain-facing failure wakes firstmate even while the local
+# service keeps answering.
+test_corroborated_transient_failure_defers_exactly_one_check() {
+  local out
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "a corroborated first failure emitted a wake"
+  [ -f "$SUSPECT" ] || fail "a corroborated first failure was not recorded"
+  [ "$(fm_pr_file_mode "$SUSPECT")" = 600 ] \
+    || fail "the unconfirmed-failure record is not private"
+  [ ! -e "$TMP_ROOT/preview-task.preview-outage-pending" ] \
+    || fail "a corroborated first failure staged a preview outage"
+  assert_grep 'http://127.0.0.1:5443/' "$CURL_LOG" \
+    "the corroborating probe did not use the served loopback target and link path"
+  assert_grep '--connect-timeout 1 --max-time 2' "$CURL_LOG" \
+    "the corroborating probe was not bounded"
+  [ "$(grep -c -- '--resolve' "$CURL_LOG")" -eq 2 ] \
+    || fail "the corroborating loopback probe was pinned like a tailnet probe"
+
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "a persistent captain-facing failure did not wake on the next check"
+  commit_outage || fail "confirmed outage candidate did not commit"
+
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "a committed confirmed outage emitted a duplicate wake"
+  reset_preview_state
+  pass "a corroborated failure defers one check, then wakes once and deduplicates"
+}
+
+test_corroborated_failure_recovers_without_a_wake() {
+  local body out
+  body='Review at https://preview.tailnet.ts.net:5443/'
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
+    FM_TEST_CURL_RC=28 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "a corroborated first failure emitted a wake"
+  [ -f "$SUSPECT" ] || fail "a corroborated first failure was not recorded"
+
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "recovery after a deferred failure emitted a wake"
+  [ ! -e "$SUSPECT" ] || fail "recovery did not retire the unconfirmed-failure record"
+
+  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
+    FM_TEST_CURL_RC=28 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -z "$out" ] || fail "a failure after recovery did not start a fresh deferral"
+  [ -f "$SUSPECT" ] || fail "a failure after recovery was not recorded"
+  reset_preview_state
+  pass "recovery clears the deferral so a later failure starts fresh"
+}
+
+# Local evidence is only ever evidence against a transient alert. Whenever the
+# listener is gone or replaced by something that does not answer, the wake is
+# prompt even though the mapping is still published.
+test_dead_or_replaced_listener_alerts_immediately() {
+  local out
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_LOOPBACK_CODE=000 FM_TEST_LOOPBACK_BYTES=0 FM_TEST_LOOPBACK_RC=7 \
+    FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "a dead listener behind a published mapping did not wake promptly"
+  [ ! -e "$SUSPECT" ] || fail "a dead listener was recorded as a deferrable failure"
+  reset_preview_state
+
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_LOOPBACK_CODE=503 FM_TEST_LOOPBACK_BYTES=0 \
+    FM_TEST_TAILSCALE_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
+|-- / proxy http://127.0.0.1:9999' run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "a replaced listener that does not answer did not wake promptly"
+  reset_preview_state
+  pass "a dead or replaced local listener wakes on the first failing check"
+}
+
+test_absent_or_mismatched_mapping_alerts_immediately() {
+  local out serve label
+  while IFS='|' read -r label serve; do
+    [ -n "$label" ] || continue
+    reset_preview_state
+    reset_logs
+    out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+      FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+      FM_TEST_TAILSCALE_SERVE="$(printf '%b' "$serve")" run_poll)
+    [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+      || fail "$label did not wake on the first failing check"
+    [ ! -e "$SUSPECT" ] || fail "$label was recorded as a deferrable failure"
+    ! grep -q 'http://127.0.0.1' "$CURL_LOG" \
+      || fail "$label was corroborated against an unbound loopback target"
+  done <<'EOF'
+an absent serve mapping|
+a mapping for another port|https://preview.tailnet.ts.net:5999 (tailnet only)\n|-- / proxy http://127.0.0.1:5443
+a mapping for another host|https://other.tailnet.ts.net:5443 (tailnet only)\n|-- / proxy http://127.0.0.1:5443
+a non-loopback target|https://preview.tailnet.ts.net:5443 (tailnet only)\n|-- / proxy http://10.0.0.5:5443
+a sub-path handler only|https://preview.tailnet.ts.net:5443 (tailnet only)\n|-- /app proxy http://127.0.0.1:5443
+EOF
+
+  reset_preview_state
+  reset_logs
+  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
+    FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" FM_TEST_TAILSCALE_SERVE_RC=1 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "an unreadable serve mapping did not wake on the first failing check"
+  reset_preview_state
+  pass "an absent, mismatched, non-loopback, or unreadable mapping wakes promptly"
+}
+
+# The probe deadline bounds the work; it must never become a silent off switch.
+# bash adopts SECONDS from its environment, so the poll sets its own baseline.
+test_probe_deadline_baseline_is_not_inherited() {
+  local out
+  reset_preview_state
+  reset_logs
+  out=$(SECONDS=99999 FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_CURL_CODE=503 FM_TEST_CURL_BYTES=0 run_poll)
+  [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
+    || fail "an inherited elapsed-time baseline suppressed preview probing"
+  [ -s "$CURL_LOG" ] || fail "an inherited elapsed-time baseline skipped every probe"
+  reset_preview_state
+  pass "the probe deadline measures from a baseline the poll sets itself"
+}
+
 test_dead_preview_wakes
 test_dead_preview_deduplicates_until_link_change_or_recovery
 test_tailnet_override_must_match_local_host
 test_healthy_preview_is_silent
 test_closed_merged_and_draft_prs_skip_previews
+test_bounded_retry_absorbs_a_slow_tailnet_probe
+test_corroborated_transient_failure_defers_exactly_one_check
+test_corroborated_failure_recovers_without_a_wake
+test_dead_or_replaced_listener_alerts_immediately
+test_absent_or_mismatched_mapping_alerts_immediately
+test_probe_deadline_baseline_is_not_inherited
 test_dead_preview_reaches_durable_wake_queue_once
