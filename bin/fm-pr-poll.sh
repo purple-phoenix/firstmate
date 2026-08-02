@@ -333,7 +333,7 @@ probe_previews() {
   task_valid "$task" || return 0
   # The header owns which declarations are monitored.
   links=$(printf '%s\n' "$body" \
-    | grep -Eio '(\*\*)?(Preview URL|Visual evidence report|Feature testing report):(\*\*)?[[:space:]]+https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
+    | grep -Eio '(^|[^*])((Preview URL|Visual evidence report|Feature testing report):|\*\*(Preview URL|Visual evidence report|Feature testing report):\*\*)[[:space:]]+https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
     | awk '!seen[$0]++' \
     | head -n 8) || true

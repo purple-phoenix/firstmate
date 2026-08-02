@@ -63,6 +63,7 @@ UNLABELED_PROSE_BODY='Staging review is live at https://preview.tailnet.ts.net:5
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 BOLD_DECLARED_PREVIEW_BODY='## Tailscale Preview\n\n**Preview URL:** https://preview.tailnet.ts.net:5443/\n\n**Visual evidence report:** https://preview.tailnet.ts.net:5443/__review__/evidence\n\n**Feature testing report:** https://preview.tailnet.ts.net:5443/__review__/feature-report\n'
+HALF_BOLD_DECLARATION_BODY='**Preview URL: https://preview.tailnet.ts.net:5443/\n\nPreview URL:** https://replacement.tailnet.ts.net:5443/\n'
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
@@ -699,6 +700,13 @@ test_declared_preview_links_stay_monitored() {
     "the bold visual evidence declaration was not monitored"
   assert_grep 'https://preview.tailnet.ts.net:5443/__review__/feature-report' "$CURL_LOG" \
     "the bold feature testing declaration was not monitored"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$HALF_BOLD_DECLARATION_BODY" run_poll)
+  [ -z "$out" ] || fail "a half-bold declaration emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "a half-bold declaration was probed"
+  [ ! -s "$TAILSCALE_LOG" ] \
+    || fail "a half-bold declaration resolved a tailnet address"
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$DECLARED_PREVIEW_BODY$FENCED_EVIDENCE_BODY" run_poll)
