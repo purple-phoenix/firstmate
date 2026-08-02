@@ -4,16 +4,12 @@
 # For an open, ready GitHub PR, the same single gh read also returns the body so
 # up to eight tailnet preview links can be probed with one-second connect and
 # two-second total timeouts.
-# Only links a PR declares in prose count as previews. Fenced blocks are removed
-# before extraction because they carry transcripts, command output, and worked
-# examples whose hosts do not exist, and a PR that documents this poll would
-# otherwise monitor its own fixture host.
-# The GitHub @tsv body field is decoded before filtering while preserving an
-# already multiline body and escaped backslashes. Repeated blockquote and list
-# container prefixes are removed before both fence recognition and link extraction.
-# A fence may have at most three leading spaces, and a backtick fence's info string
-# cannot contain a backtick. It closes only on the opening marker character repeated
-# at least as many times; an unterminated fence removes the rest of the body.
+# Only tailnet links on lines beginning with "Preview URL:", "Visual evidence
+# report:", or "Feature testing report:" count as previews. Those canonical
+# labels may follow repeated blockquote or list prefixes and up to three spaces.
+# Bare, unlabeled, transcript, and example links are intentionally ignored.
+# The GitHub @tsv body field is decoded before extraction while preserving an
+# already multiline body and escaped backslashes.
 # A link that fails that first budget is retried once at two-second connect and
 # five-second total timeouts, because a loaded host can push an otherwise healthy
 # tailnet round trip past the first budget while the service answers in
@@ -398,29 +394,10 @@ probe_previews() {
         normalized = normalize_container($0)
         leading = 0
         while (substr(normalized, leading + 1, 1) == " ") leading++
-        candidate = leading <= 3
-        trimmed = substr(normalized, leading + 1)
-        delimiter = substr(trimmed, 1, 1)
-        if (candidate && (delimiter == "`" || delimiter == "~")) {
-          length_now = 0
-          while (substr(trimmed, length_now + 1, 1) == delimiter) length_now++
-          remainder = substr(trimmed, length_now + 1)
-          valid_opener = delimiter != "`" || remainder !~ /`/
-          if (!fenced && length_now >= 3 && valid_opener) {
-            fenced = 1
-            opener = delimiter
-            opener_length = length_now
-            next
-          }
-          if (fenced && delimiter == opener && length_now >= opener_length \
-              && remainder ~ /^[[:space:]]*$/) {
-            fenced = 0
-            opener = ""
-            opener_length = 0
-            next
-          }
-        }
-        if (!fenced) print normalized
+        if (leading > 3) next
+        declaration = substr(normalized, leading + 1)
+        if (declaration ~ /^(Preview URL|Visual evidence report|Feature testing report):[[:space:]]*/) \
+          print declaration
       }
     ' \
     | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \

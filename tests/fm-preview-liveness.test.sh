@@ -4,9 +4,10 @@
 # The watcher itself already has coverage proving any non-empty authenticated
 # PR-poll result becomes a check wake.
 # This suite owns the preview-specific contract: one GitHub read supplies state,
-# draft status, and body; only open ready PRs are probed; curl is pinned to this
-# host's tailnet IPv4 address with short timeouts; a non-200 or empty response
-# emits one task-and-PR wake line; and a healthy preview stays silent.
+# draft status, and body; only canonical label-prefixed links on open ready PRs
+# are probed; curl is pinned to this host's tailnet IPv4 address with short
+# timeouts; a non-200 or empty response emits one task-and-PR wake line; and a
+# healthy preview stays silent.
 # It also owns the false-alert boundary: a captain-facing probe that misses the
 # fast budget is retried once and then corroborated against the loopback target
 # Tailscale serves for that exact preview, which defers a single check interval
@@ -48,6 +49,8 @@ BACKTICK_INFO_NON_FENCE_BODY='```example`info\nPreview URL: https://preview.tail
 BLOCKQUOTED_FENCE_BODY='> ```text\n> https://fixture.tailnet.ts.net:9443/\n> ````\n'
 BLOCKQUOTED_DECLARATION_BODY='> Preview URL: https://preview.tailnet.ts.net:5443/\n'
 LIST_CONTAINER_BODY='- ```text\n  https://fixture.tailnet.ts.net:9443/\n  ```\n- Preview URL: https://preview.tailnet.ts.net:5443/\n'
+CONTAINER_LIKE_CODE_BODY='```text\n- ```\nhttps://fixture.tailnet.ts.net:9443/\n```\n'
+UNLABELED_PREVIEW_BODY='Review at https://preview.tailnet.ts.net:5443/\n'
 # The declaration a real ready PR carries, in prose and outside every fence.
 DECLARED_PREVIEW_BODY='## Tailscale Preview\n\nPreview URL: https://preview.tailnet.ts.net:5443/\n\nVisual evidence report: https://preview.tailnet.ts.net:5443/__review__/evidence\n\nFeature testing report: https://preview.tailnet.ts.net:5443/__review__/feature-report\n\nPreview head SHA: 27de1405\n'
 
@@ -129,7 +132,7 @@ commit_outage() {
 test_dead_preview_wakes() {
   local out
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=503 FM_PREVIEW_TAILNET_IP=100.89.232.70 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "dead preview did not emit the exact task-and-PR wake"
@@ -150,7 +153,7 @@ test_dead_preview_wakes() {
   commit_outage || fail "dead preview candidate did not commit"
 
   reset_logs
-  out=$(FM_TEST_GH_BODY='https://preview.tailnet.ts.net/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net/' \
     FM_TEST_CURL_BYTES=0 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "zero-byte preview did not emit the exact wake"
@@ -160,7 +163,7 @@ test_dead_preview_wakes() {
 
 test_dead_preview_deduplicates_until_link_change_or_recovery() {
   local body out
-  body='Deduplicate https://preview.tailnet.ts.net:5443/'
+  body='Preview URL: https://preview.tailnet.ts.net:5443/'
   rm -f "$TMP_ROOT/preview-task.preview-outage" \
     "$TMP_ROOT/preview-task.preview-outage-pending"
   reset_logs
@@ -183,7 +186,7 @@ test_dead_preview_deduplicates_until_link_change_or_recovery() {
   out=$(FM_TEST_GH_BODY="$body Updated" FM_TEST_CURL_CODE=503 run_poll)
   [ -z "$out" ] || fail "unrelated PR body change emitted a duplicate wake"
 
-  body='Deduplicate https://replacement.tailnet.ts.net:5443/'
+  body='Preview URL: https://replacement.tailnet.ts.net:5443/'
   out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "preview link change did not start a new preview outage"
@@ -201,7 +204,7 @@ test_dead_preview_deduplicates_until_link_change_or_recovery() {
 
 test_pending_outage_bypasses_new_corroboration() {
   local body out
-  body='Retry https://preview.tailnet.ts.net:5443/'
+  body='Preview URL: https://preview.tailnet.ts.net:5443/'
   reset_preview_state
   reset_logs
   out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=503 run_poll)
@@ -233,8 +236,8 @@ test_pending_outage_bypasses_new_corroboration() {
 
 test_link_change_retires_stale_preview_identity() {
   local body_a body_b out
-  body_a='Review https://preview.tailnet.ts.net:5443/'
-  body_b='Review https://replacement.tailnet.ts.net:5443/'
+  body_a='Preview URL: https://preview.tailnet.ts.net:5443/'
+  body_b='Preview URL: https://replacement.tailnet.ts.net:5443/'
   reset_preview_state
   reset_logs
   out=$(FM_TEST_GH_BODY="$body_a" FM_TEST_CURL_CODE=503 run_poll)
@@ -262,7 +265,7 @@ test_link_change_retires_stale_preview_identity() {
 test_tailnet_override_must_match_local_host() {
   local out
   reset_logs
-  out=$(FM_TEST_GH_BODY='https://preview.tailnet.ts.net/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net/' \
     FM_PREVIEW_TAILNET_IP=100.89.232.71 run_poll)
   [ -z "$out" ] || fail "foreign tailnet override emitted a wake"
   [ ! -s "$CURL_LOG" ] || fail "foreign tailnet override reached curl"
@@ -274,7 +277,7 @@ test_tailnet_override_must_match_local_host() {
 test_healthy_preview_is_silent() {
   local out
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' run_poll)
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' run_poll)
   [ -z "$out" ] || fail "healthy preview emitted a wake"
   [ "$(wc -l < "$GH_LOG" | tr -d '[:space:]')" -eq 1 ] \
     || fail "healthy preview used more than one GitHub read"
@@ -290,7 +293,7 @@ test_closed_merged_and_draft_prs_skip_previews() {
     printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
     printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage-pending"
     out=$(FM_TEST_GH_STATE=$state \
-      FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' run_poll)
+      FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' run_poll)
     if [ "$state" = MERGED ]; then
       [ "$out" = merged ] || fail "merged PR lost its existing terminal result"
     else
@@ -308,7 +311,7 @@ test_closed_merged_and_draft_prs_skip_previews() {
   printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
   printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage-pending"
   out=$(FM_TEST_GH_DRAFT=true \
-    FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' run_poll)
+    FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' run_poll)
   [ -z "$out" ] || fail "draft PR emitted a preview wake"
   [ ! -s "$CURL_LOG" ] || fail "draft PR performed a preview probe"
   [ ! -s "$TAILSCALE_LOG" ] || fail "draft PR resolved a tailnet address"
@@ -342,7 +345,7 @@ test_dead_preview_reaches_durable_wake_queue_once() {
     FM_CHECK_TIMEOUT=3 FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
     FM_TEST_GH_LOG="$GH_LOG" FM_TEST_CURL_LOG="$CURL_LOG" \
     FM_TEST_TAILSCALE_LOG="$TAILSCALE_LOG" \
-    FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=503 FM_PREVIEW_TAILNET_IP=100.89.232.70 \
     PATH="$FAKEBIN:$BASE_PATH" "$WATCH" 2>&1)
   rc=$?
@@ -389,7 +392,7 @@ test_bounded_retry_absorbs_a_slow_tailnet_probe() {
   local out
   reset_preview_state
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_CURL_RETRY_CODE=200 FM_TEST_CURL_RETRY_BYTES=4096 \
     FM_TEST_CURL_RETRY_RC=0 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
@@ -413,7 +416,7 @@ test_corroborated_transient_failure_defers_exactly_one_check() {
   local out
   reset_preview_state
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
   [ -z "$out" ] || fail "a corroborated first failure emitted a wake"
@@ -429,14 +432,14 @@ test_corroborated_transient_failure_defers_exactly_one_check() {
   [ "$(grep -c -- '--resolve' "$CURL_LOG")" -eq 2 ] \
     || fail "the corroborating loopback probe was pinned like a tailnet probe"
 
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "a persistent captain-facing failure did not wake on the next check"
   commit_outage || fail "confirmed outage candidate did not commit"
 
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
   [ -z "$out" ] || fail "a committed confirmed outage emitted a duplicate wake"
@@ -446,7 +449,7 @@ test_corroborated_transient_failure_defers_exactly_one_check() {
 
 test_corroborated_failure_recovers_without_a_wake() {
   local body out
-  body='Review at https://preview.tailnet.ts.net:5443/'
+  body='Preview URL: https://preview.tailnet.ts.net:5443/'
   reset_preview_state
   reset_logs
   out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
@@ -473,7 +476,7 @@ test_dead_or_replaced_listener_alerts_immediately() {
   local out
   reset_preview_state
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_LOOPBACK_CODE=000 FM_TEST_LOOPBACK_BYTES=0 FM_TEST_LOOPBACK_RC=7 \
     FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
@@ -482,7 +485,7 @@ test_dead_or_replaced_listener_alerts_immediately() {
   [ ! -e "$SUSPECT" ] || fail "a dead listener was recorded as a deferrable failure"
   reset_preview_state
 
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_LOOPBACK_CODE=503 FM_TEST_LOOPBACK_BYTES=0 \
     FM_TEST_TAILSCALE_SERVE='https://preview.tailnet.ts.net:5443 (tailnet only)
@@ -499,7 +502,7 @@ test_absent_or_mismatched_mapping_alerts_immediately() {
     [ -n "$label" ] || continue
     reset_preview_state
     reset_logs
-    out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+    out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
       FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
       FM_TEST_TAILSCALE_SERVE="$(printf '%b' "$serve")" run_poll)
     [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
@@ -517,7 +520,7 @@ EOF
 
   reset_preview_state
   reset_logs
-  out=$(FM_TEST_GH_BODY='Review at https://preview.tailnet.ts.net:5443/' \
+  out=$(FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 FM_TEST_CURL_RC=28 \
     FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" FM_TEST_TAILSCALE_SERVE_RC=1 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
@@ -532,7 +535,7 @@ test_probe_deadline_baseline_is_not_inherited() {
   local out
   reset_preview_state
   reset_logs
-  out=$(SECONDS=99999 FM_TEST_GH_BODY='https://preview.tailnet.ts.net:5443/' \
+  out=$(SECONDS=99999 FM_TEST_GH_BODY='Preview URL: https://preview.tailnet.ts.net:5443/' \
     FM_TEST_CURL_CODE=503 FM_TEST_CURL_BYTES=0 run_poll)
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
     || fail "an inherited elapsed-time baseline suppressed preview probing"
@@ -542,54 +545,67 @@ test_probe_deadline_baseline_is_not_inherited() {
 }
 
 # The self-hosting regression: this repository's own PR documented the poll,
-# and its fenced evidence transcript became the preview the poll then monitored.
-test_fenced_example_links_are_not_previews() {
+# and an unlabeled evidence URL became the preview the poll then monitored.
+test_unlabeled_and_synthetic_links_are_not_previews() {
   local out
   reset_preview_state
   reset_logs
   printf '%s\n' stale > "$TMP_ROOT/preview-task.preview-outage"
   out=$(FM_TEST_GH_BODY="$FENCED_EVIDENCE_BODY" FM_TEST_CURL_CODE=503 \
     FM_TEST_CURL_BYTES=0 run_poll)
-  [ -z "$out" ] || fail "a fenced transcript example was monitored as a preview"
-  [ ! -s "$CURL_LOG" ] || fail "a fenced transcript example was probed"
-  [ ! -s "$TAILSCALE_LOG" ] || fail "a fenced transcript example resolved a tailnet address"
+  [ -z "$out" ] || fail "an unlabeled transcript example was monitored as a preview"
+  [ ! -s "$CURL_LOG" ] || fail "an unlabeled transcript example was probed"
+  [ ! -s "$TAILSCALE_LOG" ] || fail "an unlabeled transcript example resolved a tailnet address"
   [ ! -e "$TMP_ROOT/preview-task.preview-outage" ] \
     || fail "a PR declaring no preview kept a committed outage identity"
-  [ ! -e "$SUSPECT" ] || fail "a fenced transcript example was recorded as a failure"
+  [ ! -e "$SUSPECT" ] || fail "an unlabeled transcript example was recorded as a failure"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$UNLABELED_PREVIEW_BODY" run_poll)
+  [ -z "$out" ] || fail "a bare prose URL emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "a bare prose URL was probed"
+  [ ! -s "$TAILSCALE_LOG" ] || fail "a bare prose URL resolved a tailnet address"
+
+  reset_logs
+  out=$(FM_TEST_GH_BODY="$CONTAINER_LIKE_CODE_BODY" run_poll)
+  [ -z "$out" ] || fail "container-like transcript text emitted a wake"
+  [ ! -s "$CURL_LOG" ] || fail "container-like transcript text exposed a fixture URL"
+  [ ! -s "$TAILSCALE_LOG" ] \
+    || fail "container-like transcript text resolved a tailnet address"
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$FOUR_BACKTICK_BODY" run_poll)
-  [ -z "$out" ] || fail "a nested fence example emitted a wake"
+  [ -z "$out" ] || fail "a declaration beside nested example code emitted a wake"
   ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
-    || fail "a shorter nested delimiter closed a four-backtick fence"
+    || fail "an unlabeled nested example URL was probed"
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
-    || fail "a four-backtick fence hid the following prose declaration"
+    || fail "a canonical declaration after nested example code was not monitored"
 
   reset_logs
   out=$(FM_TEST_GH_BODY="$LITERAL_BACKSLASH_N_BODY" run_poll)
-  [ -z "$out" ] || fail "a literal backslash-n transcript emitted a wake"
+  [ -z "$out" ] || fail "an unlabeled literal backslash-n transcript emitted a wake"
   [ ! -s "$CURL_LOG" ] \
-    || fail "TSV decoding manufactured a fence boundary from literal backslash-n text"
+    || fail "a literal backslash-n transcript exposed an unlabeled fixture URL"
   [ ! -s "$TAILSCALE_LOG" ] \
     || fail "a literal backslash-n transcript resolved a tailnet address"
   reset_preview_state
-  pass "fenced examples preserve delimiter nesting and literal backslash sequences"
+  pass "only canonical declaration labels produce preview identities"
 }
 
-test_non_fence_backtick_lines_preserve_declarations() {
+test_canonical_declarations_after_synthetic_code_are_monitored() {
   local body label out
   while IFS='|' read -r label body; do
     reset_logs
     out=$(FM_TEST_GH_BODY="$body" run_poll)
     [ -z "$out" ] || fail "$label emitted a wake for a healthy preview"
     [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
-      || fail "$label swallowed a following prose declaration"
+      || fail "$label hid a following canonical declaration"
   done <<EOF
 four-space-indented backtick line|$INDENTED_NON_FENCE_BODY
 backtick in fence info string|$BACKTICK_INFO_NON_FENCE_BODY
 EOF
   reset_preview_state
-  pass "non-fence backtick lines preserve following prose declarations"
+  pass "canonical declarations after synthetic code stay monitored"
 }
 
 test_container_fences_and_declarations() {
@@ -610,15 +626,15 @@ test_container_fences_and_declarations() {
   out=$(FM_TEST_GH_BODY="$LIST_CONTAINER_BODY" run_poll)
   [ -z "$out" ] || fail "a list-contained healthy declaration emitted a wake"
   ! grep -q 'fixture.tailnet.ts.net' "$CURL_LOG" \
-    || fail "a list-contained fenced fixture was probed"
+    || fail "a list-contained unlabeled fixture was probed"
   [ "$(wc -l < "$CURL_LOG" | tr -d '[:space:]')" -eq 1 ] \
-    || fail "a list-contained prose declaration was not monitored"
+    || fail "a list-contained canonical declaration was not monitored"
   reset_preview_state
-  pass "container fences stay hidden while prose declarations stay monitored"
+  pass "container declarations stay monitored while unlabeled fixtures stay ignored"
 }
 
-# Disconfirming cases: the prose declaration a ready PR actually carries stays
-# monitored, including when the same body also quotes fixture hosts in a fence.
+# Disconfirming cases: every canonical declaration a ready PR carries stays
+# monitored, including when the same body also quotes unlabeled fixture hosts.
 test_declared_preview_links_stay_monitored() {
   local out
   reset_preview_state
@@ -658,8 +674,8 @@ test_declared_preview_links_stay_monitored() {
   pass "declared preview, visual evidence, and feature report links stay monitored"
 }
 
-test_fenced_example_links_are_not_previews
-test_non_fence_backtick_lines_preserve_declarations
+test_unlabeled_and_synthetic_links_are_not_previews
+test_canonical_declarations_after_synthetic_code_are_monitored
 test_container_fences_and_declarations
 test_declared_preview_links_stay_monitored
 test_dead_preview_wakes

@@ -17,7 +17,7 @@ The receipt makes retirement safely retryable across restarts: fixed-path recove
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 A dead-preview wake is deliberately harder to earn than the other check results, because a preview alert that cries wolf is ignored on the run where it is right.
-Only links a PR declares in prose are monitored, so the transcripts and worked examples inside fenced blocks cannot become preview identities - a PR documenting this mechanism would otherwise monitor its own fixture hosts.
+Only tailnet links prefixed by the canonical `Preview URL:`, `Visual evidence report:`, or `Feature testing report:` labels are monitored; bare and unlabeled transcript or example links are intentionally incompatible and cannot become preview identities.
 A captain-facing preview link that misses its probe budget is retried once at a larger bounded budget, and a link that still fails is corroborated against the loopback target Tailscale currently serves for that exact preview authority.
 Corroboration only defers: it costs one check interval, is never treated as proof that an unreachable preview URL is healthy, and a second consecutive failure wakes firstmate even while the local service keeps answering.
 A missing, mismatched, non-loopback, or unreadable serve mapping and a local target that does not answer all wake on the first failing check, so a genuinely dead preview is never delayed by this path.
