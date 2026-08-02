@@ -360,11 +360,11 @@ probe_previews() {
     [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
     preview_http_ok "$PREVIEW_RETRY_CONNECT_SECS" "$PREVIEW_RETRY_MAX_SECS" "$link" \
       --resolve "$preview_host:$port:$tailnet_ip" && continue
-    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
     if preview_pending_matches "$link"; then
       printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
       return 0
     fi
+    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
     if preview_local_evidence "$preview_host" "$port" "$link_path" \
       && ! preview_suspect_matches "$link" \
       && preview_suspect_record "$link"; then

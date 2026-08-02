@@ -27,6 +27,8 @@ GH_LOG="$TMP_ROOT/gh.log"
 CURL_LOG="$TMP_ROOT/curl.log"
 TAILSCALE_LOG="$TMP_ROOT/tailscale.log"
 CURL_SEQ="$TMP_ROOT/curl.seq"
+DEADLINE_ENV="$TMP_ROOT/deadline.bash"
+DEADLINE_MARKER="$TMP_ROOT/deadline-crossed"
 SUSPECT="$TMP_ROOT/preview-task.preview-suspect"
 URL=https://github.com/example/preview-app/pull/42
 # The serve mapping this host publishes for the preview authority used below.
@@ -78,6 +80,11 @@ printf '%s %s' "${FM_TEST_CURL_CODE:-200}" "${FM_TEST_CURL_BYTES:-7}"
 exit "${FM_TEST_CURL_RC:-0}"
 SH
 chmod +x "$FAKEBIN/gh" "$FAKEBIN/tailscale" "$FAKEBIN/curl"
+
+cat > "$DEADLINE_ENV" <<'SH'
+set -T
+trap 'case $BASH_COMMAND in preview_http_ok*PREVIEW_RETRY_CONNECT_SECS*) SECONDS=18; : > "$FM_TEST_DEADLINE_MARKER" ;; esac' DEBUG
+SH
 
 reset_logs() {
   : > "$GH_LOG"
@@ -188,10 +195,14 @@ test_pending_outage_bypasses_new_corroboration() {
     || fail "first dead preview did not stage its outage candidate"
 
   reset_logs
-  out=$(FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
+  rm -f "$DEADLINE_MARKER"
+  out=$(BASH_ENV="$DEADLINE_ENV" FM_TEST_DEADLINE_MARKER="$DEADLINE_MARKER" \
+    FM_TEST_GH_BODY="$body" FM_TEST_CURL_CODE=000 FM_TEST_CURL_BYTES=0 \
     FM_TEST_CURL_RC=28 FM_TEST_TAILSCALE_SERVE="$HEALTHY_SERVE" run_poll)
+  [ -f "$DEADLINE_MARKER" ] \
+    || fail "pending-outage retry did not cross the probe deadline"
   [ "$out" = "preview-dead: task=preview-task pr=$URL" ] \
-    || fail "local corroboration suppressed an uncommitted outage retry"
+    || fail "the probe deadline suppressed an uncommitted outage retry"
   [ ! -e "$SUSPECT" ] \
     || fail "an uncommitted outage retry created a corroboration record"
   ! grep -q '^serve status$' "$TAILSCALE_LOG" \
