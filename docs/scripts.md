@@ -108,5 +108,5 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tg-setup.sh`         | Guarded Telegram channel setup, pairing, enable, disable, status, and removal        |
 | `fm-tg-poll.sh`          | One bounded Telegram long poll: validate, commit, and wake on new captain messages   |
 | `fm-tg-inbox.sh`         | List and claim durable captain messages from `state/tg/inbox/`                       |
-| `fm-tg-reply.sh`         | Send one at-most-once captain-facing Telegram message, split within Telegram's limit |
+| `fm-tg-reply.sh`         | Send one at-most-once captain-facing reply operation, split within Telegram's limit |
 | `fm-tg-link.sh`          | Bind a task to the Telegram message that asked for it, so its outcome returns there |

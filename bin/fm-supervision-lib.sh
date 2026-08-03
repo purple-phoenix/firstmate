@@ -24,7 +24,7 @@ fm_sup_stat_mtime() {
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_NEEDED         true/false - in-flight work or an X-mode relay poll
+#   FM_SUP_NEEDED         true/false - in-flight work or an armed inbound captain channel
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -69,8 +69,8 @@ fm_supervision_status() {
 }
 
 # fm_supervision_needed <state-dir> [grace-seconds]
-# Exit 0 (true) exactly when in-flight work or an X-mode relay poll needs a
-# watcher. Exit 1 (false) for an idle home.
+# Exit 0 (true) exactly when in-flight work or an armed inbound captain channel
+# needs a watcher. Exit 1 (false) for an idle home.
 fm_supervision_needed() {
   fm_supervision_status "$@"
   [ "$FM_SUP_NEEDED" = true ]

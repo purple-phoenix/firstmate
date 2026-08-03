@@ -377,7 +377,7 @@ The Telegram channel gives the captain a private one-to-one chat with their own 
 [`telegram-channel.md`](telegram-channel.md) owns the setup walkthrough, supported message types, privacy limitation, troubleshooting, and opt-out; this section owns the schema and local state.
 
 The channel is inert until three separate steps complete, and each refuses until its predecessor has, so a half-configured channel can never accept a message: a bot token is stored, the captain's numeric identity is paired, and the channel is explicitly enabled.
-`config/telegram.json` (gitignored, mode 0600) is the whole configuration:
+`config/telegram.json` (gitignored, mode 0600) is the whole non-secret configuration:
 
 ```json
 {
@@ -392,14 +392,15 @@ The channel is inert until three separate steps complete, and each refuses until
 }
 ```
 
-`user_id` and `chat_id` are the entire ingress allowlist: an update is accepted only when it is a plain `message` in a `private` chat whose chat id and sender id both match exactly, the sender is not a bot, and the message carries no forward marker, `via_bot`, `sender_chat`, or `story` field.
+`user_id` and `chat_id` are the entire ingress allowlist: an update is considered only when it is a plain `message` in a `private` chat whose chat id and sender id both match exactly, the sender is not a bot, and the message carries no forward marker, `via_bot`, `sender_chat`, or `story` field.
 A config missing either identity is treated as not enabled regardless of the `enabled` flag.
-Everything else is dropped without a reply and without storing its text; only a bounded refusal counter is kept.
+An allowlisted non-text, blank, or oversized message becomes an `unsupported` or `oversized` request with empty `text`, so firstmate can answer once without retaining its content.
+Everything that fails the identity or envelope checks is dropped without a reply and without storing its text; only a bounded refusal counter is kept.
 
 `token_owner` selects where the bot token lives.
 `keychain` (the default, macOS only) stores it in the login keychain under service `firstmate-telegram-bot`, keyed per home so two homes keep independent bots; the token is handed to `security` on standard input through its prompt path, never as an argument.
 `file` is the documented weaker fallback and the only option off macOS: a gitignored mode-0600 `config/telegram-token` that anything able to read the home's config directory can read.
-The token is never a process argument, never printed, never written to a log or a durable record, and never embedded in the generated watcher check; every Bot API request passes its token-bearing URL to `curl` through a mode-0600 config file.
+The token is never a process argument, never printed, never written to a log or a durable record, never exposed to task workers, and never embedded in the generated watcher check; every Bot API request passes its token-bearing URL to `curl` through a mode-0600 config file.
 
 Enabling writes `state/fm-telegram.check.sh`, a byte-static shim pinning this home and `bin/fm-tg-poll.sh`, and registers it through `bin/fm-check-register.sh`, so the watcher runs it on the ordinary `FM_CHECK_INTERVAL` cadence and rejects it if its bytes change.
 Enabling also calls the Bot API's `deleteWebhook`, so `getUpdates` long polling is structurally the only transport: no port is opened, no webhook exists, and nothing sits between the home and Telegram.
@@ -423,7 +424,7 @@ Replies are sent as plain text with no `parse_mode`, so message content is deliv
 
 When a Telegram message starts work that cannot finish in the same turn, `bin/fm-tg-link.sh` records that message's identity on the task as `tg_request=`, `tg_request_ts=`, and `tg_updates=` in `state/<id>.meta`, so a later session reports the outcome to the same conversation without relying on anyone's memory.
 `bin/fm-tg-reply.sh --task <id>` resolves that link and derives a distinct ledger key per update (`tg-<update_id>.u<n>`), which is what lets a retry be refused as a duplicate while a genuinely new milestone is not.
-Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3, clamped to 998 so the final remains representable as `.u999`); `--final` is never rationed, always sends, and then clears the link.
+Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3, clamped to 998 so the final remains representable as `.u999`); `--final` bypasses that update budget and clears the link only after successful delivery.
 
 The poll wakes firstmate with `tg-message <n> pending` while messages are unclaimed, or reports a distinct configuration or transport failure once as `tg-mode-error ...` until it clears.
 The `telegram-captain-channel` skill owns what firstmate does with either wake.

@@ -11,7 +11,7 @@
 #   fm-tg-setup.sh status                          redacted channel state
 #   fm-tg-setup.sh uninstall                       remove token and config
 #
-# The four setup steps are deliberately separate and ordered: token, pair,
+# The three setup steps are deliberately separate and ordered: token, pair,
 # enable. Each refuses until its predecessor is complete, so a half-configured
 # channel can never accept a message.
 #

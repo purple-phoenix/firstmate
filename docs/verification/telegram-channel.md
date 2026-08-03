@@ -39,7 +39,7 @@ Its checks establish, in order:
 The suite runs every Bot API call through a `curl` shim on `PATH` that appends its own argument vector to a log before exec'ing the real `curl`.
 After the full run the log was non-empty, contained `-K` (the mode-0600 config file carrying the token-bearing URL), and contained no occurrence of the token.
 The same assertion sweeps the generated watcher check, every durable state record, the configuration file, `status` output, and every diagnostic.
-The fake API's own request log was asserted to contain the token, so the proof is not vacuous: the token demonstrably reached Telegram and nowhere else.
+The fake API's own request log was asserted to contain the token, so the proof is not vacuous: the token demonstrably reached the loopback Bot API endpoint and no forbidden destination.
 
 ## No listening socket, no webhook, one sender
 
@@ -60,7 +60,9 @@ Creating the item itself requires an unlocked login keychain in an interactive s
 
 ## Compatibility axes reviewed
 
-- **Primary harnesses** (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`): the channel adds a registered watcher check and an agent skill, neither of which is harness-specific. The one shared-behavior change is `bin/fm-supervision-lib.sh` treating an armed channel as a supervision need, which reaches `bin/fm-guard.sh`, `bin/fm-turnend-guard.sh`, and Claude's `bin/fm-claude-stop-autoarm.sh` uniformly. `tests/fm-turnend-guard.test.sh`, `tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-supervision-instructions.test.sh` all passed.
+- **Primary harnesses** (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`): the channel adds a registered watcher check and an agent skill, neither of which is harness-specific.
+  The one shared-behavior change is `bin/fm-supervision-lib.sh` treating an armed channel as a supervision need; Claude's tokenless auto-arm and cooperative turn-end guard consume that full predicate directly, while the other harness protocols keep or re-arm their ordinary watcher cycle under the always-loaded supervision contract.
+  `tests/fm-turnend-guard.test.sh`, `tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-supervision-instructions.test.sh` all passed.
 - **Runtime backends** (`tmux`, `herdr`, `zellij`, `orca`, `cmux`, and the blocked `codex-app`): not applicable after inspection. The channel spawns nothing, reads no pane or composer, and sends no keystrokes; its wakes travel the ordinary durable wake queue.
 - **Away mode**: unchanged. `classify_check` in `bin/fm-supervise-daemon.sh` escalates every `check:` wake, so a Telegram wake reaches the captain's session exactly as an X-mode or dashboard wake does. `tests/fm-daemon.test.sh` and `tests/fm-supervision-events.test.sh` cover that path.
 - **X mode and dashboard commands**: both untouched and independently armable; each channel keeps its own check, records, and wake vocabulary. `tests/fm-x-mode.test.sh` and `tests/fm-dash.test.sh` were unaffected.

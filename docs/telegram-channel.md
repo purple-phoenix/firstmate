@@ -20,7 +20,7 @@ Firstmate answers what you send, and otherwise stays quiet.
 Unprompted, it messages you for five things only:
 
 - a decision that is genuinely yours,
-- work ready for your review, with the full pull-request link,
+- work ready for your review, with the full review link,
 - the final result of something you asked about here,
 - a real blocker it could not clear,
 - a credential or login it needs (it names what is needed and never asks you to send it here).
@@ -33,7 +33,8 @@ Long material stays behind links: reports, evidence boards, image comparisons, t
 ## What you can send
 
 This first version handles **private one-to-one text messages**, and nothing else.
-Photos, voice notes, documents, stickers, forwards, and group chats are not supported; if you send one, firstmate replies once to say so.
+If the paired captain sends a photo, voice note, document, sticker, blank message, or oversized text in that private chat, firstmate records only its unsupported or oversized kind, stores none of its content, and replies once with that fact.
+Forwarded messages, bot-mediated messages, stories, other senders or chats, and all group or channel traffic are rejected silently without storing or echoing their text.
 
 Four short commands exist because they are awkward to type on a phone.
 Everything else is just talking to firstmate normally.
@@ -66,9 +67,9 @@ Firstmate polls Telegram outbound and nothing more:
 
 - It calls the Bot API's `getUpdates` with a bounded long poll on the watcher's normal check cadence.
 - **No port is opened.** No webhook is registered - enabling the channel explicitly clears any webhook, so the pull path is the only path.
-- Nothing but Telegram itself sits in the middle: no relay, no tunnel, no Funnel, no third-party service.
+- Nothing but Telegram itself sits in the middle: no OpenClaw, relay, tunnel, Funnel, or other third-party service.
 
-A message that arrives while firstmate is down is not lost: Telegram holds it, and the next poll picks it up.
+Telegram holds an unread update for at most 24 hours, so the next poll picks it up if firstmate resumes within that service window.
 
 ## Setup
 
@@ -96,6 +97,8 @@ On a machine without a keychain, or if the keychain path fails, use the weaker f
 ```sh
 pbpaste | bin/fm-tg-setup.sh token --owner file
 ```
+
+On a non-macOS host, replace `pbpaste` with your platform's clipboard or secret-tool command while keeping the token on standard input.
 
 That writes a gitignored mode-0600 `config/telegram-token`.
 It is weaker on purpose: anything that can read your firstmate home can read the token. Prefer the keychain where you have one.
@@ -171,5 +174,3 @@ Reproduce the current guarantees with:
 ```sh
 bash tests/fm-telegram.test.sh
 ```
-
-No real bot was created, no BotFather interaction took place, and no message was ever sent to Telegram while building this: the suite runs entirely against a loopback fake.

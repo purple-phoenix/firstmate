@@ -15,7 +15,7 @@
 # --check is the gate for an unprompted update: it prints only while a link
 # exists and its update budget (FM_TG_TASK_UPDATE_MAX, default 3) is not spent.
 # A terminal outcome is never rationed - bin/fm-tg-reply.sh --task <id> --final
-# always sends and then clears the link.
+# bypasses the update budget and clears the link only after successful delivery.
 #
 # Exit: 0 on success (--check prints nothing and still exits 0 when no update is
 # due), 2 on a usage or validation error, 1 when the record could not be written.

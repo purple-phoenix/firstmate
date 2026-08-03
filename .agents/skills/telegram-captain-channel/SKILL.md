@@ -105,7 +105,7 @@ Later, on that task's milestone and terminal wakes:
 
 Spend the update budget the way you spend an X-mode follow-up: only on something the captain would want their phone to buzz for - the investigation landing, work becoming ready, the thing failing.
 Never on routine churn.
-The final outcome is never rationed and always lands, so a task that ends badly still gets an honest "this one didn't pan out".
+The final outcome is never rationed, so always attempt it and report delivery uncertainty honestly; a task that ends badly still gets an honest "this one didn't pan out" when delivery succeeds.
 
 ## The command vocabulary
 
@@ -132,11 +132,13 @@ The poll reports each distinct cause once and stays quiet until it clears, so a 
 Away mode does not change any of this.
 The daemon owns supervision while `state/.afk` exists and escalates a Telegram wake like any other, so messages keep arriving and keep being answered.
 What away mode never does is widen authority: a merge, a destructive action, or a security-sensitive choice still waits for the captain, and the fact that they asked from their phone does not make it their in-terminal word.
-If no session is running at all, messages simply queue on disk and are delivered on the next wake - the captain is not owed an instant reply, and a late honest answer beats a fast empty one.
+If no session is running at all, Telegram retains unread updates for at most 24 hours; after supervision resumes, accepted messages enter the durable local queue and wake firstmate.
+The captain is not owed an instant reply, and a late honest answer beats a fast empty one.
 
 ## Notes
 
-- One message in, at most one reply out. The ledger enforces it; do not work around it.
+- One message in, at most one reply operation out; a long reply may split into the bounded plain-text chunks owned by `bin/fm-tg-reply.sh`.
+  The ledger enforces this; do not work around it.
 - Long content is a link, never a paste. The tailnet dashboard and report pages already exist for this.
 - Never send a task id, branch name, worktree path, harness name, pipeline state, or any other internal label - section 9's translation table applies verbatim.
 - Never edit `bin/fm-tg-poll.sh` or the watcher to answer faster; the cadence is the watcher's.
