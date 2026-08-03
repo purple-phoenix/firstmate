@@ -32,14 +32,14 @@ test_conditional_stanzas() {
   home="$TMP_ROOT/conditional-home"
   config="$TMP_ROOT/conditional-config"
   mkdir -p "$home/state" "$home/config" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --afk 1 --x-mode 1)
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --afk 1 --fast-cadence 1)
   assert_contains "$out" "- Lock: read-only" "read-only stanza missing"
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
-  assert_contains "$out" "- X mode: active" "x-mode stanza missing"
-  assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
+  assert_contains "$out" "- Fast check cadence: active" "fast-cadence stanza missing"
+  assert_contains "$out" "$config/check-cadence.env" "cadence stanza did not render the effective config path"
   assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
-  assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
-  pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
+  assert_not_contains "$out" "Source \`config/check-cadence.env\`" "snippet kept the repo-relative cadence config path"
+  pass "renderer includes read-only, afk, and effective cadence current-state stanzas"
 }
 
 test_repair_lines() {
@@ -53,10 +53,10 @@ test_repair_lines() {
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
   assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
 
-  : > "$home/config/x-mode.env"
-  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
-  assert_contains "$out" "source '$home/config/x-mode.env' first" "x-mode repair line did not source the effective cadence config"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "x-mode codex repair line lost the checkpoint helper"
+  : > "$home/config/check-cadence.env"
+  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --fast-cadence 1 --repair-line)
+  assert_contains "$out" "source '$home/config/check-cadence.env' first" "cadence repair line did not source the effective cadence config"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "fast-cadence codex repair line lost the checkpoint helper"
 
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
   assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
@@ -65,6 +65,45 @@ test_repair_lines() {
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"
   assert_not_contains "$out" "extension command /fm-watch-arm-pi" "pi repair line still directs the model to the human slash command"
   pass "renderer repair-line mode is harness-aware and honors conditional state"
+}
+
+test_fast_cadence_prefix_across_primary_harnesses() {
+  local home harness out
+  home="$TMP_ROOT/cadence-matrix"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/check-cadence.env"
+  # The cadence prefix is additive: it must reach every supported primary without
+  # replacing that harness's own repair mechanism, and the cadence file it names
+  # must always be this home's own.
+  for harness in claude codex opencode pi pi-signed grok unknown; do
+    out=$(FM_HOME="$home" "$RENDER" --harness "$harness" --fast-cadence 1 --repair-line)
+    assert_contains "$out" "source '$home/config/check-cadence.env' first, then " \
+      "$harness repair line lost the cadence prefix"
+    # The per-harness mechanism itself is asserted in the cross-harness matrix
+    # below; here it only has to survive the prefix.
+    assert_contains "$out" "watcher" "$harness repair line lost its own mechanism after the prefix"
+  done
+  # Presence of the file alone is enough - no caller has to pass the flag.
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --repair-line)
+  assert_contains "$out" "source '$home/config/check-cadence.env' first" \
+    "an existing cadence file must imply the prefix without --fast-cadence"
+  # A home with no cadence file must never be told to source one.
+  rm -f "$home/config/check-cadence.env"
+  for harness in claude codex opencode pi grok unknown; do
+    out=$(FM_HOME="$home" "$RENDER" --harness "$harness" --repair-line)
+    assert_not_contains "$out" "check-cadence.env" \
+      "$harness repair line must not mention a cadence file the home does not have"
+  done
+  # Away mode and read-only keep their own ownership answers instead of a cadence
+  # prefix, because neither may start a normal watcher cycle.
+  : > "$home/config/check-cadence.env"
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --afk 1 --fast-cadence 1 --repair-line)
+  assert_contains "$out" "Away mode owns watcher supervision" "afk must keep daemon ownership"
+  assert_not_contains "$out" "check-cadence.env" "afk repair line must not add a cadence prefix"
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --read-only 1 --fast-cadence 1 --repair-line)
+  assert_contains "$out" "session holding the fleet lock" "read-only must keep lock ownership"
+  assert_not_contains "$out" "check-cadence.env" "read-only repair line must not add a cadence prefix"
+  pass "the fast-cadence prefix reaches every primary harness without displacing its repair mechanism"
 }
 
 test_cross_harness_ordinary_continuation_and_repair_matrix() {
@@ -138,7 +177,7 @@ test_grok_is_background_notify() {
   assert_contains "$out" "background: true" "grok snippet missing tracked background tool instruction"
   assert_contains "$out" "synthetic_reason: task_completed" "grok snippet missing auto-wake synthetic prompt detail"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok snippet missing watcher arm"
-  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder"
+  assert_not_contains "$out" "__FM_CADENCE_ENV" "renderer leaked a cadence path placeholder"
   assert_not_contains "$out" "foreground checkpoint" "grok snippet must not be Codex-style foreground checkpoint"
   out=$("$RENDER" --harness grok --repair-line)
   assert_contains "$out" "Grok tracked background task" "grok repair line is not background-notify shaped"
@@ -150,9 +189,9 @@ test_grok_command_sources_effective_config() {
   home="$TMP_ROOT/grok-home"
   config="$TMP_ROOT/grok-config"
   mkdir -p "$home/state" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --x-mode 1)
-  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective x-mode config path"
-  pass "grok rendered command sources the effective x-mode config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --fast-cadence 1)
+  assert_contains "$out" "[ -f '$config/check-cadence.env' ] && . '$config/check-cadence.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective cadence config path"
+  pass "grok rendered command sources the effective cadence config"
 }
 
 test_pi_snippet_uses_effective_extension_path() {
@@ -175,6 +214,7 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
+test_fast_cadence_prefix_across_primary_harnesses
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify

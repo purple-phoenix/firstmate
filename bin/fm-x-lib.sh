@@ -47,6 +47,14 @@
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
+#
+# It also owns the generated-artifact primitives shared by every writer of a
+# generated config/ or state/ file that a watcher process later executes or
+# sources (the X poll shim, and the watcher check cadence in bin/fm-cadence.sh):
+#   fmx_generated_present <path>            - path exists, symlink included
+#   fmx_generated_remove <path>             - remove it, refusing a symlinked dir
+#   fmx_generated_write_if_changed <path> <content> <mode>
+#                                           - idempotent single-link atomic write
 
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching single or
@@ -110,6 +118,71 @@ fmx_single_link_file_mode_valid() {
     mode=$(stat -c %a "$file" 2>/dev/null) || return 1
   fi
   [ "$mode" = "$expected_mode" ]
+}
+
+# Idempotent write of one generated artifact whose parent directory is an
+# ordinary (not necessarily 0700) config/ or state/ directory. Unchanged content
+# at the expected mode is left completely alone, so repeated reconciliation never
+# rewrites a file a watcher may be sourcing. Every path that could let another
+# user substitute content - a symlinked parent, a symlinked or hard-linked
+# destination, a cross-device destination, a post-rename mode change - refuses
+# rather than publishing. Returns non-zero without leaving a partial file.
+fmx_generated_write_if_changed() {
+  local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
+  parent=${dest%/*}
+  [ "$parent" != "$dest" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+  else
+    parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    fmx_single_link_file_valid "$dest" "$parent_device" || return 1
+    if [ "$(uname)" = Darwin ]; then
+      current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
+    else
+      current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
+    fi
+    if [ "$current_mode" = "$mode" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
+      return 0
+    fi
+  fi
+  tmp=$(umask 077; mktemp "$parent/.fm-generated.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$content" > "$tmp" \
+    || ! chmod "$mode" "$tmp" \
+    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
+    && ! fmx_single_link_file_valid "$dest" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$parent_device" \
+    || ! cmp -s "$dest" <(printf '%s\n' "$content"); then
+    rm -f -- "$dest"
+    return 1
+  fi
+}
+
+# Presence test that counts a dangling symlink as present, so an opt-out path
+# reports failure instead of silently leaving a hostile link behind.
+fmx_generated_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+fmx_generated_remove() {
+  local artifact=$1 parent=${1%/*}
+  fmx_generated_present "$artifact" || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -f -- "$artifact" 2>/dev/null || return 1
+  ! fmx_generated_present "$artifact"
 }
 
 fmx_private_artifact_dir_device() {

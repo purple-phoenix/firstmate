@@ -23,6 +23,75 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+# --- away-mode watcher check cadence ---------------------------------------
+#
+# While away mode is active the daemon owns the watcher instead of the harness
+# protocol, so it is the daemon - not the protocol - that has to apply this home's
+# generated check cadence (bin/fm-cadence.sh; docs/configuration.md "Watcher check
+# cadence"). Without that, an armed captain channel would drop to the 300s sweep
+# for exactly as long as the captain is away.
+
+# A fake watcher that reports the cadence it was actually started with.
+make_cadence_probe() {
+  local probe="$1/watch-probe.sh"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+echo "${FM_CHECK_INTERVAL:-300}"
+SH
+  chmod +x "$probe"
+  printf '%s\n' "$probe"
+}
+
+test_away_watcher_inherits_armed_check_cadence() {
+  local dir probe got
+  dir=$(make_supercase away-cadence-armed)
+  mkdir -p "$dir/config"
+  probe=$(make_cadence_probe "$dir")
+  : > "$dir/state/fm-telegram.check.sh"
+  FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_STATE_OVERRIDE="$dir/state" \
+    FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-cadence.sh" reconcile >/dev/null 2>&1
+  got=$( FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". '$DAEMON' >/dev/null 2>&1; exec_watcher_with_cadence '$probe'" )
+  [ "$got" = 30 ] \
+    || fail "the away-mode watcher must start at 30s for an armed captain channel (got ${got}s)"
+  pass "away mode: the daemon's watcher inherits the armed 30s check cadence"
+}
+
+test_away_watcher_keeps_default_cadence_without_a_channel() {
+  local dir probe got
+  dir=$(make_supercase away-cadence-default)
+  mkdir -p "$dir/config"
+  probe=$(make_cadence_probe "$dir")
+  got=$( FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". '$DAEMON' >/dev/null 2>&1; exec_watcher_with_cadence '$probe'" )
+  [ "$got" = 300 ] \
+    || fail "a home with no captain channel must keep the default away-mode cadence (got ${got}s)"
+  pass "away mode: a home with no captain channel keeps the default cadence"
+}
+
+test_away_watcher_rereads_cadence_on_each_spawn() {
+  local dir probe got
+  dir=$(make_supercase away-cadence-transition)
+  mkdir -p "$dir/config"
+  probe=$(make_cadence_probe "$dir")
+  : > "$dir/state/fm-telegram.check.sh"
+  FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_STATE_OVERRIDE="$dir/state" \
+    FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-cadence.sh" reconcile >/dev/null 2>&1
+  got=$( FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". '$DAEMON' >/dev/null 2>&1; exec_watcher_with_cadence '$probe'" )
+  [ "$got" = 30 ] || fail "setup: the armed home should have started at 30s (got ${got}s)"
+  # Channel released mid-away: the NEXT spawn must pick the default back up without
+  # restarting the daemon, because the away-mode watcher is one-shot per wake.
+  rm -f "$dir/state/fm-telegram.check.sh"
+  FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" FM_STATE_OVERRIDE="$dir/state" \
+    FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-cadence.sh" reconcile >/dev/null 2>&1
+  got=$( FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". '$DAEMON' >/dev/null 2>&1; exec_watcher_with_cadence '$probe'" )
+  [ "$got" = 300 ] \
+    || fail "a cadence released mid-away must reach the next watcher spawn (got ${got}s)"
+  pass "away mode: each watcher spawn re-reads the cadence, so a transition needs no daemon restart"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -1765,6 +1834,9 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_away_watcher_inherits_armed_check_cadence
+test_away_watcher_keeps_default_cadence_without_a_channel
+test_away_watcher_rereads_cadence_on_each_spawn
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid

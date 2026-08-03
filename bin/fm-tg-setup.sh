@@ -272,6 +272,29 @@ write_check() {
 
 unregister_check() { rm -f -- "$CHECK" "$TRUST" 2>/dev/null || true; }
 
+# Arming or disarming the check above changes whether this home has an inbound
+# captain channel, which is exactly what bin/fm-cadence.sh keys the watcher check
+# cadence off. Reconcile it in the same breath so the operator learns the cadence
+# outcome - and the restart it needs - from the command they just ran, instead of
+# waiting for the next session start to converge it silently.
+reconcile_cadence() {
+  local out
+  out=$("$SCRIPT_DIR/fm-cadence.sh" reconcile 2>/dev/null) || true
+  [ -n "$out" ] && note "  ${out#CADENCE: }"
+  return 0
+}
+
+# What the operator should actually expect after a reconcile, read back from the
+# file rather than assumed: a reconcile that failed must not leave a promise of
+# 30-second pickup standing.
+report_pickup() {
+  if [ -f "$("$SCRIPT_DIR/fm-cadence.sh" path 2>/dev/null)" ]; then
+    note "  firstmate reads this chat every 30 seconds."
+  else
+    note "  the fast check cadence is not armed, so pickup stays on the 300-second cadence until that is fixed."
+  fi
+}
+
 cmd_enable() {
   fm_tg_config_load
   [ -n "${FM_TG_TOKEN_OWNER:-}" ] || err "no bot token is stored yet; run: bin/fm-tg-setup.sh token"
@@ -292,7 +315,9 @@ cmd_enable() {
 
   write_check
   config_merge '.enabled = true'
-  note "enabled: firstmate now reads this Telegram chat on its normal check cadence."
+  note "enabled: this Telegram chat is now polled for your messages."
+  reconcile_cadence
+  report_pickup
   note "  transport is outbound long polling only; no port is opened and no webhook is registered."
   note "  this chat is not end-to-end encrypted - never send credentials, keys, or recovery codes through it."
 }
@@ -305,6 +330,7 @@ cmd_disable() {
   local pending
   pending=$(fm_tg_pending_count)
   note "disabled: polling stopped, the bot token and pairing are kept."
+  reconcile_cadence
   if [ "$pending" -gt 0 ]; then
     note "  $pending already-received message(s) remain in the local queue and are still readable with: bin/fm-tg-inbox.sh list"
   else
@@ -318,6 +344,9 @@ cmd_uninstall() {
   local pending cleanup_failed=0
   pending=$(fm_tg_pending_count)
   unregister_check
+  # Before the token-removal steps below, which can abort: the channel is already
+  # disarmed at this point, so the cadence must not be left fast on that path.
+  reconcile_cadence
   fm_tg_token_remove keychain || cleanup_failed=1
   fm_tg_token_remove file || cleanup_failed=1
   if [ "$cleanup_failed" = 1 ]; then

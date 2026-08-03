@@ -16,7 +16,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "CADENCE: <check-cadence transition> - <supervision repair>".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -57,7 +58,10 @@
 #          and .agents/skills/quota-array-dispatch/SKILL.md.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
-#          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          the relay poll shim, and prints an FMX line.
+#          cadence_setup then reconciles the watcher check cadence for whichever
+#          inbound captain channels are armed (X mode, the Telegram channel) via
+#          bin/fm-cadence.sh, printing a CADENCE line only on a real transition.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -67,9 +71,9 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, cadence_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -549,107 +553,37 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
-x_mode_write_if_changed() {
-  local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
-  parent=${dest%/*}
-  [ "$parent" != "$dest" ] || return 1
-  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
-    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
-  else
-    parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
-  fi
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
-    fmx_single_link_file_valid "$dest" "$parent_device" || return 1
-    if [ "$(uname)" = Darwin ]; then
-      current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
-    else
-      current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
-    fi
-    if [ "$current_mode" = "$mode" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
-      return 0
-    fi
-  fi
-  tmp=$(umask 077; mktemp "$parent/.fm-x-mode.XXXXXX" 2>/dev/null) || return 1
-  if ! printf '%s\n' "$content" > "$tmp" \
-    || ! chmod "$mode" "$tmp" \
-    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
-    && ! fmx_single_link_file_valid "$dest" "$parent_device"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! mv -f -- "$tmp" "$dest"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$parent_device" \
-    || ! cmp -s "$dest" <(printf '%s\n' "$content"); then
-    rm -f -- "$dest"
-    return 1
-  fi
-}
-
-x_mode_artifact_present() {
-  [ -e "$1" ] || [ -L "$1" ]
-}
-
-x_mode_remove_artifact() {
-  local artifact=$1 parent=${1%/*}
-  x_mode_artifact_present "$artifact" || return 0
-  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-  rm -f -- "$artifact" 2>/dev/null || return 1
-  ! x_mode_artifact_present "$artifact"
-}
-
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
-# wire the relay poll into the existing authenticated watcher dispatch.
-# Drops two idempotent, gitignored artifacts:
+# wire the relay poll into the existing authenticated watcher dispatch by
+# dropping one idempotent, gitignored artifact:
 #   state/x-watch.check.sh - byte-static identity shim; the watcher validates
 #                            its bytes and invokes bin/fm-x-poll.sh directly
-#   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
-#                            arm so only an X instance polls at the 30s cadence
-# On opt-out (no token, or empty) it removes any such artifacts so the instance
-# reverts to the default 300s no-poll behavior. Absent a token AND with no leftover
-# artifacts it is a complete no-op (nothing written, nothing printed), so a non-X
-# user sees zero change. Prints one confirmation line on opt-in, and one on opt-out
-# only when it actually removed artifacts. It never touches the watcher itself;
-# applying a cadence transition to a running watcher is the caller's job via
-# the emitted harness-aware supervision repair instruction.
+# On opt-out (no token, or empty) it removes that artifact so the instance
+# reverts to no relay polling. Absent a token AND with no leftover artifact it is
+# a complete no-op (nothing written, nothing printed), so a non-X user sees zero
+# change. Prints one confirmation line on opt-in, and one on opt-out only when it
+# actually removed the shim.
+#
+# The watcher CADENCE is deliberately not handled here: arming or disarming this
+# shim only changes whether an inbound captain channel exists, and bin/fm-cadence.sh
+# is the single owner that turns that fact into config/check-cadence.env. The
+# cadence_setup call that follows this one in the bootstrap sequence reconciles it.
 x_mode_setup() {
-  local env_file token shim cadence shim_body cadence_body tool missing
+  local env_file token shim shim_body tool missing
   env_file="$FM_HOME/.env"
   shim="$STATE/x-watch.check.sh"
-  cadence="$CONFIG/x-mode.env"
 
   token=
   [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
 
-  x_mode_remove_artifacts() {
-    local failed=0
-    x_mode_remove_artifact "$shim" || failed=1
-    x_mode_remove_artifact "$cadence" || failed=1
-    [ "$failed" -eq 0 ]
-  }
-
-  x_mode_supervision_repair() {
-    local out
-    out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null) \
-      || out='repair missing watcher supervision according to the session-start operating block.'
-    printf '%s\n' "$out"
-  }
-
   if [ -z "$token" ]; then
-    # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
+    # Opt-out (or never opted in): drop any X shim; stay silent unless we
     # actually removed something.
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if x_mode_remove_artifacts; then
-        echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
+    if fmx_generated_present "$shim"; then
+      if fmx_generated_remove "$shim"; then
+        echo "FMX: X mode off - removed relay poll shim"
       else
-        echo "FMX: X mode off - failed to remove relay poll shim or 30s cadence"
+        echo "FMX: X mode off - failed to remove relay poll shim"
       fi
     fi
     return 0
@@ -663,42 +597,44 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if x_mode_remove_artifacts; then
+    if fmx_generated_present "$shim"; then
+      if fmx_generated_remove "$shim"; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
-        echo "FMX: X mode off - failed to remove relay poll shim or 30s cadence after missing relay poll dependencies"
+        echo "FMX: X mode off - failed to remove relay poll shim after missing relay poll dependencies"
       fi
     fi
     return 0
   fi
 
   fmx_arm_failed() {
-    if x_mode_remove_artifacts; then
-      echo "FMX: X mode off - failed to arm relay poll shim or 30s cadence"
+    if fmx_generated_remove "$shim"; then
+      echo "FMX: X mode off - failed to arm relay poll shim"
     else
-      echo "FMX: X mode off - failed to arm relay poll shim or 30s cadence; stale artifacts remain"
+      echo "FMX: X mode off - failed to arm relay poll shim; stale artifact remains"
     fi
   }
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
   shim_body=$(fmx_poll_shim_content "$FM_HOME" "$FM_ROOT")
-  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  fmx_generated_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
   fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
-  cadence_body=$(cat <<'EOF'
-# Auto-generated by fm-bootstrap.sh - X mode watcher cadence.
-# Source this before the active harness protocol starts a watcher process so
-# fm-watch.sh polls the X check every 30s. Non-X instances have no such file and
-# keep the default 300s cadence.
-export FM_CHECK_INTERVAL=30
-EOF
-)
-  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
+  echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh"
+}
 
-  echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
+# Converge config/check-cadence.env with this home's armed inbound captain
+# channels, whatever changed them: an X opt-in or opt-out just above, or a
+# Telegram enable/disable/uninstall run outside bootstrap entirely. Prints one
+# CADENCE: line only on a real transition, because a running watcher read its
+# cadence at process start and will not see the new value until it restarts.
+cadence_setup() {
+  local out
+  out=$("$SCRIPT_DIR/fm-cadence.sh" reconcile 2>/dev/null) || true
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
 }
 
 crew_dispatch_validate() {
@@ -872,6 +808,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  cadence_setup
   fleet_sync
 fi
 exit 0

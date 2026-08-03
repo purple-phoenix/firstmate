@@ -309,13 +309,10 @@ For direct client invocations, environment values override `.env`; bootstrap act
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
 The locked session-start bootstrap step turns the token into local generated state.
-It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
-This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, only an X instance speeds up because a non-X home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
-The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
-Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
-While away mode is active the daemon owns the watcher and its default cadence applies; away-mode X cadence is a deferred follow-up.
-When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
+Arming that shim also arms this home's fast check cadence, which the "Watcher check cadence" section below owns in full for every inbound captain channel.
+When the token is removed or empty, the next locked session-start bootstrap step removes the shim.
 Steady-state off is silent and writes nothing.
 X mode remains additive to non-X lifecycle behavior: homes without the generated artifacts keep the default watcher cadence and do not run the X poll.
 Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` skill, while the watcher owns authenticated dispatch from the generated local identity shim.
@@ -371,6 +368,34 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Watcher check cadence (config/check-cadence.env)
+
+`bin/fm-watch.sh` sweeps `state/*.check.sh` every `FM_CHECK_INTERVAL` seconds, 300 by default.
+This section is the single owner of when that default is replaced, and `bin/fm-cadence.sh` is the single script that acts on it.
+
+A home with an **armed inbound captain channel** sweeps every 30 seconds instead.
+A channel poll is the only thing that notices an inbound captain message, so a 300-second sweep is a 300-second delivery delay, which is the whole reason the faster cadence exists.
+The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), or both.
+`bin/fm-supervision-lib.sh` owns that predicate for both purposes, so there is no second definition of "armed".
+
+The entire mechanism is one generated file, `config/check-cadence.env` (gitignored, mode 0600), which exports `FM_CHECK_INTERVAL=30`.
+It exists exactly while at least one channel is armed and is absent otherwise, so a home with neither channel keeps the default cadence and nothing about it changes.
+Two armed channels share that one file: there is one cadence, one config owner, one watcher, and one supervision cycle regardless of how many channels are on.
+The fast cadence applies to every check the watcher sweeps, including authenticated PR polls, and no channel adds a poller, port, webhook, or process of its own.
+That is a deliberate trade rather than an oversight: every check stays individually bounded by `FM_CHECK_TIMEOUT`, and an armed home runs each check at most twice a minute, so an open task PR costs two forge status calls a minute - well inside an authenticated GitHub hourly limit at any realistic fleet size.
+The Telegram poll's own bounded long poll (`FM_TG_POLL_TIMEOUT`, default 10s, always within `FM_CHECK_TIMEOUT`) and its backpressure and error-deduplication limits are unchanged by the cadence, so the fast sweep costs at most two bounded Bot API calls a minute.
+
+`bin/fm-cadence.sh reconcile` converges the file with the armed channels and is idempotent: it prints one `CADENCE:` line only on a real transition and stays silent when the file already matches.
+It runs at every locked session-start bootstrap, and again inside `bin/fm-tg-setup.sh` on enable, disable, and uninstall, so an operator sees the cadence outcome from the command they just ran rather than at the next session.
+
+Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, reconciling the file does **not** re-cadence a watcher that is already running.
+No part of firstmate pretends otherwise: every transition line says the new cadence applies to the next supervision cycle and carries the emitted harness-specific repair instruction, and neither bootstrap nor `fm-cadence.sh` ever restarts a watcher itself.
+The active primary-harness supervision protocol owns how the sourced cadence reaches the watcher process, and the session-start supervision operating block includes the cadence instruction whenever the file exists.
+While away mode is active the daemon owns the watcher instead of the harness protocol, so `bin/fm-supervise-daemon.sh` applies the same file per watcher spawn; because that watcher is one-shot, an away-mode cadence transition takes effect at the next wake without restarting the daemon.
+
+Firstmate versions before this contract generated `config/x-mode.env` for the X-only case.
+`reconcile` removes that file whenever it finds it, so no home ends up with two cadence owners; an already-running watcher armed from it keeps polling fast until it restarts either way.
+
 ## Telegram captain channel (config/telegram.json)
 
 The Telegram channel gives the captain a private one-to-one chat with their own firstmate from a phone.
@@ -402,7 +427,8 @@ Everything that fails the identity or envelope checks is dropped without a reply
 `file` is the documented weaker fallback and the only option off macOS: a gitignored mode-0600 `config/telegram-token` that anything able to read the home's config directory can read.
 The token is never a process argument, never printed, never written to a log or a durable record, never exposed to task workers, and never embedded in the generated watcher check; every Bot API request passes its token-bearing URL to `curl` through a mode-0600 config file.
 
-Enabling writes `state/fm-telegram.check.sh`, a byte-static shim pinning this home and `bin/fm-tg-poll.sh`, and registers it through `bin/fm-check-register.sh`, so the watcher runs it on the ordinary `FM_CHECK_INTERVAL` cadence and rejects it if its bytes change.
+Enabling writes `state/fm-telegram.check.sh`, a byte-static shim pinning this home and `bin/fm-tg-poll.sh`, and registers it through `bin/fm-check-register.sh`, so the watcher runs it on the `FM_CHECK_INTERVAL` cadence and rejects it if its bytes change.
+An enabled channel is an armed inbound captain channel, so enabling also arms the 30-second cadence owned by the "Watcher check cadence" section above, and disabling or uninstalling releases it unless X mode still needs it.
 Enabling also calls the Bot API's `deleteWebhook`, so `getUpdates` long polling is structurally the only transport: no port is opened, no webhook exists, and nothing sits between the home and Telegram.
 An armed channel counts as a supervision need in `bin/fm-supervision-lib.sh`, exactly like an X-mode relay poll, so a Telegram-only home keeps one live supervision cycle with an empty fleet.
 
@@ -462,7 +488,7 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated PR polls, custom checks, or X-mode dispatch)
+FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated PR polls, custom checks, X-mode dispatch, or the Telegram poll); config/check-cadence.env lowers it to 30 for an armed captain channel
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

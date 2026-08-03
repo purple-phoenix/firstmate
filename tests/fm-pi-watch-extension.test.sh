@@ -87,7 +87,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
   assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
   assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
-  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
+  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective cadence config"
   assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
   assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
   assert_not_contains "$text" "Always use this tool" "tracked extension kept broad tool-selection guidance"
@@ -102,7 +102,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "function activateGeneration" "tracked extension does not activate a live generation for replacement sessions"
   assert_contains "$text" "function generationIsLive" "tracked extension does not gate arm mutations on the live generation"
   assert_contains "$text" "watcher: not armed - Pi session is shutting down" "tracked extension missing the terminal shutdown refusal"
-  assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
+  assert_not_contains "$text" "[ -f config/check-cadence.env ]" "tracked extension kept a repo-relative cadence config path"
   pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
 }
 
@@ -1333,7 +1333,11 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
-  printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
+  # An armed inbound captain channel is what makes an empty-fleet home worth
+  # arming, and is also what generates the cadence config the arm must source
+  # (bin/fm-supervision-lib.sh's fm_supervision_channel_armed; bin/fm-cadence.sh).
+  : > "$home/state/x-watch.check.sh"
+  printf 'export FM_POLL=7\n' > "$home/config/check-cadence.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"

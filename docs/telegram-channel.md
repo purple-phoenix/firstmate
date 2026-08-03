@@ -65,11 +65,21 @@ Nothing in firstmate prints it, passes it as a command argument, writes it into 
 
 Firstmate polls Telegram outbound and nothing more:
 
-- It calls the Bot API's `getUpdates` with a bounded long poll on the watcher's normal check cadence.
+- It calls the Bot API's `getUpdates` with a bounded long poll every 30 seconds while the channel is enabled.
 - **No port is opened.** No webhook is registered - enabling the channel explicitly clears any webhook, so the pull path is the only path.
 - Nothing but Telegram itself sits in the middle: no OpenClaw, relay, tunnel, Funnel, or other third-party service.
 
 Telegram holds an unread update for at most 24 hours, so the next poll picks it up if firstmate resumes within that service window.
+
+### How long a message waits
+
+Enabling the channel switches this home to the 30-second check cadence owned by [`configuration.md`](configuration.md#watcher-check-cadence-configcheck-cadenceenv), so **expect firstmate to notice a message within about 30 seconds** and to start answering it on its next turn.
+That is the honest worst case for pickup, not for a reply: how long the answer itself takes depends on what you asked for.
+
+Two things change that number, and both are stated where they happen rather than hidden:
+
+- **A supervision cycle that was already running when you enabled the channel keeps its old cadence until it restarts.** The `enable` command says so and prints the exact restart instruction for your harness. Until then pickup stays on the old 300-second cadence.
+- **Nothing is supervising at all.** Then nothing polls, and the message waits until firstmate is supervising again (within Telegram's 24-hour retention). `bin/fm-tg-setup.sh status` showing `monitored: no` is this case.
 
 ## Setup
 
@@ -122,8 +132,9 @@ The confirmation shows only the last four digits.
 bin/fm-tg-setup.sh enable
 ```
 
-This clears any webhook, registers the watcher check that polls for your messages, and flips the channel on.
-Send it a message from your phone; firstmate answers on its next check cycle.
+This clears any webhook, registers the watcher check that polls for your messages every 30 seconds, and flips the channel on.
+It also prints the restart instruction for your harness when a supervision cycle is already running, because that cycle keeps its old cadence until it restarts.
+Send it a message from your phone; firstmate normally notices it within about 30 seconds.
 
 Check the state at any time - it never prints the token or your full identity:
 
@@ -139,6 +150,7 @@ bin/fm-tg-setup.sh uninstall   # also remove the token, pairing, and configurati
 ```
 
 `disable` stops the poll, removes the watcher check, and reports how many already-received messages are still queued locally; re-enable with `enable` and they are still there.
+It also returns this home to the default 300-second check cadence unless X mode still needs the fast one, and prints the restart instruction for that too.
 
 `uninstall` additionally deletes the stored token and `config/telegram.json`.
 It reports failure and keeps the disabled configuration when either token owner cannot be confirmed empty, so you can unlock or repair that owner and retry cleanup.
@@ -164,6 +176,7 @@ Either way there was never anything listening, so nothing stays reachable from o
 - `config/telegram-token` - the fallback token file, only when you chose `--owner file` (gitignored, mode 0600).
 - `state/tg/` - the durable message queue, update cursor, and reply ledger (mode 0700).
 - `state/fm-telegram.check.sh` - the registered watcher check; it holds no secret.
+- `config/check-cadence.env` - the generated 30-second check cadence, shared with X mode and removed when no channel is armed (gitignored, mode 0600).
 
 ## Verification evidence
 

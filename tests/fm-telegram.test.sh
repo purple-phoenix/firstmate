@@ -242,6 +242,32 @@ out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must succeed after pairing:
 grep -q "$TOKEN" "$HOME_DIR/state/fm-telegram.check.sh" && fail "the generated check must not carry the token"
 pass "enable: registers a token-free watcher check and clears any webhook"
 
+# Cadence: an enabled channel is polled every 30s, not on the 300s default, and
+# the operator is told so - plus told that a supervision cycle already running
+# keeps its old cadence until it restarts (docs/configuration.md "Watcher check
+# cadence"; bin/fm-cadence.sh owns the file).
+[ -f "$HOME_DIR/config/check-cadence.env" ] || fail "enable must arm the 30s check cadence"
+grep -q '^export FM_CHECK_INTERVAL=30$' "$HOME_DIR/config/check-cadence.env" \
+  || fail "the armed cadence must be 30s"
+grep -q "$TOKEN" "$HOME_DIR/config/check-cadence.env" && fail "the cadence file must not carry the token"
+case "$out" in *"every 30 seconds"*) ;; *) fail "enable must state the 30-second pickup, got: $out" ;; esac
+case "$out" in
+  *"applies to the NEXT supervision cycle, not one already running"*) ;;
+  *) fail "enable must not imply a running watcher rereads the cadence, got: $out" ;;
+esac
+# shellcheck source=/dev/null
+cadence_interval=$( . "$HOME_DIR/config/check-cadence.env" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
+[ "$cadence_interval" = 30 ] || fail "sourcing the cadence file must start a watcher at 30s"
+# Re-running enable is idempotent and does not re-announce a transition.
+cadence_sum=$(shasum < "$HOME_DIR/config/check-cadence.env")
+out=$(tg fm-tg-setup.sh enable 2>&1) || fail "re-enable must succeed: $out"
+[ "$(shasum < "$HOME_DIR/config/check-cadence.env")" = "$cadence_sum" ] \
+  || fail "re-enabling must leave the cadence file byte-identical"
+case "$out" in
+  *"applies to the NEXT supervision cycle"*) fail "an unchanged cadence must not re-announce a transition: $out" ;;
+esac
+pass "enable: arms the 30s check cadence idempotently and is honest about the restart it needs"
+
 out=$(tg fm-tg-poll.sh 2>&1)
 [ "$out" = "tg-message 1 pending" ] || fail "the first post-challenge message must remain pollable, got: $out"
 [ "$(jq -r .text "$HOME_DIR/state/tg/inbox/tg-41.json")" = "first real message" ] \
@@ -591,7 +617,19 @@ out=$(tg fm-tg-reply.sh --event while-disabled --text-file "$TMP_ROOT/reply.txt"
 [ ! -f "$HOME_DIR/state/fm-telegram.check-trust" ] || fail "disable must remove the watcher registration"
 out=$(tg fm-tg-poll.sh 2>&1)
 [ -z "$out" ] || fail "a disabled channel must stop polling, got: $out"
-pass "disable: polling stops, the check is unregistered, and nothing can be sent"
+[ ! -f "$HOME_DIR/config/check-cadence.env" ] \
+  || fail "disable must release the 30s check cadence with no other channel armed"
+pass "disable: polling stops, the check is unregistered, the cadence is released, and nothing can be sent"
+
+# X mode armed alongside Telegram: disabling Telegram must NOT drop the shared
+# cadence, because the relay poll still needs it.
+tg fm-tg-setup.sh enable >/dev/null || fail "re-enable must succeed"
+: > "$HOME_DIR/state/x-watch.check.sh"
+tg fm-tg-setup.sh disable >/dev/null || fail "disable must succeed with X mode armed"
+[ -f "$HOME_DIR/config/check-cadence.env" ] \
+  || fail "disabling Telegram must not release a cadence X mode still needs"
+rm -f "$HOME_DIR/state/x-watch.check.sh"
+pass "disable: the shared cadence survives while another captain channel is still armed"
 
 tg fm-tg-setup.sh enable >/dev/null || fail "re-enable must succeed"
 
@@ -831,6 +869,7 @@ out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
 [ ! -f "$HOME_DIR/config/telegram.json" ] || fail "uninstall must remove the configuration"
 [ ! -f "$HOME_DIR/config/telegram-token" ] || fail "uninstall must remove a stale fallback token"
 [ ! -f "$HOME_DIR/state/fm-telegram.check.sh" ] || fail "uninstall must remove the watcher check"
+[ ! -f "$HOME_DIR/config/check-cadence.env" ] || fail "uninstall must release the 30s check cadence"
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "uninstall must remove the stored token"
 if [ "$pending_before" -gt 0 ]; then
   case "$out" in *"still on disk"*) ;; *) fail "uninstall must account for already-received messages, got: $out" ;; esac

@@ -7,6 +7,8 @@
 # relay poll (state/x-watch.check.sh) or the Telegram channel
 # (state/fm-telegram.check.sh) - and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# The armed-channel half is also the cadence predicate; bin/fm-cadence.sh owns what
+# that means for FM_CHECK_INTERVAL.
 # bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
 # bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
 # its end-of-turn block decision with the live watcher lock check in
@@ -19,6 +21,16 @@ fm_sup_stat_mtime() {
   else
     stat -c %Y "$1" 2>/dev/null
   fi
+}
+
+# fm_supervision_channel_armed <state-dir>
+# Exit 0 (true) exactly when an inbound captain channel is armed in this home:
+# X-mode relay polling, the Telegram captain channel, or both. This is the single
+# owner of that predicate - bin/fm-cadence.sh reuses it, because a home that needs
+# a live cycle for a captain channel is exactly a home that needs it to poll fast.
+fm_supervision_channel_armed() {
+  local state=$1
+  [ -f "$state/x-watch.check.sh" ] || [ -f "$state/fm-telegram.check.sh" ]
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
@@ -44,9 +56,7 @@ fm_supervision_status() {
   done
   # An armed inbound captain channel needs a live cycle even with an empty fleet:
   # without one, nothing polls it and a message sits unseen until the next session.
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
-    || [ -f "$state/x-watch.check.sh" ] \
-    || [ -f "$state/fm-telegram.check.sh" ]; then
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || fm_supervision_channel_armed "$state"; then
     FM_SUP_NEEDED=true
   fi
 

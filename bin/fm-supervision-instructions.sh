@@ -10,16 +10,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
+# shellcheck source=bin/fm-cadence-lib.sh
+. "$SCRIPT_DIR/fm-cadence-lib.sh"
+
 HARNESS=
 READ_ONLY=0
 AFK=0
-X_MODE=0
+FAST_CADENCE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--fast-cadence 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -50,9 +53,9 @@ while [ "$#" -gt 0 ]; do
       AFK=$(bool_value "$2")
       shift 2
       ;;
-    --x-mode)
-      [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
-      X_MODE=$(bool_value "$2")
+    --fast-cadence)
+      [ "$#" -gt 1 ] || { echo "error: --fast-cadence requires 0 or 1" >&2; exit 2; }
+      FAST_CADENCE=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -90,7 +93,7 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-x_mode_env="$CONFIG/x-mode.env"
+cadence_env=$(fm_cadence_file "$CONFIG")
 
 shell_quote() {
   printf "'"
@@ -98,10 +101,10 @@ shell_quote() {
   printf "'"
 }
 
-x_mode_env_sh=$(shell_quote "$x_mode_env")
+cadence_env_sh=$(shell_quote "$cadence_env")
 
-if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
-  X_MODE=1
+if [ "$FAST_CADENCE" -eq 0 ] && [ -f "$cadence_env" ]; then
+  FAST_CADENCE=1
 fi
 
 render_snippet() {
@@ -109,8 +112,8 @@ render_snippet() {
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
-    line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
-    line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_CADENCE_ENV_SH__/$cadence_env_sh}
+    line=${line//__FM_CADENCE_ENV__/$cadence_env}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -129,8 +132,8 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-  if [ "$X_MODE" -eq 1 ]; then
-    prefix="${prefix}source ${x_mode_env_sh} first, then "
+  if [ "$FAST_CADENCE" -eq 1 ]; then
+    prefix="${prefix}source ${cadence_env_sh} first, then "
   fi
 
   case "$HARNESS" in
@@ -198,10 +201,10 @@ if [ "$AFK" -eq 1 ]; then
 else
   printf '%s\n' '- Away mode: inactive.'
 fi
-if [ "$X_MODE" -eq 1 ]; then
-  printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
+if [ "$FAST_CADENCE" -eq 1 ]; then
+  printf '%s%s%s\n' '- Fast check cadence: active for an inbound captain channel; source ' "$cadence_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
-  printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+  printf '%s\n' '- Fast check cadence: inactive; no inbound captain channel is armed, so use the default watcher cadence.'
 fi
 ordinary_wake_line
 printf '\n'

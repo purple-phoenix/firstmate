@@ -43,6 +43,8 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-cadence-lib.sh
+. "$SCRIPT_DIR/fm-cadence-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
@@ -196,12 +198,12 @@ if [ "$watcher_fresh" = false ] || [ "$arm_dead" = true ]; then
     [ -e "$STATE/.afk" ] && afk=1
     queue_arg=0
     "$queue_pending" && queue_arg=1
-    x_mode=0
-    [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+    fast_cadence=0
+    [ -f "$(fm_cadence_file "$CONFIG")" ] && fast_cadence=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \
-      --x-mode "$x_mode" \
+      --fast-cadence "$fast_cadence" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
