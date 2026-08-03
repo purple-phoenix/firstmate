@@ -138,6 +138,7 @@ bin/fm-tg-setup.sh uninstall   # also remove the token, pairing, and configurati
 `disable` stops the poll, removes the watcher check, and reports how many already-received messages are still queued locally; re-enable with `enable` and they are still there.
 
 `uninstall` additionally deletes the stored token and `config/telegram.json`.
+It reports failure and keeps the disabled configuration when either token owner cannot be confirmed empty, so you can unlock or repair that owner and retry cleanup.
 Messages already received stay on disk under your home's state directory and are reported so you can delete them deliberately.
 To remove the bot itself, send `/deletebot` to BotFather.
 

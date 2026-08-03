@@ -52,6 +52,7 @@ case "${1:-}" in
     case "$SENT" in ''|*[!0-9]*) SENT=0 ;; esac
     MAX=${FM_TG_TASK_UPDATE_MAX:-3}
     case "$MAX" in ''|*[!0-9]*) MAX=3 ;; esac
+    [ "$MAX" -le "$FM_TG_TASK_UPDATE_LIMIT" ] || MAX=$FM_TG_TASK_UPDATE_LIMIT
     [ "$SENT" -lt "$MAX" ] || exit 0
     printf '%s %s\n' "$RID" "$SENT"
     ;;
@@ -68,6 +69,11 @@ case "${1:-}" in
     META=$(meta_for "$1")
     [ -f "$META" ] || err "there is no such task to link" 1
     fm_tg_base_request_id_valid "$2" || err "invalid Telegram request id"
+    EXISTING=$(fm_tg_meta_get "$META" tg_request)
+    if ! fm_tg_base_request_id_valid "$EXISTING"; then
+      fm_tg_send_capacity_available \
+        || err "the Telegram reply ledger is full; finish or remove existing linked work before linking another task" 1
+    fi
     fm_tg_meta_link_set "$META" "$2" "$(date +%s)" 0 \
       || err "the link could not be recorded" 1
     printf 'linked: %s -> %s\n' "$1" "$2"

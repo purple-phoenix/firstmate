@@ -75,7 +75,12 @@ const server = http.createServer((req, res) => {
     if (method === "getUpdates") {
       if (s.getUpdates_status && s.getUpdates_status !== 200) return reply(s.getUpdates_status, { ok: false, description: "nope" });
       if (s.getUpdates_malformed) { res.writeHead(200, { "content-type": "application/json" }); return res.end("{not json"); }
-      return reply(200, { ok: true, result: s.updates ?? [] });
+      let request = {};
+      try { request = JSON.parse(body || "{}"); } catch {}
+      const offset = Number.isInteger(request.offset) ? request.offset : 0;
+      const limit = Number.isInteger(request.limit) ? request.limit : 100;
+      const updates = (s.updates ?? []).filter((u) => Number.isInteger(u?.update_id) && u.update_id >= offset).slice(0, limit);
+      return reply(200, { ok: true, result: updates });
     }
     if (method === "sendMessage") {
       if (s.sendMessage_hang) { return; }  // never answers: exercises the ambiguous path
@@ -137,7 +142,10 @@ key=$(printf '%s/%s' "$svc" "$acct" | tr -c 'A-Za-z0-9._-' '_')
 case "$action" in
   add-generic-password) IFS= read -r v || true; printf '%s\n' "$v" > "$store/$key" ;;
   find-generic-password) [ -f "$store/$key" ] || exit 44; cat "$store/$key" ;;
-  delete-generic-password) rm -f -- "$store/$key" ;;
+  delete-generic-password)
+    [ "${FM_TG_TEST_SECURITY_DELETE_FAIL:-0}" = 0 ] || exit 55
+    rm -f -- "$store/$key"
+    ;;
   *) exit 2 ;;
 esac
 SH
@@ -210,11 +218,10 @@ pass "setup: a token alone never enables the channel"
 
 # Pair against the one-time private challenge; a group and an unchallenged
 # private message in the same batch are ignored.
-scenario "$(jq -cn --argjson u "$USER_ID" --argjson c "$CHAT_ID" '{updates:[
-  {update_id:10, message:{message_id:1, date:1, chat:{id:-100999, type:"supergroup"}, from:{id:777, is_bot:false}, text:"/start"}},
-  {update_id:11, message:{message_id:2, date:2, chat:{id:888, type:"private"}, from:{id:888, is_bot:false}, text:"/start"}},
-  {update_id:12, message:{message_id:3, date:3, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false, first_name:"Captain"}, text:"/start PAIRTEST123"}}
-]}')"
+scenario "$(jq -cn --argjson u "$USER_ID" --argjson c "$CHAT_ID" '{updates:
+  ([range(1;26) as $id | {update_id:$id, message:{message_id:$id, date:$id, chat:{id:888, type:"private"}, from:{id:888, is_bot:false}, text:"/start"}}]
+  + [{update_id:40, message:{message_id:40, date:40, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false, first_name:"Captain"}, text:"/start PAIRTEST123"}},
+     {update_id:41, message:{message_id:41, date:41, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false}, text:"first real message"}}])}')"
 out=$(FM_TG_PAIR_WAIT=1 FM_TG_PAIR_CHALLENGE=PAIRTEST123 tg fm-tg-setup.sh pair 2>&1) || fail "pairing must succeed: $out"
 [ "$(config_field .user_id)" = "$USER_ID" ] || fail "pairing must record the exact user id"
 [ "$(config_field .chat_id)" = "$CHAT_ID" ] || fail "pairing must record the exact private chat id"
@@ -223,7 +230,7 @@ case "$out" in *"$USER_ID"*) fail "pairing printed the full identity instead of 
 pass "pairing: only the one-time private challenge binds the sender and chat"
 
 # Pairing consumed the challenge, so it never becomes a captain request.
-[ "$(cat "$HOME_DIR/state/tg/cursor")" = 12 ] || fail "pairing must consume the updates it read"
+[ "$(cat "$HOME_DIR/state/tg/cursor")" = 40 ] || fail "pairing must commit only through the matched challenge"
 pass "pairing: the challenge that paired the channel is consumed, not delivered as a request"
 
 out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must succeed after pairing: $out"
@@ -233,6 +240,12 @@ out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must succeed after pairing:
 [ "$(api_calls deleteWebhook)" -ge 1 ] || fail "enable must clear any webhook so the transport stays pull-only"
 grep -q "$TOKEN" "$HOME_DIR/state/fm-telegram.check.sh" && fail "the generated check must not carry the token"
 pass "enable: registers a token-free watcher check and clears any webhook"
+
+out=$(tg fm-tg-poll.sh 2>&1)
+[ "$out" = "tg-message 1 pending" ] || fail "the first post-challenge message must remain pollable, got: $out"
+[ "$(jq -r .text "$HOME_DIR/state/tg/inbox/tg-41.json")" = "first real message" ] \
+  || fail "pairing lost the first real message that shared the challenge batch"
+pass "pairing: pages past old updates and preserves later messages from the challenge batch"
 
 # =============================================================================
 # 3. Ingress allowlisting - only the exact paired sender in the exact chat
@@ -338,6 +351,26 @@ case "$claimed" in *"delivered: 5"*) ;; *) fail "claim must deliver every pendin
 [ "$(tg fm-tg-inbox.sh pending-count)" = 0 ] || fail "claim must drain the inbox"
 [ -f "$HOME_DIR/state/tg/inbox/archive/tg-41.json" ] || fail "claim must archive rather than delete"
 pass "inbox: claim delivers before archiving, so an interruption re-surfaces instead of losing a message"
+
+reset_ingress
+mkdir -p "$HOME_DIR/state/tg/inbox"
+for id in $(seq 1000 1098); do
+  printf '{"schema":"fm-telegram-request.v1","request_id":"tg-%s"}\n' "$id" \
+    > "$HOME_DIR/state/tg/inbox/tg-$id.json"
+  chmod 600 "$HOME_DIR/state/tg/inbox/tg-$id.json"
+done
+scenario "$(jq -cn --argjson u "$USER_ID" --argjson c "$CHAT_ID" '{updates:[
+  {update_id:2000, message:{message_id:1, date:1, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false}, text:"last local slot"}},
+  {update_id:2001, message:{message_id:2, date:1, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false}, text:"must remain at Telegram"}}
+]}')"
+out=$(tg fm-tg-poll.sh 2>&1)
+[ "$out" = "tg-message 100 pending" ] || fail "the inbox must stop exactly at its fixed bound, got: $out"
+[ "$(cat "$HOME_DIR/state/tg/cursor")" = 2000 ] || fail "the cursor advanced beyond available inbox capacity"
+before=$(api_calls getUpdates)
+tg fm-tg-poll.sh >/dev/null || fail "a full inbox poll must remain a safe no-op"
+[ "$(api_calls getUpdates)" = "$before" ] || fail "a full inbox must apply backpressure before contacting Telegram"
+[ "$(tg fm-tg-inbox.sh pending-count)" = 100 ] || fail "pending inbox state exceeded its fixed bound"
+pass "state: pending ingress applies backpressure at 100 without advancing the cursor"
 
 # =============================================================================
 # 5. Transport failures stop safely and never fall back
@@ -445,6 +478,18 @@ while IFS= read -r line; do
 done < <(grep '"sendMessage"' "$API_LOG")
 pass "outbound: emoji-heavy replies are split by Telegram UTF-16 units"
 
+: > "$API_LOG"
+python3 - "$TMP_ROOT/lines.txt" <<'PY'
+import sys
+open(sys.argv[1], "w").write("\n".join(f"line {i:02d} keeps formatting" for i in range(30)))
+PY
+FM_TG_REPLY_MAX_CHARS=200 tg fm-tg-reply.sh --event lines-check --text-file "$TMP_ROOT/lines.txt" >/dev/null \
+  || fail "a multiline reply must send"
+joined=$(grep '"sendMessage"' "$API_LOG" | jq -r '.body | fromjson | .text')
+expected=$(cat "$TMP_ROOT/lines.txt")
+[ "$joined" = "$expected" ] || fail "splitting an over-limit paragraph discarded single line breaks"
+pass "outbound: long multiline replies preserve their single line breaks"
+
 # A definite refusal frees the key for a retry; an ambiguous outcome does not.
 scenario '{"sendMessage_status":400}'
 out=$(tg fm-tg-reply.sh --event refused-check --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
@@ -508,6 +553,8 @@ tg fm-tg-link.sh work-x1 tg-30 >/dev/null || fail "linking a task to its message
 [ "$(tg fm-tg-link.sh --check work-x1)" = "tg-30 0" ] || fail "--check must report the link and its spent budget"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-tg-lib.sh"
 fm_pr_metadata_identity_parse "$HOME_DIR/state/work-x1.meta" \
   || fail "a Telegram link appended after pr= must preserve PR metadata validity"
 
@@ -542,6 +589,37 @@ pass "linked work: the terminal outcome always lands and then closes the convers
 
 rm -f "$HOME_DIR/state/work-x1.meta"
 
+printf 'window=fm-work-limit\nkind=ship\nproject=alpha\n' > "$HOME_DIR/state/work-limit.meta"
+tg fm-tg-link.sh work-limit tg-31 >/dev/null || fail "the update-limit task must link"
+fm_tg_meta_link_set "$HOME_DIR/state/work-limit.meta" tg-31 "$(date +%s)" 998 \
+  || fail "the largest supported update count must remain representable"
+[ -z "$(FM_TG_TASK_UPDATE_MAX=9999 tg fm-tg-link.sh --check work-limit)" ] \
+  || fail "an oversized task update maximum must clamp before key overflow"
+FM_TG_TASK_UPDATE_MAX=9999 tg fm-tg-reply.sh --task work-limit --final --text-file "$TMP_ROOT/final.txt" >/dev/null \
+  || fail "the final reply must use the remaining .u999 key after the clamped update budget"
+[ -f "$HOME_DIR/state/tg/sent/tg-31.u999.json" ] || fail "the bounded final ledger key was not recorded"
+rm -f "$HOME_DIR/state/work-limit.meta"
+pass "linked work: update limits clamp within the final ledger key space"
+
+rm -rf "$HOME_DIR/state/tg/sent"
+mkdir -p "$HOME_DIR/state/tg/sent"
+for id in $(seq -w 1 199); do
+  printf '{"schema":"fm-telegram-sent.v1","key":"event-cap-%s","status":"sent"}\n' "$id" \
+    > "$HOME_DIR/state/tg/sent/event-cap-$id.json"
+  chmod 600 "$HOME_DIR/state/tg/sent/event-cap-$id.json"
+done
+printf 'window=fm-work-reserved\nkind=ship\nproject=alpha\n' > "$HOME_DIR/state/work-reserved.meta"
+tg fm-tg-link.sh work-reserved tg-32 >/dev/null || fail "one final slot must be reservable at ledger capacity"
+out=$(tg fm-tg-reply.sh --event over-cap --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
+[ "$rc" = 2 ] || fail "an ordinary send must backpressure once all ledger slots are occupied or reserved"
+tg fm-tg-reply.sh --task work-reserved --final --text-file "$TMP_ROOT/final.txt" >/dev/null \
+  || fail "a linked final outcome must consume its reserved slot at ledger capacity"
+[ "$(find "$HOME_DIR/state/tg/sent" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" = 200 ] \
+  || fail "the sent ledger exceeded its fixed bound"
+rm -f "$HOME_DIR/state/work-reserved.meta"
+rm -rf "$HOME_DIR/state/tg/sent" "$HOME_DIR/state/tg/outbox"
+pass "state: sent claims and final reservations stay bounded without pruning at-most-once records"
+
 # Dry run: firstmate can compose and record without anything reaching Telegram.
 before=$(api_calls sendMessage)
 printf 'a preview that must never leave the machine\n' > "$TMP_ROOT/dry.txt"
@@ -551,7 +629,24 @@ FM_TG_DRY_RUN=1 tg fm-tg-reply.sh --event dry-check --text-file "$TMP_ROOT/dry.t
 [ -f "$HOME_DIR/state/tg/outbox/event-dry-check.json" ] || fail "a dry run must record what it would have sent"
 pass "outbound: a dry run records the would-be message and sends nothing"
 
+for id in $(seq -w 1 50); do
+  printf '{"schema":"fm-telegram-outbox.v1","key":"event-a%s"}\n' "$id" \
+    > "$HOME_DIR/state/tg/outbox/event-a$id.json"
+  chmod 600 "$HOME_DIR/state/tg/outbox/event-a$id.json"
+done
+FM_TG_DRY_RUN=1 tg fm-tg-reply.sh --event zkeep --text-file "$TMP_ROOT/dry.txt" >/dev/null \
+  || fail "a dry run at preview retention capacity must succeed"
+[ "$(find "$HOME_DIR/state/tg/outbox" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" = 50 ] \
+  || fail "dry-run preview retention exceeded 50 records"
+[ -f "$HOME_DIR/state/tg/outbox/event-zkeep.json" ] || fail "preview pruning removed the newly recorded dry run"
+pass "state: dry-run previews retain a fixed 50 records"
+
 # The weaker file-token owner still works end to end and stays mode 0600.
+out=$(printf '%s\n' "$TOKEN" | FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh token --owner file 2>&1); rc=$?
+[ "$rc" != 0 ] || fail "an owner switch must fail when the previous credential cannot be removed"
+[ "$(config_field .token_owner)" = keychain ] || fail "a failed owner switch changed the configured owner"
+[ ! -f "$HOME_DIR/config/telegram-token" ] || fail "a failed owner switch left the new fallback credential behind"
+[ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "a failed owner switch lost the still-configured keychain credential"
 out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
   || fail "the file token owner must work: $out"
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "switching to file ownership must remove the old keychain token"
@@ -670,6 +765,11 @@ pass "supervision: a Telegram-only home keeps one live supervision cycle"
 pending_before=$(tg fm-tg-inbox.sh pending-count)
 printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
 chmod 600 "$HOME_DIR/config/telegram-token"
+out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1); rc=$?
+[ "$rc" != 0 ] || fail "uninstall must fail when a token owner cannot be confirmed empty"
+[ -f "$HOME_DIR/config/telegram.json" ] || fail "a failed uninstall removed the configuration needed to retry cleanup"
+[ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "the failed uninstall silently lost the keychain failure evidence"
+case "$out" in *"could not be confirmed empty"*) ;; *) fail "failed uninstall did not report incomplete credential cleanup: $out" ;; esac
 out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
 [ ! -f "$HOME_DIR/config/telegram.json" ] || fail "uninstall must remove the configuration"
 [ ! -f "$HOME_DIR/config/telegram-token" ] || fail "uninstall must remove a stale fallback token"

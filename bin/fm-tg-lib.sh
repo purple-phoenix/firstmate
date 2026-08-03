@@ -312,17 +312,26 @@ fm_tg_token_load() {  # [owner]
 }
 
 fm_tg_token_remove() {  # <owner>
-  local owner=$1 file
+  local owner=$1 file rc
   case "$owner" in
     keychain)
-      command -v "$(fm_tg_security_bin)" >/dev/null 2>&1 || return 0
+      [ "$(uname)" = Darwin ] || return 0
+      command -v "$(fm_tg_security_bin)" >/dev/null 2>&1 || return 1
       "$(fm_tg_security_bin)" delete-generic-password \
-        -a "$(fm_tg_keychain_account)" -s "$(fm_tg_keychain_service)" >/dev/null 2>&1 || true
+        -a "$(fm_tg_keychain_account)" -s "$(fm_tg_keychain_service)" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" = 0 ] || [ "$rc" = 44 ] || return 1
+      "$(fm_tg_security_bin)" find-generic-password \
+        -a "$(fm_tg_keychain_account)" -s "$(fm_tg_keychain_service)" -w >/dev/null 2>&1
+      rc=$?
+      [ "$rc" = 44 ] || return 1
       ;;
     file)
       file=$(fm_tg_token_file)
-      rm -f -- "$file" 2>/dev/null || true
+      rm -f -- "$file" 2>/dev/null || return 1
+      [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
       ;;
+    *) return 1 ;;
   esac
   return 0
 }
@@ -424,7 +433,7 @@ fm_tg_split_message() {
           end)
       | .chunks + (if .cur | length > 0 then [(.cur | implode)] else [] end);
     def wordsplit($b):
-      (gsub("[[:space:]]+"; " ") | trim) as $norm
+      (gsub("[\t\r ]+"; " ") | trim) as $norm
       | if ($norm | utf16units) == 0 then []
         else
           [ $norm | split(" ")[] | if utf16units > $b then hardsplit($b)[] else . end ] as $words
@@ -435,13 +444,25 @@ fm_tg_split_message() {
             )) as $st
           | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
         end;
+    def linesplit($b):
+      split("\n")
+      | reduce .[] as $line ({chunks: [], cur: ""};
+          if ($line | utf16units) > $b then
+            (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
+            | .chunks += ($line | wordsplit($b))
+          else
+            (if .cur == "" then $line else .cur + "\n" + $line end) as $cand
+            | if ($cand | utf16units) <= $b then .cur = $cand
+              else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $line end
+          end)
+      | .chunks + (if .cur != "" then [.cur] else [] end);
     def units:
       split("\n\n") | map(trim) | map(select(length > 0));
     def pack($us; $b):
       (reduce $us[] as $u ({chunks: [], cur: ""};
         if ($u | utf16units) > $b then
           (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
-          | .chunks += ($u | wordsplit($b))
+          | .chunks += ($u | linesplit($b))
         else
           (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
           | if ($cand | utf16units) <= $b then .cur = $cand
@@ -476,6 +497,60 @@ fm_tg_outbox_dir()  { printf '%s/tg/outbox\n' "$(fm_tg_state_dir)"; }
 fm_tg_cursor_file() { printf '%s/tg/cursor\n' "$(fm_tg_state_dir)"; }
 fm_tg_check_file()  { printf '%s/fm-telegram.check.sh\n' "$(fm_tg_state_dir)"; }
 fm_tg_trust_file()  { printf '%s/fm-telegram.check-trust\n' "$(fm_tg_state_dir)"; }
+
+FM_TG_INBOX_MAX=100
+FM_TG_SENT_MAX=200
+FM_TG_OUTBOX_KEEP=50
+FM_TG_TASK_UPDATE_LIMIT=998
+
+fm_tg_record_count() {
+  local dir=$1 n=0 file
+  [ -d "$dir" ] || { printf '0\n'; return 0; }
+  for file in "$dir"/*.json; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+fm_tg_final_reservation_count() {
+  local state sent meta rid updates key n=0
+  state=$(fm_tg_state_dir)
+  sent=$(fm_tg_sent_dir)
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    rid=$(fm_tg_meta_get "$meta" tg_request)
+    fm_tg_base_request_id_valid "$rid" || continue
+    updates=$(fm_tg_meta_get "$meta" tg_updates)
+    case "$updates" in ''|*[!0-9]*) continue ;; esac
+    [ "$updates" -le "$FM_TG_TASK_UPDATE_LIMIT" ] || continue
+    key="$rid.u$((updates + 1))"
+    [ -e "$sent/$key.json" ] || [ -L "$sent/$key.json" ] || n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+fm_tg_send_capacity_available() {
+  local used reserved
+  used=$(fm_tg_record_count "$(fm_tg_sent_dir)")
+  reserved=$(fm_tg_final_reservation_count)
+  [ "$((used + reserved))" -lt "$FM_TG_SENT_MAX" ]
+}
+
+fm_tg_outbox_prepare_slot() {
+  local dir extra file
+  dir=$(fm_tg_outbox_dir)
+  extra=$(find "$dir" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | tail -n +$FM_TG_OUTBOX_KEEP)
+  [ -n "$extra" ] || return 0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    rm -f -- "$file" || return 1
+    [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+  done <<EOF
+$extra
+EOF
+  [ "$(fm_tg_record_count "$dir")" -lt "$FM_TG_OUTBOX_KEEP" ]
+}
 
 # A ledger key is always "tg-<update_id>" (the reply to that message),
 # "tg-<update_id>.u<n>" (the nth later update on the work it started), or
@@ -518,6 +593,7 @@ fm_tg_meta_link_set() {  # <meta> <request_id> <epoch> [updates]
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   fm_tg_base_request_id_valid "$rid" || return 1
   case "$ts$updates" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$updates" -le "$FM_TG_TASK_UPDATE_LIMIT" ] || return 1
   dir=${meta%/*}; base=${meta##*/}
   [ "$dir" != "$meta" ] || dir=.
   tmp=$(umask 077; mktemp "$dir/.${base}.fm-tg.XXXXXX") || return 1

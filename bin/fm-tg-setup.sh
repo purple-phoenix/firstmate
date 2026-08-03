@@ -144,10 +144,15 @@ cmd_token() {
     esac
   fi
   FM_TG_TOKEN=
-  config_merge ".bot_id = ${bot_id} | .bot_username = \"${bot_username}\" | .token_owner = \"${owner}\" | .enabled = false"
   if [ -n "$prior_owner" ] && [ "$prior_owner" != "$owner" ]; then
-    fm_tg_token_remove "$prior_owner"
+    if ! fm_tg_token_remove "$prior_owner"; then
+      if fm_tg_token_remove "$owner"; then
+        err "the previous $prior_owner credential could not be removed, so the owner change was rolled back; unlock or repair that owner and retry"
+      fi
+      err "neither the previous $prior_owner credential nor the new $owner credential could be confirmed removed; repair both owners before retrying"
+    fi
   fi
+  config_merge ".bot_id = ${bot_id} | .bot_username = \"${bot_username}\" | .token_owner = \"${owner}\" | .enabled = false"
   chmod 600 "$(fm_tg_config_file)" 2>/dev/null || true
   note "stored: bot @${bot_username:-unknown} (id ${bot_id}) - token held by the ${owner} owner, never printed"
   note ""
@@ -158,7 +163,7 @@ cmd_token() {
 }
 
 cmd_pair() {
-  local wait=${FM_TG_PAIR_WAIT:-60} deadline found=0 challenge expected
+  local wait=${FM_TG_PAIR_WAIT:-60} deadline found=0 challenge expected search_offset=0 payload max_seen=0 matched_update=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait) wait=${2:?--wait needs seconds}; shift 2 ;;
@@ -181,35 +186,38 @@ cmd_pair() {
   note "  $expected"
   note "listening for that command (up to ${wait}s)..."
   deadline=$(( $(date +%s) + wait ))
-  local max_update=0 picked user_id chat_id chat_type first_name
+  local picked user_id chat_id chat_type first_name
   user_id=''; chat_id=''; chat_type=''; first_name=''
   while :; do
-    if ! api_call getUpdates '{"offset":0,"limit":20,"timeout":5,"allowed_updates":["message"]}'; then
+    payload=$(jq -cn --argjson offset "$search_offset" \
+      '{offset:$offset,limit:20,timeout:5,allowed_updates:["message"]}')
+    if ! api_call getUpdates "$payload"; then
       FM_TG_TOKEN=
       err "Telegram could not be reached while pairing"
     fi
-    max_update=$(printf '%s' "$API_BODY" | jq -r '
-      [ .result[]? | .update_id | select(type == "number") ] | max // 0 | tostring' 2>/dev/null) || max_update=0
-    case "$max_update" in ''|*[!0-9]*) max_update=0 ;; esac
+    max_seen=$(printf '%s' "$API_BODY" | jq -r '
+      [ .result[]? | .update_id | select(type == "number") ] | max // 0 | tostring' 2>/dev/null) || max_seen=0
+    case "$max_seen" in ''|*[!0-9]*) max_seen=0 ;; esac
     # Take the newest matching private-chat message from a human. Group and
     # channel traffic and anyone without the local challenge are ignored.
     picked=$(printf '%s' "$API_BODY" | jq -c --arg expected "$expected" '
       [ .result[]?
         | select((.message | type) == "object")
-        | .message
-        | select((.chat.type // "") == "private")
-        | select((.from.is_bot // false) != true)
-        | select((.from.id | type) == "number" and (.chat.id | type) == "number")
-        | select(.text == $expected)
-      ] | last // empty' 2>/dev/null) || picked=
+        | select((.message.chat.type // "") == "private")
+        | select((.message.from.is_bot // false) != true)
+        | select((.message.from.id | type) == "number" and (.message.chat.id | type) == "number")
+        | select(.message.text == $expected)
+      ] | first // empty' 2>/dev/null) || picked=
     if [ -n "$picked" ]; then
-      user_id=$(printf '%s' "$picked" | jq -r '.from.id')
-      chat_id=$(printf '%s' "$picked" | jq -r '.chat.id')
-      chat_type=$(printf '%s' "$picked" | jq -r '.chat.type')
-      first_name=$(printf '%s' "$picked" | jq -r '.from.first_name // ""' | tr -cd 'A-Za-z0-9 ._-' | cut -c1-32)
+      matched_update=$(printf '%s' "$picked" | jq -r '.update_id')
+      user_id=$(printf '%s' "$picked" | jq -r '.message.from.id')
+      chat_id=$(printf '%s' "$picked" | jq -r '.message.chat.id')
+      chat_type=$(printf '%s' "$picked" | jq -r '.message.chat.type')
+      first_name=$(printf '%s' "$picked" | jq -r '.message.from.first_name // ""' | tr -cd 'A-Za-z0-9 ._-' | cut -c1-32)
       found=1
       break
     fi
+    [ "$max_seen" -lt "$search_offset" ] || search_offset=$((max_seen + 1))
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 2
   done
@@ -222,8 +230,8 @@ cmd_pair() {
 
   # Consume everything seen during pairing, so the /start that paired the channel
   # is not delivered again as the captain's first request.
-  if [ "$max_update" -gt 0 ]; then
-    printf '%s\n' "$max_update" | fm_tg_private_publish_stdin "$(fm_tg_dir)" "cursor" \
+  if [ "$matched_update" -gt 0 ]; then
+    printf '%s\n' "$matched_update" | fm_tg_private_publish_stdin "$(fm_tg_dir)" "cursor" \
       || err "the message cursor could not be recorded"
   fi
 
@@ -299,12 +307,17 @@ cmd_disable() {
 
 cmd_uninstall() {
   fm_tg_config_load
-  local pending
+  local pending cleanup_failed=0
   pending=$(fm_tg_pending_count)
   unregister_check
-  fm_tg_token_remove keychain
-  fm_tg_token_remove file
-  rm -f -- "$(fm_tg_config_file)" 2>/dev/null || true
+  fm_tg_token_remove keychain || cleanup_failed=1
+  fm_tg_token_remove file || cleanup_failed=1
+  if [ "$cleanup_failed" = 1 ]; then
+    config_merge '.enabled = false'
+    err "polling is stopped, but one or more token owners could not be confirmed empty; unlock or repair them and retry uninstall"
+  fi
+  rm -f -- "$(fm_tg_config_file)" 2>/dev/null \
+    || err "the token owners are empty, but the channel configuration could not be removed"
   note "removed: the bot token, the pairing, and the channel configuration."
   note "  polling is stopped and no webhook was ever registered, so nothing remains reachable from outside."
   if [ "$pending" -gt 0 ]; then

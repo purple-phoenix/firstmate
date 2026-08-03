@@ -408,19 +408,20 @@ An armed channel counts as a supervision need in `bin/fm-supervision-lib.sh`, ex
 Durable state lives under the mode-0700 `state/tg/` subtree this channel owns outright:
 
 - `state/tg/cursor` - the Telegram update offset.
-- `state/tg/inbox/<request_id>.json` (`fm-telegram-request.v1`) - one accepted message; `state/tg/inbox/archive/` keeps the newest 50 claimed ones.
-- `state/tg/sent/<key>.json` (`fm-telegram-sent.v1`) - the reply ledger.
-- `state/tg/outbox/<key>.json` (`fm-telegram-outbox.v1`) - `FM_TG_DRY_RUN` previews.
+- `state/tg/inbox/<request_id>.json` (`fm-telegram-request.v1`) - one accepted message; polling stops before contacting Telegram when 100 are pending, and `state/tg/inbox/archive/` keeps the newest 50 claimed ones.
+- `state/tg/sent/<key>.json` (`fm-telegram-sent.v1`) - the reply ledger, capped at 200 exact claims including one reserved final slot for every linked task.
+- `state/tg/outbox/<key>.json` (`fm-telegram-outbox.v1`) - `FM_TG_DRY_RUN` previews, capped at 50 records.
 - `state/tg/poll.error` and `state/tg/rejects` - the deduplicated last poll failure and the refusal counter.
 
 Ingress is crash-safe by ordering: each accepted update is committed to the inbox with a create-only claim BEFORE the cursor advances, so a crash in between replays the update onto the existing record instead of losing or duplicating it.
 Egress is at-most-once by the same mechanism: `bin/fm-tg-reply.sh` claims `state/tg/sent/<key>.json` before any network call and refuses a second reply for a key it has already delivered.
+Sent claims are never pruned; once claims plus reserved linked-task finals reach the fixed ledger bound, ordinary sends and new links apply backpressure while every already-linked final can consume its reserved slot.
 A definite refusal clears the claim so the message can be retried; an ambiguous outcome - a timeout, or a server error after the request went out - is recorded as ambiguous and refused until an explicit `--resend`, because the client will not guess whether Telegram delivered it and never falls back to another channel.
 Replies are sent as plain text with no `parse_mode`, so message content is delivered literally and no chunk boundary can split markup; a reply longer than `FM_TG_REPLY_MAX_CHARS` is split on paragraph, line, and word boundaries, capped at `FM_TG_REPLY_MAX_CHUNKS` messages, and the last retained message is marked with an ellipsis.
 
 When a Telegram message starts work that cannot finish in the same turn, `bin/fm-tg-link.sh` records that message's identity on the task as `tg_request=`, `tg_request_ts=`, and `tg_updates=` in `state/<id>.meta`, so a later session reports the outcome to the same conversation without relying on anyone's memory.
 `bin/fm-tg-reply.sh --task <id>` resolves that link and derives a distinct ledger key per update (`tg-<update_id>.u<n>`), which is what lets a retry be refused as a duplicate while a genuinely new milestone is not.
-Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3); `--final` is never rationed, always sends, and then clears the link.
+Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3, clamped to 998 so the final remains representable as `.u999`); `--final` is never rationed, always sends, and then clears the link.
 
 The poll wakes firstmate with `tg-message <n> pending` while messages are unclaimed, or reports a distinct configuration or transport failure once as `tg-mode-error ...` until it clears.
 The `telegram-captain-channel` skill owns what firstmate does with either wake.
@@ -481,8 +482,8 @@ FM_TG_MAX_REQUEST_CHARS=4096   # longest accepted captain message; longer ones a
 FM_TG_REPLY_MAX_CHARS=3500   # per-message split budget for replies; clamped to 200..4096
 FM_TG_REPLY_MAX_CHUNKS=6   # maximum messages in one split reply; clamped to 1..20
 FM_TG_DRY_RUN=          # truthy records replies to state/tg/outbox/ instead of sending them
-FM_TG_PAIR_WAIT=60      # default seconds bin/fm-tg-setup.sh pair listens for the captain's /start
-FM_TG_TASK_UPDATE_MAX=3   # captain-facing updates allowed per Telegram-linked task before its final outcome
+FM_TG_PAIR_WAIT=60      # default seconds bin/fm-tg-setup.sh pair listens for its one-time captain challenge
+FM_TG_TASK_UPDATE_MAX=3   # captain-facing updates per linked task before its final outcome; clamped to 998
 FM_TG_SECURITY_BIN=security   # keychain client used by the token owner, mainly for tests
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale

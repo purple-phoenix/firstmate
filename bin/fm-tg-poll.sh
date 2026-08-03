@@ -125,6 +125,13 @@ trap 'rm -f -- "$BODY_FILE"' EXIT
 
 CURSOR=$(cursor_read)
 OFFSET=$((CURSOR + 1))
+PENDING=$(fm_tg_pending_count)
+if [ "$PENDING" -ge "$FM_TG_INBOX_MAX" ]; then
+  wake_if_pending
+  exit 0
+fi
+AVAILABLE=$((FM_TG_INBOX_MAX - PENDING))
+[ "$BATCH" -le "$AVAILABLE" ] || BATCH=$AVAILABLE
 
 PAYLOAD_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-poll-req.XXXXXX") || exit 0
 trap 'rm -f -- "$BODY_FILE" "$PAYLOAD_FILE"' EXIT

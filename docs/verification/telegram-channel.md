@@ -18,20 +18,21 @@ bin/fm-doc-audience-check.sh
 
 All three passed.
 `tests/fm-telegram.test.sh` runs the whole channel against a loopback fake Bot API and a fake `security` client, so it never contacts Telegram, never leaves 127.0.0.1, and never touches the operator's keychain.
-Its 30 checks establish, in order:
+Its checks establish, in order:
 
 - **Inert by default.** With no configuration the poll printed nothing, created no state, and made no API call, and `status` reported an unconfigured channel.
 - **Ordered setup.** A token alone did not enable the channel; `enable` refused until pairing completed.
 - **Secret handling.** The token was accepted only on standard input; a malformed paste was refused without echoing it; and the stored value arrived at the keychain client through stdin rather than an argument.
-- **Pairing.** A private `/start` bound the exact sender and chat while a group message in the same batch was ignored, the channel stayed off, the confirmation showed only the last four digits, and the pairing `/start` was consumed rather than delivered as a captain request.
+- **Pairing.** A one-time private challenge paged past more than one update batch, bound the exact sender and chat, committed the cursor only through the challenge, and left the captain's later message available to the normal poll.
 - **Ingress allowlisting.** A wrong sender id, wrong chat id, supergroup chat, bot sender, `forward_origin`, `via_bot`, `sender_chat`, `edited_message`, `channel_post`, and `callback_query` were each refused with no durable record, no outbound message, and no stored text; only the bounded refusal counter moved.
 - **Text is data.** A message containing `$(touch ...)`, backtick substitution, `${IFS}`, and `; rm -rf /` created no file and was stored byte-for-byte in a mode-0600 record.
 - **Replay and crash safety.** Re-delivering the same update id against a rewound cursor produced exactly one request, and the commit-before-advance ordering converged without duplication.
 - **Malformed and bounded input.** An out-of-order batch containing a photo, an oversized message, a whitespace-only message, an entry with no `update_id`, and a non-object array element was processed in update order; the oversized message's text was not stored.
 - **Failure handling.** HTTP 401, HTTP 409, an unreadable body, and an unreachable host each surfaced exactly once, deduplicated until recovery, and leaked neither the token nor the request URL.
-- **Outbound.** A short reply was one plain-text message with no `parse_mode` addressed to the paired chat; a second reply for the same request id was refused; markup characters were delivered literally; a long reply split within the per-message limit, capped its thread, and marked truncation with an ellipsis.
+- **Outbound.** A short reply was one plain-text message with no `parse_mode` addressed to the paired chat; a second reply for the same request id was refused; markup characters were delivered literally; and long replies preserved single line breaks, split by UTF-16 units, capped their thread, and marked truncation with an ellipsis.
 - **Delivery honesty.** A definite refusal sent nothing and left the key retryable; a server error was recorded as ambiguous, refused a silent retry, and required an explicit `--resend`; no path fell back to another channel.
-- **Removal.** `disable` stopped polling, unregistered the watcher check, and refused to send; `uninstall` removed the token, pairing, configuration, and check while accounting for queued messages.
+- **State bounds.** Pending ingress stopped at 100 before another API call, sent claims plus linked-task final reservations stopped at 200 without pruning at-most-once evidence, dry-run previews retained 50 records, and the task update maximum clamped so `.u999` remained available for the final.
+- **Removal.** Owner switching rolled back when the prior credential could not be removed; `disable` stopped polling and refused to send; and `uninstall` retained a disabled retryable configuration until both token locations were confirmed empty.
 
 ## No process-argument leak
 

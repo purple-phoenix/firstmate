@@ -128,6 +128,8 @@ if [ -n "$TASK_ID" ]; then
   fi
   TASK_RID=${LINK%% *}
   TASK_SENT=${LINK##* }
+  [ "$TASK_SENT" -le "$FM_TG_TASK_UPDATE_LIMIT" ] \
+    || { err "the task link has an invalid update count; nothing was sent"; exit 2; }
   KEY="$TASK_RID.u$((TASK_SENT + 1))"
 fi
 
@@ -156,6 +158,18 @@ case "$N" in ''|*[!0-9]*) N=0 ;; esac
 [ "$N" -gt 0 ] || { err "the message is empty"; exit 2; }
 
 NOW=$(date +%s)
+
+if [ ! -e "$SENT_DIR/$KEY.json" ] && [ ! -L "$SENT_DIR/$KEY.json" ]; then
+  if [ "$FINAL" != 1 ] || [ -z "$TASK_ID" ]; then
+    fm_tg_send_capacity_available \
+      || { err "the Telegram reply ledger is full; claim pending messages before sending more"; exit 2; }
+  fi
+fi
+
+if [ "$DRY" = 1 ]; then
+  fm_tg_outbox_prepare_slot \
+    || { err "dry-run preview retention could not make room; nothing was recorded"; exit 2; }
+fi
 
 ledger_write() {  # <status> <chunks-sent>
   jq -cn --arg key "$KEY" --arg status "$1" --argjson chunks "$2" \
