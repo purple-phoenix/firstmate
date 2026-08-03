@@ -413,6 +413,8 @@ Durable state lives under the mode-0700 `state/tg/` subtree this channel owns ou
 - `state/tg/outbox/<key>.json` (`fm-telegram-outbox.v1`) - `FM_TG_DRY_RUN` previews, capped at 50 records.
 - `state/tg/poll.error` and `state/tg/rejects` - the deduplicated last poll failure and the refusal counter.
 
+When the claimed-request archive needs room, it removes the oldest answered record by validated `received_at` time while unanswered records remain reserved; malformed legacy times fall back to the validated file modification time, matching dry-run preview retention's `recorded_at` ordering.
+
 Ingress is crash-safe by ordering: each accepted update is committed to the inbox with a create-only claim BEFORE the cursor advances, so a crash in between replays the update onto the existing record instead of losing or duplicating it.
 Egress is at-most-once by the same mechanism: `bin/fm-tg-reply.sh` claims `state/tg/sent/<key>.json` before any network call and refuses a second reply for a key it has already delivered.
 Sent claims are never pruned; every unanswered pending or archived request and every linked task reserves one of the 200 ledger slots, so polling, ordinary sends, and new links apply backpressure before consuming a final reservation.

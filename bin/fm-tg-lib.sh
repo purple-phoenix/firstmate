@@ -569,8 +569,16 @@ fm_tg_send_capacity_available() {
   [ "$(fm_tg_send_capacity_remaining)" -gt 0 ]
 }
 
+fm_tg_record_order_key() {
+  local file=$1 schema=$2 field=$3 at
+  at=$(jq -r --arg schema "$schema" --arg field "$field" 'if .schema == $schema and (.[$field] | type) == "number" and (.[$field] | floor) == .[$field] and .[$field] >= 0 then (.[$field] | tostring) else "" end' "$file" 2>/dev/null) || at=
+  case "$at" in ''|*[!0-9]*) at=$(fm_tg_file_stat "$file" %m %Y) || return 1 ;; esac
+  [ "${#at}" -le 18 ] || at=$(fm_tg_file_stat "$file" %m %Y) || return 1
+  printf '%020d:%s\n' "$at" "${file##*/}"
+}
+
 fm_tg_outbox_prepare_slot() {
-  local dir count file at key oldest oldest_key
+  local dir count file key oldest oldest_key
   dir=$(fm_tg_outbox_dir)
   count=$(fm_tg_record_count "$dir")
   while [ "$count" -ge "$FM_TG_OUTBOX_KEEP" ]; do
@@ -578,10 +586,7 @@ fm_tg_outbox_prepare_slot() {
     oldest_key=
     for file in "$dir"/*.json; do
       [ -f "$file" ] && [ ! -L "$file" ] || continue
-      at=$(jq -r 'if .schema == "fm-telegram-outbox.v1" and (.recorded_at | type) == "number" and (.recorded_at | floor) == .recorded_at and .recorded_at >= 0 then (.recorded_at | tostring) else "" end' "$file" 2>/dev/null) || at=
-      case "$at" in ''|*[!0-9]*) at=$(fm_tg_file_stat "$file" %m %Y) || return 1 ;; esac
-      [ "${#at}" -le 18 ] || at=$(fm_tg_file_stat "$file" %m %Y) || return 1
-      key=$(printf '%020d:%s' "$at" "${file##*/}")
+      key=$(fm_tg_record_order_key "$file" fm-telegram-outbox.v1 recorded_at) || return 1
       if [ -z "$oldest_key" ] || [[ "$key" < "$oldest_key" ]]; then
         oldest=$file
         oldest_key=$key

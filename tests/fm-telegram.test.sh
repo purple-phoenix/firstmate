@@ -353,6 +353,31 @@ case "$claimed" in *"delivered: 5"*) ;; *) fail "claim must deliver every pendin
 pass "inbox: claim delivers before archiving, so an interruption re-surfaces instead of losing a message"
 
 reset_ingress
+mkdir -p "$HOME_DIR/state/tg/inbox/archive" "$HOME_DIR/state/tg/sent"
+printf '{"schema":"fm-telegram-request.v1","request_id":"tg-99","received_at":1,"kind":"message","text":"oldest"}\n' \
+  > "$HOME_DIR/state/tg/inbox/archive/tg-99.json"
+printf '{"schema":"fm-telegram-sent.v1","key":"tg-99","status":"sent"}\n' \
+  > "$HOME_DIR/state/tg/sent/tg-99.json"
+chmod 600 "$HOME_DIR/state/tg/inbox/archive/tg-99.json" "$HOME_DIR/state/tg/sent/tg-99.json"
+for id in $(seq 100 148); do
+  printf '{"schema":"fm-telegram-request.v1","request_id":"tg-%s","received_at":%s,"kind":"message","text":"newer"}\n' "$id" "$id" \
+    > "$HOME_DIR/state/tg/inbox/archive/tg-$id.json"
+  printf '{"schema":"fm-telegram-sent.v1","key":"tg-%s","status":"sent"}\n' "$id" \
+    > "$HOME_DIR/state/tg/sent/tg-$id.json"
+  chmod 600 "$HOME_DIR/state/tg/inbox/archive/tg-$id.json" "$HOME_DIR/state/tg/sent/tg-$id.json"
+done
+printf '{"schema":"fm-telegram-request.v1","request_id":"tg-200","received_at":200,"kind":"message","text":"newest"}\n' \
+  > "$HOME_DIR/state/tg/inbox/tg-200.json"
+chmod 600 "$HOME_DIR/state/tg/inbox/tg-200.json"
+tg fm-tg-inbox.sh claim >/dev/null || fail "claiming into a full answered archive must succeed"
+[ ! -f "$HOME_DIR/state/tg/inbox/archive/tg-99.json" ] || fail "archive retention kept the oldest answered request"
+[ -f "$HOME_DIR/state/tg/inbox/archive/tg-100.json" ] || fail "archive retention pruned by filename instead of received time"
+[ -f "$HOME_DIR/state/tg/inbox/archive/tg-200.json" ] || fail "archive retention did not keep the newly claimed request"
+[ "$(find "$HOME_DIR/state/tg/inbox/archive" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" = 50 ] \
+  || fail "claimed-request archive exceeded its fixed bound"
+pass "state: claimed requests retain the newest 50 records by received time"
+
+reset_ingress
 mkdir -p "$HOME_DIR/state/tg/inbox"
 for id in $(seq 1000 1098); do
   printf '{"schema":"fm-telegram-request.v1","request_id":"tg-%s"}\n' "$id" \

@@ -56,19 +56,23 @@ print_record() {
 }
 
 prepare_archive_slot() {
-  local count old rid sent candidate
+  local count old rid sent candidate key oldest_key
   sent=$(fm_tg_sent_dir)
   count=$(fm_tg_record_count "$ARCHIVE")
   while [ "$count" -ge "$ARCHIVE_KEEP" ]; do
     old=
+    oldest_key=
     for candidate in "$ARCHIVE"/*.json; do
       [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
       rid=${candidate##*/}
       rid=${rid%.json}
       fm_tg_base_request_id_valid "$rid" || continue
       fm_tg_private_file_valid "$sent/$rid.json" 600 || continue
-      old=$candidate
-      break
+      key=$(fm_tg_record_order_key "$candidate" fm-telegram-request.v1 received_at) || return 1
+      if [ -z "$oldest_key" ] || [[ "$key" < "$oldest_key" ]]; then
+        old=$candidate
+        oldest_key=$key
+      fi
     done
     [ -n "$old" ] || return 1
     rm -f -- "$old" || return 1
