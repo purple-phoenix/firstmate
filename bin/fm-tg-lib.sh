@@ -315,7 +315,13 @@ fm_tg_token_remove() {  # <owner>
   local owner=$1 file rc
   case "$owner" in
     keychain)
-      [ "$(uname)" = Darwin ] || return 0
+      if [ "$(uname)" != Darwin ]; then
+        [ "${FM_TG_TEST_ALLOW_KEYCHAIN:-0}" = 1 ] || return 1
+        case "$(fm_tg_api_base)" in
+          http://127.0.0.1:*) ;;
+          *) return 1 ;;
+        esac
+      fi
       command -v "$(fm_tg_security_bin)" >/dev/null 2>&1 || return 1
       "$(fm_tg_security_bin)" delete-generic-password \
         -a "$(fm_tg_keychain_account)" -s "$(fm_tg_keychain_service)" >/dev/null 2>&1
