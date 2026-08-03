@@ -265,15 +265,15 @@ while [ "$i" -lt "$N" ]; do
         err "delivery timed out after $SENT of $N message(s); outcome unknown"
         exit 4
         ;;
-      *)
-        if [ "$SENT" -gt 0 ]; then
-          ledger_write ambiguous "$SENT" >/dev/null 2>&1 || true
-          err "the connection dropped after $SENT of $N message(s); outcome unknown"
-          exit 4
-        fi
+      5)
         rm -f -- "$SENT_DIR/$KEY.json" 2>/dev/null || true
         err "the Telegram API could not be reached; nothing was sent"
         exit 5
+        ;;
+      *)
+        ledger_write ambiguous "$SENT" >/dev/null 2>&1 || true
+        err "the connection dropped after $SENT of $N message(s); outcome unknown"
+        exit 4
         ;;
     esac
   fi

@@ -147,6 +147,7 @@ REAL_CURL=$(command -v curl)
 cat > "$FAKEBIN/curl" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CURL_LOG"
+[ -z "\${FM_TG_TEST_CURL_RC:-}" ] || exit "\$FM_TG_TEST_CURL_RC"
 exec "$REAL_CURL" "\$@"
 SH
 chmod +x "$FAKEBIN/curl"
@@ -207,21 +208,23 @@ out=$(tg fm-tg-setup.sh enable 2>&1) && fail "enable must refuse before pairing"
 case "$out" in *pair*) ;; *) fail "enable must point at the pairing step, got: $out" ;; esac
 pass "setup: a token alone never enables the channel"
 
-# Pair against a private /start; a group message in the same batch is ignored.
+# Pair against the one-time private challenge; a group and an unchallenged
+# private message in the same batch are ignored.
 scenario "$(jq -cn --argjson u "$USER_ID" --argjson c "$CHAT_ID" '{updates:[
   {update_id:10, message:{message_id:1, date:1, chat:{id:-100999, type:"supergroup"}, from:{id:777, is_bot:false}, text:"/start"}},
-  {update_id:11, message:{message_id:2, date:2, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false, first_name:"Captain"}, text:"/start"}}
+  {update_id:11, message:{message_id:2, date:2, chat:{id:888, type:"private"}, from:{id:888, is_bot:false}, text:"/start"}},
+  {update_id:12, message:{message_id:3, date:3, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false, first_name:"Captain"}, text:"/start PAIRTEST123"}}
 ]}')"
-out=$(FM_TG_PAIR_WAIT=1 tg fm-tg-setup.sh pair 2>&1) || fail "pairing must succeed: $out"
+out=$(FM_TG_PAIR_WAIT=1 FM_TG_PAIR_CHALLENGE=PAIRTEST123 tg fm-tg-setup.sh pair 2>&1) || fail "pairing must succeed: $out"
 [ "$(config_field .user_id)" = "$USER_ID" ] || fail "pairing must record the exact user id"
 [ "$(config_field .chat_id)" = "$CHAT_ID" ] || fail "pairing must record the exact private chat id"
 [ "$(config_field .enabled)" = false ] || fail "pairing must not enable the channel"
 case "$out" in *"$USER_ID"*) fail "pairing printed the full identity instead of a redacted one" ;; esac
-pass "pairing: binds the exact private sender and chat, ignores the group message, stays off"
+pass "pairing: only the one-time private challenge binds the sender and chat"
 
-# Pairing consumed the /start, so it never becomes a captain request.
-[ "$(cat "$HOME_DIR/state/tg/cursor")" = 11 ] || fail "pairing must consume the updates it read"
-pass "pairing: the /start that paired the channel is consumed, not delivered as a request"
+# Pairing consumed the challenge, so it never becomes a captain request.
+[ "$(cat "$HOME_DIR/state/tg/cursor")" = 12 ] || fail "pairing must consume the updates it read"
+pass "pairing: the challenge that paired the channel is consumed, not delivered as a request"
 
 out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must succeed after pairing: $out"
 [ "$(config_field .enabled)" = true ] || fail "enable must flip the channel on"
@@ -368,6 +371,14 @@ case "$out" in "tg-mode-error "*) ;; *) fail "an unreachable API must surface on
 case "$out" in *127.0.0.1*|*"$TOKEN"*) fail "the network diagnostic leaked transport detail" ;; esac
 pass "failure: an unreachable API reports a plain cause and leaks no URL or token"
 
+: > "$CURL_LOG"
+scenario '{}'
+FM_TG_HTTP_TIMEOUT=0 tg fm-tg-poll.sh >/dev/null || fail "a zero HTTP timeout must be clamped"
+grep -q -- '-m 20' "$CURL_LOG" || fail "a zero HTTP timeout must reset to the bounded default"
+FM_TG_HTTP_TIMEOUT=999 tg fm-tg-poll.sh >/dev/null || fail "an oversized HTTP timeout must be clamped"
+grep -q -- '-m 20' "$CURL_LOG" || fail "an oversized HTTP timeout must reset to the bounded default"
+pass "transport: Bot API calls clamp zero and oversized HTTP timeouts"
+
 # =============================================================================
 # 6. Outbound: chunking, at-most-once, and ambiguous delivery
 # =============================================================================
@@ -420,6 +431,20 @@ last=$(grep '"sendMessage"' "$API_LOG" | tail -1 | jq -r '.body | fromjson | .te
 case "$last" in *…) ;; *) fail "a truncated thread must mark its last message" ;; esac
 pass "outbound: a long reply splits within the per-message limit, caps its thread, and marks truncation"
 
+: > "$API_LOG"
+python3 - "$TMP_ROOT/emoji.txt" <<'PY'
+import sys
+open(sys.argv[1], "w").write("😀" * 250)
+PY
+FM_TG_REPLY_MAX_CHARS=200 tg fm-tg-reply.sh --event emoji-check --text-file "$TMP_ROOT/emoji.txt" >/dev/null \
+  || fail "an emoji-heavy reply must send"
+while IFS= read -r line; do
+  units=$(printf '%s' "$line" | jq -r '.body | fromjson | .text' \
+    | python3 -c 'import sys; print(len(sys.stdin.read().rstrip("\n").encode("utf-16-le")) // 2)')
+  [ "$units" -le 200 ] || fail "an emoji chunk exceeded the UTF-16 limit ($units)"
+done < <(grep '"sendMessage"' "$API_LOG")
+pass "outbound: emoji-heavy replies are split by Telegram UTF-16 units"
+
 # A definite refusal frees the key for a retry; an ambiguous outcome does not.
 scenario '{"sendMessage_status":400}'
 out=$(tg fm-tg-reply.sh --event refused-check --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
@@ -442,6 +467,24 @@ tg fm-tg-reply.sh --event ambiguous-check --resend --text-file "$TMP_ROOT/reply.
   || fail "--resend must be the explicit way past an ambiguous delivery"
 pass "outbound: an ambiguous delivery is never silently retried and never falls back to another channel"
 
+scenario '{}'
+out=$(FM_TG_TEST_CURL_RC=56 tg fm-tg-reply.sh --event reset-check --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
+[ "$rc" = 4 ] || fail "a post-connect reset must be ambiguous, got $rc"
+[ "$(jq -r .status "$HOME_DIR/state/tg/sent/event-reset-check.json")" = ambiguous ] \
+  || fail "a post-connect reset must retain an ambiguous claim"
+out=$(tg fm-tg-reply.sh --event reset-check --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
+[ "$rc" = 4 ] || fail "a post-connect reset must block automatic retry, got $rc"
+tg fm-tg-reply.sh --event reset-check --resend --text-file "$TMP_ROOT/reply.txt" >/dev/null \
+  || fail "an explicit resend must clear a post-connect reset hold"
+
+out=$(FM_TG_TEST_CURL_RC=7 tg fm-tg-reply.sh --event connect-check --text-file "$TMP_ROOT/reply.txt" 2>&1); rc=$?
+[ "$rc" = 5 ] || fail "a definite connection refusal must stay retryable, got $rc"
+[ ! -f "$HOME_DIR/state/tg/sent/event-connect-check.json" ] \
+  || fail "a definite connection refusal must free its claim"
+tg fm-tg-reply.sh --event connect-check --text-file "$TMP_ROOT/reply.txt" >/dev/null \
+  || fail "a definite connection refusal must permit an ordinary retry"
+pass "outbound: post-request network loss stops while pre-connect failure remains retryable"
+
 # Nothing is sent, and no key is consumed, when the channel is off.
 tg fm-tg-setup.sh disable >/dev/null || fail "disable must succeed"
 before=$(api_calls sendMessage)
@@ -460,14 +503,20 @@ tg fm-tg-setup.sh enable >/dev/null || fail "re-enable must succeed"
 # the conversation, so a later session reports the outcome to the same chat.
 scenario '{}'
 : > "$API_LOG"
-printf 'window=fm-work-x1\nkind=ship\nproject=alpha\n' > "$HOME_DIR/state/work-x1.meta"
+printf 'window=fm-work-x1\nkind=ship\nproject=alpha\npr=https://github.com/example/repo/pull/12\n' > "$HOME_DIR/state/work-x1.meta"
 tg fm-tg-link.sh work-x1 tg-30 >/dev/null || fail "linking a task to its message must succeed"
 [ "$(tg fm-tg-link.sh --check work-x1)" = "tg-30 0" ] || fail "--check must report the link and its spent budget"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+fm_pr_metadata_identity_parse "$HOME_DIR/state/work-x1.meta" \
+  || fail "a Telegram link appended after pr= must preserve PR metadata validity"
 
 printf 'Captain, the investigation is done and a build is under way.\n' > "$TMP_ROOT/u1.txt"
 tg fm-tg-reply.sh --task work-x1 --text-file "$TMP_ROOT/u1.txt" >/dev/null || fail "a linked update must send"
 [ "$(api_calls sendMessage)" = 1 ] || fail "a linked update must be one message"
 [ "$(tg fm-tg-link.sh --check work-x1)" = "tg-30 1" ] || fail "a delivered update must be counted"
+fm_pr_metadata_identity_parse "$HOME_DIR/state/work-x1.meta" \
+  || fail "a Telegram update rewrite must preserve PR metadata validity"
 
 # Retrying the same update is refused; a genuinely new milestone is not.
 out=$(tg fm-tg-reply.sh --task work-x1 --text-file "$TMP_ROOT/u1.txt" 2>&1); rc=$?
@@ -485,6 +534,8 @@ FM_TG_TASK_UPDATE_MAX=2 tg fm-tg-reply.sh --task work-x1 --final --text-file "$T
 [ "$(api_calls sendMessage)" = 3 ] || fail "the final outcome must send"
 [ -z "$(tg fm-tg-link.sh --check work-x1)" ] || fail "a final outcome must clear the link"
 grep -q '^tg_request=' "$HOME_DIR/state/work-x1.meta" && fail "a final outcome must drop the link from the task record"
+fm_pr_metadata_identity_parse "$HOME_DIR/state/work-x1.meta" \
+  || fail "clearing a Telegram link must preserve PR metadata validity"
 out=$(tg fm-tg-reply.sh --task work-x1 --text-file "$TMP_ROOT/u1.txt" 2>&1); rc=$?
 [ "$rc" = 3 ] || fail "an unlinked task must refuse to send, got $rc"
 pass "linked work: the terminal outcome always lands and then closes the conversation"
@@ -503,6 +554,7 @@ pass "outbound: a dry run records the would-be message and sends nothing"
 # The weaker file-token owner still works end to end and stays mode 0600.
 out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
   || fail "the file token owner must work: $out"
+[ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "switching to file ownership must remove the old keychain token"
 mode=$(stat -f %Lp "$HOME_DIR/config/telegram-token" 2>/dev/null || stat -c %a "$HOME_DIR/config/telegram-token")
 [ "$mode" = 600 ] || fail "the fallback token file must be mode 0600, got $mode"
 grep -q '^config/telegram-token$' "$ROOT/.gitignore" || fail "the fallback token file must be gitignored"
@@ -514,7 +566,7 @@ pass "secret: the documented weaker file owner works end to end at mode 0600 and
 
 # Back to the keychain owner for the remaining proofs.
 printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner keychain >/dev/null || fail "restoring the keychain owner must work"
-rm -f "$HOME_DIR/config/telegram-token"
+[ ! -f "$HOME_DIR/config/telegram-token" ] || fail "switching to keychain ownership must remove the old token file"
 tg fm-tg-setup.sh enable >/dev/null || fail "re-enable must succeed"
 
 # =============================================================================
@@ -616,8 +668,11 @@ fm_supervision_needed "$HOME_DIR/state" 300 \
 pass "supervision: a Telegram-only home keeps one live supervision cycle"
 
 pending_before=$(tg fm-tg-inbox.sh pending-count)
+printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
+chmod 600 "$HOME_DIR/config/telegram-token"
 out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
 [ ! -f "$HOME_DIR/config/telegram.json" ] || fail "uninstall must remove the configuration"
+[ ! -f "$HOME_DIR/config/telegram-token" ] || fail "uninstall must remove a stale fallback token"
 [ ! -f "$HOME_DIR/state/fm-telegram.check.sh" ] || fail "uninstall must remove the watcher check"
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "uninstall must remove the stored token"
 if [ "$pending_before" -gt 0 ]; then

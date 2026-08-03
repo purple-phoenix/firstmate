@@ -101,14 +101,15 @@ That writes a gitignored mode-0600 `config/telegram-token`.
 It is weaker on purpose: anything that can read your firstmate home can read the token. Prefer the keychain where you have one.
 
 **3. Pair your phone.**
-In Telegram, open a chat with the bot you just made and send `/start`.
-Then:
+In Telegram, open a private chat with the bot you just made.
+Then run:
 
 ```sh
 bin/fm-tg-setup.sh pair
 ```
 
-It listens briefly, picks up your `/start`, and records your exact numeric Telegram user id and private chat id.
+The command prints a one-time `/start` command for you to send in that private chat, listens briefly for that exact challenge, and records your numeric Telegram user id and private chat id.
+An ordinary `/start` or a message from someone who only knows the bot username cannot claim the pairing.
 From then on those two numbers are the whole allowlist: any other sender, any other chat, and any group or channel is dropped without a reply.
 The confirmation shows only the last four digits.
 

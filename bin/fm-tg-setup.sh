@@ -100,7 +100,7 @@ load_token_or_die() {
 }
 
 cmd_token() {
-  local owner=keychain token
+  local owner=keychain token prior_owner
   while [ $# -gt 0 ]; do
     case "$1" in
       --owner) owner=${2:?--owner needs a value}; shift 2 ;;
@@ -115,6 +115,8 @@ cmd_token() {
     *) err "unknown token owner: use keychain or file" ;;
   esac
   [ -t 0 ] && err "read the token from stdin, never from an argument: pbpaste | bin/fm-tg-setup.sh token"
+  fm_tg_config_load
+  prior_owner=${FM_TG_TOKEN_OWNER:-}
   IFS= read -r token || true
   token=${token%$'\r'}
   token=${token#"${token%%[![:space:]]*}"}
@@ -143,17 +145,20 @@ cmd_token() {
   fi
   FM_TG_TOKEN=
   config_merge ".bot_id = ${bot_id} | .bot_username = \"${bot_username}\" | .token_owner = \"${owner}\" | .enabled = false"
+  if [ -n "$prior_owner" ] && [ "$prior_owner" != "$owner" ]; then
+    fm_tg_token_remove "$prior_owner"
+  fi
   chmod 600 "$(fm_tg_config_file)" 2>/dev/null || true
   note "stored: bot @${bot_username:-unknown} (id ${bot_id}) - token held by the ${owner} owner, never printed"
   note ""
   note "next, from the phone you want to use:"
   note "  1. open Telegram and start a private chat with @${bot_username:-your bot}"
-  note "  2. send it: /start"
-  note "  3. back here, run: bin/fm-tg-setup.sh pair"
+  note "  2. back here, run: bin/fm-tg-setup.sh pair"
+  note "  3. send the one-time pairing command it prints"
 }
 
 cmd_pair() {
-  local wait=${FM_TG_PAIR_WAIT:-60} deadline found=0
+  local wait=${FM_TG_PAIR_WAIT:-60} deadline found=0 challenge expected
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait) wait=${2:?--wait needs seconds}; shift 2 ;;
@@ -164,7 +169,17 @@ cmd_pair() {
   [ "$wait" -le 600 ] || wait=600
   load_token_or_die
 
-  note "listening for a /start from the captain's phone (up to ${wait}s)..."
+  challenge=${FM_TG_PAIR_CHALLENGE:-}
+  if [ -z "$challenge" ]; then
+    challenge=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fi
+  case "$challenge" in ''|*[!A-Za-z0-9]*) FM_TG_TOKEN=; err "a one-time pairing challenge could not be generated" ;; esac
+  [ "${#challenge}" -ge 8 ] && [ "${#challenge}" -le 32 ] \
+    || { FM_TG_TOKEN=; err "a one-time pairing challenge could not be generated"; }
+  expected="/start $challenge"
+  note "send this one-time command to the bot from the captain's private chat:"
+  note "  $expected"
+  note "listening for that command (up to ${wait}s)..."
   deadline=$(( $(date +%s) + wait ))
   local max_update=0 picked user_id chat_id chat_type first_name
   user_id=''; chat_id=''; chat_type=''; first_name=''
@@ -176,15 +191,16 @@ cmd_pair() {
     max_update=$(printf '%s' "$API_BODY" | jq -r '
       [ .result[]? | .update_id | select(type == "number") ] | max // 0 | tostring' 2>/dev/null) || max_update=0
     case "$max_update" in ''|*[!0-9]*) max_update=0 ;; esac
-    # Take the newest private-chat message from a human. Group and channel
-    # traffic is ignored outright, so pairing cannot bind the channel to one.
-    picked=$(printf '%s' "$API_BODY" | jq -c '
+    # Take the newest matching private-chat message from a human. Group and
+    # channel traffic and anyone without the local challenge are ignored.
+    picked=$(printf '%s' "$API_BODY" | jq -c --arg expected "$expected" '
       [ .result[]?
         | select((.message | type) == "object")
         | .message
         | select((.chat.type // "") == "private")
         | select((.from.is_bot // false) != true)
         | select((.from.id | type) == "number" and (.chat.id | type) == "number")
+        | select(.text == $expected)
       ] | last // empty' 2>/dev/null) || picked=
     if [ -n "$picked" ]; then
       user_id=$(printf '%s' "$picked" | jq -r '.from.id')
@@ -198,7 +214,7 @@ cmd_pair() {
     sleep 2
   done
   FM_TG_TOKEN=
-  [ "$found" = 1 ] || err "no private message arrived. Send /start to the bot from your phone, then run this again."
+  [ "$found" = 1 ] || err "the one-time pairing command did not arrive from a private chat; run pair again for a new command."
   [ "$chat_type" = private ] || err "that chat is not a private one-to-one chat; this channel supports private chats only"
   [[ "$user_id" =~ ^-?[0-9]{1,19}$ ]] || err "Telegram returned an unreadable sender identity"
   [[ "$chat_id" =~ ^-?[0-9]{1,19}$ ]] || err "Telegram returned an unreadable chat identity"
@@ -283,10 +299,11 @@ cmd_disable() {
 
 cmd_uninstall() {
   fm_tg_config_load
-  local owner=${FM_TG_TOKEN_OWNER:-} pending
+  local pending
   pending=$(fm_tg_pending_count)
   unregister_check
-  [ -n "$owner" ] && fm_tg_token_remove "$owner"
+  fm_tg_token_remove keychain
+  fm_tg_token_remove file
   rm -f -- "$(fm_tg_config_file)" 2>/dev/null || true
   note "removed: the bot token, the pairing, and the channel configuration."
   note "  polling is stopped and no webhook was ever registered, so nothing remains reachable from outside."

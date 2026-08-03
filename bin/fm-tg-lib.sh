@@ -353,7 +353,8 @@ fm_tg_redact() {
 # Bounded by construction: FM_TG_HTTP_TIMEOUT (default 20s) caps the whole call
 # so a slow Bot API can never outlive the watcher's per-check budget.
 # Exit: 0 with a printed code, 2 on a local precondition failure, 4 when curl
-# itself failed (no HTTP status observed), 28 on a curl timeout.
+# failed after connection could have begun, 5 when connection never began, and
+# 28 on a curl timeout.
 fm_tg_api() {
   local method=$1 body_file=$2 payload_file=${3:-} cfg code rc timeout
   case "$method" in
@@ -369,6 +370,7 @@ fm_tg_api() {
   command -v curl >/dev/null 2>&1 || return 2
   timeout=${FM_TG_HTTP_TIMEOUT:-20}
   case "$timeout" in ''|*[!0-9]*) timeout=20 ;; esac
+  [ "$timeout" -ge 1 ] 2>/dev/null && [ "$timeout" -le 28 ] 2>/dev/null || timeout=20
   cfg=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-req.XXXXXX") || return 2
   chmod 600 "$cfg" 2>/dev/null || { rm -f -- "$cfg"; return 2; }
   {
@@ -386,6 +388,7 @@ fm_tg_api() {
   rm -f -- "$cfg"
   if [ "$rc" -ne 0 ]; then
     [ "$rc" = 28 ] && return 28
+    case "$rc" in 5|6|7) return 5 ;; esac
     return 4
   fi
   printf '%s\n' "$code"
@@ -399,22 +402,35 @@ fm_tg_api() {
 # in half and no escaping hazard - the message body is delivered literally.
 #
 # fm_tg_split_message <limit> <cap>: read the reply on stdin, print a compact
-# JSON array of at most <cap> chunks of at most <limit> characters each, packed
+# JSON array of at most <cap> chunks of at most <limit> UTF-16 units each, packed
 # on paragraph, line, and word boundaries and hard-split only for a single
 # over-long word. When the reply needs more than <cap> chunks the last retained
 # chunk is marked with an ellipsis, so truncation is visible rather than silent.
 fm_tg_split_message() {
   jq -Rsc --argjson limit "$1" --argjson cap "$2" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
-    def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
+    def utf16units: explode | map(if . > 65535 then 2 else 1 end) | add // 0;
+    def utf16take($b):
+      reduce (explode[]) as $cp ({used: 0, cps: []};
+        ($cp | if . > 65535 then 2 else 1 end) as $u
+        | if .used + $u <= $b then .used += $u | .cps += [$cp] else . end)
+      | .cps | implode;
+    def hardsplit($b):
+      reduce (explode[]) as $cp ({chunks: [], cur: [], used: 0};
+        ($cp | if . > 65535 then 2 else 1 end) as $u
+        | if .used + $u > $b
+          then .chunks += [(.cur | implode)] | .cur = [$cp] | .used = $u
+          else .cur += [$cp] | .used += $u
+          end)
+      | .chunks + (if .cur | length > 0 then [(.cur | implode)] else [] end);
     def wordsplit($b):
       (gsub("[[:space:]]+"; " ") | trim) as $norm
-      | if ($norm | length) == 0 then []
+      | if ($norm | utf16units) == 0 then []
         else
-          [ $norm | split(" ")[] | if (length > $b) then hardsplit($b)[] else . end ] as $words
+          [ $norm | split(" ")[] | if utf16units > $b then hardsplit($b)[] else . end ] as $words
           | (reduce $words[] as $w ({chunks: [], cur: ""};
               (if .cur == "" then $w else .cur + " " + $w end) as $cand
-              | if ($cand | length) <= $b then .cur = $cand
+              | if ($cand | utf16units) <= $b then .cur = $cand
                 else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $w end
             )) as $st
           | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
@@ -423,24 +439,24 @@ fm_tg_split_message() {
       split("\n\n") | map(trim) | map(select(length > 0));
     def pack($us; $b):
       (reduce $us[] as $u ({chunks: [], cur: ""};
-        if ($u | length) > $b then
+        if ($u | utf16units) > $b then
           (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
           | .chunks += ($u | wordsplit($b))
         else
           (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
-          | if ($cand | length) <= $b then .cur = $cand
+          | if ($cand | utf16units) <= $b then .cur = $cand
             else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $u end
         end
       )) as $st
       | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end);
     trim as $norm
     | if ($norm | length) == 0 then []
-      elif ($norm | length) <= $limit then [$norm]
+      elif ($norm | utf16units) <= $limit then [$norm]
       else
         ($norm | units) as $us
         | pack($us; $limit) as $raw
         | if ($raw | length) > $cap
-          then ($raw[0:$cap] | (.[($cap - 1)] |= (.[0:($limit - 1)] + "…")))
+          then ($raw[0:$cap] | (.[($cap - 1)] |= (utf16take($limit - 1) + "…")))
           else $raw end
       end
   '
