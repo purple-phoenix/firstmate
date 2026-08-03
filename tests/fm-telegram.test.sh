@@ -170,6 +170,7 @@ tg() {
   FM_HOME="$HOME_DIR" \
   FM_TG_API_BASE="$API_BASE" \
   FM_TG_TEST_KEYSTORE="$KEYSTORE" \
+  FM_TG_TEST_ALLOW_KEYCHAIN=1 \
   FM_TG_SECURITY_BIN=security \
   "$ROOT/bin/$script" "$@"
 }

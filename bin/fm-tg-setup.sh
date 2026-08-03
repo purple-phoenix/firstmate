@@ -109,7 +109,15 @@ cmd_token() {
   done
   case "$owner" in
     keychain)
-      [ "$(uname)" = Darwin ] || err "the keychain owner needs macOS; use --owner file (a weaker, gitignored mode-0600 file) on this host"
+      if [ "$(uname)" != Darwin ]; then
+        if [ "${FM_TG_TEST_ALLOW_KEYCHAIN:-0}" != 1 ]; then
+          err "the keychain owner needs macOS; use --owner file (a weaker, gitignored mode-0600 file) on this host"
+        fi
+        case "$(fm_tg_api_base)" in
+          http://127.0.0.1:*) ;;
+          *) err "the keychain owner needs macOS; use --owner file (a weaker, gitignored mode-0600 file) on this host" ;;
+        esac
+      fi
       ;;
     file) ;;
     *) err "unknown token owner: use keychain or file" ;;
