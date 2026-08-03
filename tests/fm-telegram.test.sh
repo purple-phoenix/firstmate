@@ -305,7 +305,7 @@ out=$(tg fm-tg-poll.sh 2>&1)
 [ "$(jq -r '.text' "$HOME_DIR/state/tg/inbox/tg-30.json")" = "$ADVERSARIAL" ] \
   || fail "adversarial text must be stored verbatim as data"
 [ "$(jq -r '.schema' "$HOME_DIR/state/tg/inbox/tg-30.json")" = fm-telegram-request.v1 ] || fail "wrong record schema"
-mode=$(stat -f %Lp "$HOME_DIR/state/tg/inbox/tg-30.json" 2>/dev/null || stat -c %a "$HOME_DIR/state/tg/inbox/tg-30.json")
+mode=$(stat -c %a "$HOME_DIR/state/tg/inbox/tg-30.json" 2>/dev/null || stat -f %Lp "$HOME_DIR/state/tg/inbox/tg-30.json")
 [ "$mode" = 600 ] || fail "an inbound record must be mode 0600, got $mode"
 pass "ingress: shell-metacharacter text is stored as data, never executed, in a mode-0600 record"
 
@@ -707,7 +707,7 @@ out=$(printf '%s\n' "$TOKEN" | FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.
 out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
   || fail "the file token owner must work: $out"
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "switching to file ownership must remove the old keychain token"
-mode=$(stat -f %Lp "$HOME_DIR/config/telegram-token" 2>/dev/null || stat -c %a "$HOME_DIR/config/telegram-token")
+mode=$(stat -c %a "$HOME_DIR/config/telegram-token" 2>/dev/null || stat -f %Lp "$HOME_DIR/config/telegram-token")
 [ "$mode" = 600 ] || fail "the fallback token file must be mode 0600, got $mode"
 grep -q '^config/telegram-token$' "$ROOT/.gitignore" || fail "the fallback token file must be gitignored"
 grep -q '^config/telegram\.json$' "$ROOT/.gitignore" || fail "the channel configuration must be gitignored"
