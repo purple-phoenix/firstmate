@@ -132,6 +132,12 @@ if [ "$PENDING" -ge "$FM_TG_INBOX_MAX" ]; then
 fi
 AVAILABLE=$((FM_TG_INBOX_MAX - PENDING))
 [ "$BATCH" -le "$AVAILABLE" ] || BATCH=$AVAILABLE
+REPLY_AVAILABLE=$(fm_tg_send_capacity_remaining)
+if [ "$REPLY_AVAILABLE" -le 0 ]; then
+  wake_if_pending
+  exit 0
+fi
+[ "$BATCH" -le "$REPLY_AVAILABLE" ] || BATCH=$REPLY_AVAILABLE
 
 PAYLOAD_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-poll-req.XXXXXX") || exit 0
 trap 'rm -f -- "$BODY_FILE" "$PAYLOAD_FILE"' EXIT

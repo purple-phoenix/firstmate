@@ -408,14 +408,14 @@ An armed channel counts as a supervision need in `bin/fm-supervision-lib.sh`, ex
 Durable state lives under the mode-0700 `state/tg/` subtree this channel owns outright:
 
 - `state/tg/cursor` - the Telegram update offset.
-- `state/tg/inbox/<request_id>.json` (`fm-telegram-request.v1`) - one accepted message; polling stops before contacting Telegram when 100 are pending, and `state/tg/inbox/archive/` keeps the newest 50 claimed ones.
+- `state/tg/inbox/<request_id>.json` (`fm-telegram-request.v1`) - one accepted message; polling stops before contacting Telegram when 100 are pending or no reply-ledger slot remains, and `state/tg/inbox/archive/` keeps up to 50 claimed requests until their replies are durably claimed.
 - `state/tg/sent/<key>.json` (`fm-telegram-sent.v1`) - the reply ledger, capped at 200 exact claims including one reserved final slot for every linked task.
 - `state/tg/outbox/<key>.json` (`fm-telegram-outbox.v1`) - `FM_TG_DRY_RUN` previews, capped at 50 records.
 - `state/tg/poll.error` and `state/tg/rejects` - the deduplicated last poll failure and the refusal counter.
 
 Ingress is crash-safe by ordering: each accepted update is committed to the inbox with a create-only claim BEFORE the cursor advances, so a crash in between replays the update onto the existing record instead of losing or duplicating it.
 Egress is at-most-once by the same mechanism: `bin/fm-tg-reply.sh` claims `state/tg/sent/<key>.json` before any network call and refuses a second reply for a key it has already delivered.
-Sent claims are never pruned; once claims plus reserved linked-task finals reach the fixed ledger bound, ordinary sends and new links apply backpressure while every already-linked final can consume its reserved slot.
+Sent claims are never pruned; every unanswered pending or archived request and every linked task reserves one of the 200 ledger slots, so polling, ordinary sends, and new links apply backpressure before consuming a final reservation.
 A definite refusal clears the claim so the message can be retried; an ambiguous outcome - a timeout, or a server error after the request went out - is recorded as ambiguous and refused until an explicit `--resend`, because the client will not guess whether Telegram delivered it and never falls back to another channel.
 Replies are sent as plain text with no `parse_mode`, so message content is delivered literally and no chunk boundary can split markup; a reply longer than `FM_TG_REPLY_MAX_CHARS` is split on paragraph, line, and word boundaries, capped at `FM_TG_REPLY_MAX_CHUNKS` messages, and the last retained message is marked with an ellipsis.
 

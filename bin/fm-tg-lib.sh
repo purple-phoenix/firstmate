@@ -530,26 +530,69 @@ fm_tg_final_reservation_count() {
   printf '%s\n' "$n"
 }
 
-fm_tg_send_capacity_available() {
-  local used reserved
+fm_tg_inbound_reply_reservation_count() {
+  local sent dir file name rid n=0
+  sent=$(fm_tg_sent_dir)
+  for dir in "$(fm_tg_inbox_dir)" "$(fm_tg_archive_dir)"; do
+    [ -d "$dir" ] || continue
+    for file in "$dir"/*.json; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      name=${file##*/}
+      rid=${name%.json}
+      fm_tg_base_request_id_valid "$rid" || continue
+      [ -e "$sent/$rid.json" ] || [ -L "$sent/$rid.json" ] || n=$((n + 1))
+    done
+  done
+  printf '%s\n' "$n"
+}
+
+fm_tg_inbound_reply_reserved() {
+  local rid=$1 file
+  fm_tg_base_request_id_valid "$rid" || return 1
+  for file in "$(fm_tg_inbox_dir)/$rid.json" "$(fm_tg_archive_dir)/$rid.json"; do
+    fm_tg_private_file_valid "$file" 600 && return 0
+  done
+  return 1
+}
+
+fm_tg_send_capacity_remaining() {
+  local used final_reserved inbound_reserved remaining
   used=$(fm_tg_record_count "$(fm_tg_sent_dir)")
-  reserved=$(fm_tg_final_reservation_count)
-  [ "$((used + reserved))" -lt "$FM_TG_SENT_MAX" ]
+  final_reserved=$(fm_tg_final_reservation_count)
+  inbound_reserved=$(fm_tg_inbound_reply_reservation_count)
+  remaining=$((FM_TG_SENT_MAX - used - final_reserved - inbound_reserved))
+  [ "$remaining" -gt 0 ] || remaining=0
+  printf '%s\n' "$remaining"
+}
+
+fm_tg_send_capacity_available() {
+  [ "$(fm_tg_send_capacity_remaining)" -gt 0 ]
 }
 
 fm_tg_outbox_prepare_slot() {
-  local dir extra file
+  local dir count file at key oldest oldest_key
   dir=$(fm_tg_outbox_dir)
-  extra=$(find "$dir" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | tail -n +$FM_TG_OUTBOX_KEEP)
-  [ -n "$extra" ] || return 0
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    rm -f -- "$file" || return 1
-    [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
-  done <<EOF
-$extra
-EOF
-  [ "$(fm_tg_record_count "$dir")" -lt "$FM_TG_OUTBOX_KEEP" ]
+  count=$(fm_tg_record_count "$dir")
+  while [ "$count" -ge "$FM_TG_OUTBOX_KEEP" ]; do
+    oldest=
+    oldest_key=
+    for file in "$dir"/*.json; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      at=$(jq -r 'if .schema == "fm-telegram-outbox.v1" and (.recorded_at | type) == "number" and (.recorded_at | floor) == .recorded_at and .recorded_at >= 0 then (.recorded_at | tostring) else "" end' "$file" 2>/dev/null) || at=
+      case "$at" in ''|*[!0-9]*) at=$(fm_tg_file_stat "$file" %m %Y) || return 1 ;; esac
+      [ "${#at}" -le 18 ] || at=$(fm_tg_file_stat "$file" %m %Y) || return 1
+      key=$(printf '%020d:%s' "$at" "${file##*/}")
+      if [ -z "$oldest_key" ] || [[ "$key" < "$oldest_key" ]]; then
+        oldest=$file
+        oldest_key=$key
+      fi
+    done
+    [ -n "$oldest" ] || return 1
+    rm -f -- "$oldest" || return 1
+    [ ! -e "$oldest" ] && [ ! -L "$oldest" ] || return 1
+    count=$((count - 1))
+  done
+  return 0
 }
 
 # A ledger key is always "tg-<update_id>" (the reply to that message),

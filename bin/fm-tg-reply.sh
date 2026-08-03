@@ -160,9 +160,10 @@ case "$N" in ''|*[!0-9]*) N=0 ;; esac
 NOW=$(date +%s)
 
 if [ ! -e "$SENT_DIR/$KEY.json" ] && [ ! -L "$SENT_DIR/$KEY.json" ]; then
-  if [ "$FINAL" != 1 ] || [ -z "$TASK_ID" ]; then
+  if { [ "$FINAL" != 1 ] || [ -z "$TASK_ID" ]; } \
+    && ! fm_tg_inbound_reply_reserved "$KEY"; then
     fm_tg_send_capacity_available \
-      || { err "the Telegram reply ledger is full; claim pending messages before sending more"; exit 2; }
+      || { err "the Telegram reply ledger is full; answer reserved requests or finish linked work before sending more"; exit 2; }
   fi
 fi
 

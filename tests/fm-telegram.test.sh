@@ -372,6 +372,31 @@ tg fm-tg-poll.sh >/dev/null || fail "a full inbox poll must remain a safe no-op"
 [ "$(tg fm-tg-inbox.sh pending-count)" = 100 ] || fail "pending inbox state exceeded its fixed bound"
 pass "state: pending ingress applies backpressure at 100 without advancing the cursor"
 
+reset_ingress
+mkdir -p "$HOME_DIR/state/tg/sent"
+for id in $(seq -w 1 199); do
+  printf '{"schema":"fm-telegram-sent.v1","key":"event-ingress-%s","status":"sent"}\n' "$id" \
+    > "$HOME_DIR/state/tg/sent/event-ingress-$id.json"
+  chmod 600 "$HOME_DIR/state/tg/sent/event-ingress-$id.json"
+done
+scenario "$(jq -cn --argjson u "$USER_ID" --argjson c "$CHAT_ID" '{updates:[
+  {update_id:3000, message:{message_id:1, date:1, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false}, text:"reply slot 200"}},
+  {update_id:3001, message:{message_id:2, date:1, chat:{id:$c, type:"private"}, from:{id:$u, is_bot:false}, text:"must stay remote"}}
+]}')"
+out=$(tg fm-tg-poll.sh 2>&1)
+[ "$out" = "tg-message 1 pending" ] || fail "ingress must reserve only the final available reply slot, got: $out"
+[ "$(cat "$HOME_DIR/state/tg/cursor")" = 3000 ] || fail "ingress advanced beyond available reply capacity"
+before=$(api_calls getUpdates)
+tg fm-tg-poll.sh >/dev/null || fail "reply-capacity backpressure must remain a safe no-op"
+[ "$(api_calls getUpdates)" = "$before" ] || fail "exhausted reply capacity still contacted Telegram"
+tg fm-tg-inbox.sh claim >/dev/null || fail "the reserved request must remain claimable"
+printf 'reserved reply\n' > "$TMP_ROOT/ingress-reply.txt"
+tg fm-tg-reply.sh tg-3000 --text-file "$TMP_ROOT/ingress-reply.txt" >/dev/null \
+  || fail "an accepted request must be able to consume its reserved reply slot"
+[ "$(find "$HOME_DIR/state/tg/sent" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" = 200 ] \
+  || fail "replying to the reserved ingress request exceeded the ledger bound"
+pass "state: ingress reserves reply capacity before accepting captain messages"
+
 # =============================================================================
 # 5. Transport failures stop safely and never fall back
 # =============================================================================
@@ -629,17 +654,23 @@ FM_TG_DRY_RUN=1 tg fm-tg-reply.sh --event dry-check --text-file "$TMP_ROOT/dry.t
 [ -f "$HOME_DIR/state/tg/outbox/event-dry-check.json" ] || fail "a dry run must record what it would have sent"
 pass "outbound: a dry run records the would-be message and sends nothing"
 
-for id in $(seq -w 1 50); do
-  printf '{"schema":"fm-telegram-outbox.v1","key":"event-a%s"}\n' "$id" \
-    > "$HOME_DIR/state/tg/outbox/event-a$id.json"
-  chmod 600 "$HOME_DIR/state/tg/outbox/event-a$id.json"
+rm -rf "$HOME_DIR/state/tg/outbox"
+mkdir -p "$HOME_DIR/state/tg/outbox"
+printf '{"schema":"fm-telegram-outbox.v1","key":"event-zold","recorded_at":1}\n' \
+  > "$HOME_DIR/state/tg/outbox/event-zold.json"
+chmod 600 "$HOME_DIR/state/tg/outbox/event-zold.json"
+for id in $(seq 2 50); do
+  printf '{"schema":"fm-telegram-outbox.v1","key":"event-mid%s","recorded_at":%s}\n' "$id" "$id" \
+    > "$HOME_DIR/state/tg/outbox/event-mid$id.json"
+  chmod 600 "$HOME_DIR/state/tg/outbox/event-mid$id.json"
 done
-FM_TG_DRY_RUN=1 tg fm-tg-reply.sh --event zkeep --text-file "$TMP_ROOT/dry.txt" >/dev/null \
+FM_TG_DRY_RUN=1 tg fm-tg-reply.sh --event anew --text-file "$TMP_ROOT/dry.txt" >/dev/null \
   || fail "a dry run at preview retention capacity must succeed"
 [ "$(find "$HOME_DIR/state/tg/outbox" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" = 50 ] \
   || fail "dry-run preview retention exceeded 50 records"
-[ -f "$HOME_DIR/state/tg/outbox/event-zkeep.json" ] || fail "preview pruning removed the newly recorded dry run"
-pass "state: dry-run previews retain a fixed 50 records"
+[ -f "$HOME_DIR/state/tg/outbox/event-anew.json" ] || fail "preview pruning removed the newly recorded dry run"
+[ ! -f "$HOME_DIR/state/tg/outbox/event-zold.json" ] || fail "preview pruning kept an older lexicographically greater slug"
+pass "state: dry-run previews retain the newest 50 records by recorded time"
 
 # The weaker file-token owner still works end to end and stays mode 0600.
 out=$(printf '%s\n' "$TOKEN" | FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh token --owner file 2>&1); rc=$?
