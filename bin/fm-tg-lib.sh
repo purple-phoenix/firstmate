@@ -498,6 +498,7 @@ fm_tg_cursor_file() { printf '%s/tg/cursor\n' "$(fm_tg_state_dir)"; }
 fm_tg_check_file()  { printf '%s/fm-telegram.check.sh\n' "$(fm_tg_state_dir)"; }
 fm_tg_trust_file()  { printf '%s/fm-telegram.check-trust\n' "$(fm_tg_state_dir)"; }
 
+# shellcheck disable=SC2034 # Read by fm-tg-poll.sh after sourcing.
 FM_TG_INBOX_MAX=100
 FM_TG_SENT_MAX=200
 FM_TG_OUTBOX_KEEP=50
