@@ -952,6 +952,16 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }
 
+test_hook_claude_mode_reblocks_telegram_without_tasks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-telegram")
+  : > "$dir/state/fm-telegram.check.sh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block a Telegram-only stop when no auto-arm claims recovery"
+  assert_contains "$out" "Telegram captain channel polling needs supervision" "--claude Telegram re-block must name the active supervision need"
+  pass "fm-turnend-guard --claude: Telegram-only homes name their active supervision need"
+}
+
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
@@ -1129,6 +1139,7 @@ test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_hook_claude_mode_reblocks_telegram_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks

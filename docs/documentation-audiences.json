@@ -30,7 +30,8 @@
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
-    "docs/cmux-backend.md"
+    "docs/cmux-backend.md",
+    "docs/telegram-channel.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -100,6 +101,10 @@
     {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/telegram-channel.md",
+      "target": "docs/verification/telegram-channel.md"
     }
   ],
   "surfaces": [
@@ -173,6 +178,10 @@
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/telegram-captain-channel/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -308,6 +317,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/telegram-channel.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
@@ -321,6 +334,10 @@
     },
     {
       "path": "docs/verification/supervision.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/telegram-channel.md",
       "audience": "maintainer-verification"
     },
     {

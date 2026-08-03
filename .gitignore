@@ -19,3 +19,5 @@ config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
 config/dash.json
+config/telegram.json
+config/telegram-token
