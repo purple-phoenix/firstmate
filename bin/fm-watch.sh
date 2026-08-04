@@ -507,9 +507,42 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+inbound_check_marker_valid() {
+  local marker="$STATE/.last-inbound-check" device line timestamp
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    device=$(stat -f %d "$STATE" 2>/dev/null) || return 1
+  else
+    device=$(stat -c %d "$STATE" 2>/dev/null) || return 1
+  fi
+  fmx_single_link_file_mode_valid "$marker" 600 "$device" || return 1
+  exec 9< "$marker" || return 1
+  IFS= read -r line <&9 || { exec 9<&-; return 1; }
+  if IFS= read -r _ <&9; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  timestamp=${line#fm-inbound-check-v1 }
+  [ "$line" = "fm-inbound-check-v1 $timestamp" ] || return 1
+  case "$timestamp" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 run_due_inbound_checks() {
-  local c out id reason checked=0 rejected=
-  [ "$(age_of "$STATE/.last-inbound-check")" -ge "$CHECK_INTERVAL" ] || return 0
+  local c out id reason marker_body checked=0 rejected=
+  if [ ! -e "$STATE/fm-telegram.check.sh" ] && [ ! -e "$STATE/x-watch.check.sh" ]; then
+    return 0
+  fi
+  if inbound_check_marker_valid \
+    && [ "$(age_of "$STATE/.last-inbound-check")" -lt "$CHECK_INTERVAL" ]; then
+    return 0
+  fi
+  marker_body="fm-inbound-check-v1 $(date +%s)"
+  if ! fmx_generated_write_if_changed "$STATE/.last-inbound-check" "$marker_body" 600; then
+    reason="check: inbound cadence marker unavailable; no captain-channel poll was attempted"
+    fm_wake_append check inbound-cadence-marker "$reason" || exit 1
+    wake "$reason"
+  fi
   for c in "$STATE/fm-telegram.check.sh" "$STATE/x-watch.check.sh"; do
     [ -e "$c" ] || continue
     checked=1
@@ -538,12 +571,10 @@ run_due_inbound_checks() {
     if [ -n "$out" ]; then
       reason="check: $c: $out"
       fm_wake_append check "$c" "$reason" || exit 1
-      touch "$STATE/.last-inbound-check"
       wake "$reason"
     fi
   done
   [ "$checked" -eq 1 ] || return 0
-  touch "$STATE/.last-inbound-check"
   if [ -n "$rejected" ]; then
     reason="check: rejected unauthenticated state checks:$rejected"
     fm_wake_append check unauthenticated-state-checks "$reason" || exit 1

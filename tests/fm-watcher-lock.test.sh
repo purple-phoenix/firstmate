@@ -807,12 +807,58 @@ SH
     "$WATCH" > "$out" || fail "reentry watcher did not surface the due Telegram wake"
   [ "$(cat "$count_file")" = 3 ] || fail "Telegram was polled more or less than once per due point"
   assert_present "$state/.last-inbound-check" "inbound-specific due marker was not persisted"
+  [ ! -L "$state/.last-inbound-check" ] \
+    || fail "inbound-specific due marker was published as a symlink"
+  grep -Eq '^fm-inbound-check-v1 [0-9]+$' "$state/.last-inbound-check" \
+    || fail "inbound-specific due marker content was not validated"
   assert_present "$dir/aaa-ran" "first ordinary check made no progress before inbound reentry"
   assert_present "$dir/bbb-ran" "second ordinary check made no progress between inbound polls"
   assert_absent "$dir/ccc-ran" "ordinary tail continued after the actionable inbound poll"
   grep -F "check: $telegram_check: tg-message 1 pending" "$out" >/dev/null \
     || fail "due inbound reentry did not preserve actionable exit output"
   pass "due inbound polls reenter the ordinary tail without duplicate polling or lost progress"
+}
+
+test_inbound_marker_failure_prevents_dispatch() {
+  local dir state fakebin out telegram_check queue_count marker_target
+  dir=$(make_case inbound-marker-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  telegram_check="$state/fm-telegram.check.sh"
+  mark_pr_check_migration_complete "$state"
+  cat > "$telegram_check" <<SH
+#!/usr/bin/env bash
+: > "$dir/api-called"
+printf 'tg-message 1 pending\n'
+SH
+  cat > "$state/aaa-ordinary.check.sh" <<SH
+#!/usr/bin/env bash
+: > "$dir/ordinary-ran"
+SH
+  chmod 0700 "$telegram_check" "$state/aaa-ordinary.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" fm-telegram >/dev/null \
+    || fail "could not register marker-failure Telegram fixture"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" aaa-ordinary >/dev/null \
+    || fail "could not register marker-failure ordinary fixture"
+  marker_target="$dir/marker-target"
+  printf 'sentinel-marker\n' > "$marker_target"
+  ln -s "$marker_target" "$state/.last-inbound-check"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=30 FM_HEARTBEAT=999999 "$WATCH" > "$out" \
+    || fail "marker failure did not surface as an actionable watcher error"
+  [ "$(grep -cF 'check: inbound cadence marker unavailable' "$out")" = 1 ] \
+    || fail "marker failure was not reported exactly once in the sweep"
+  assert_absent "$dir/api-called" "marker failure allowed a captain-channel API process to run"
+  assert_absent "$dir/ordinary-ran" "marker failure retried or continued the same slow-check sweep"
+  [ -L "$state/.last-inbound-check" ] \
+    || fail "marker failure replaced the refused symlink"
+  [ "$(cat "$marker_target")" = sentinel-marker ] \
+    || fail "marker failure wrote through the refused symlink"
+  queue_count=$(grep -c "$(printf '\tcheck\tinbound-cadence-marker\t')" "$state/.wake-queue")
+  [ "$queue_count" = 1 ] || fail "marker failure queued $queue_count error records instead of one"
+  pass "inbound marker failure surfaces once before any channel dispatch"
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
@@ -1172,6 +1218,7 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_inbound_channel_check_precedes_other_checks
 test_inbound_channel_reenters_during_slow_check_tail
+test_inbound_marker_failure_prevents_dispatch
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_attached_death_loud_when_tasks_in_flight
