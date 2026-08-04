@@ -765,6 +765,56 @@ SH
   pass "authenticated inbound channel checks precede unrelated task checks"
 }
 
+test_inbound_channel_reenters_during_slow_check_tail() {
+  local dir state fakebin out telegram_check count_file check
+  dir=$(make_case inbound-check-reentry)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  telegram_check="$state/fm-telegram.check.sh"
+  count_file="$dir/telegram-count"
+  mark_pr_check_migration_complete "$state"
+  cat > "$telegram_check" <<SH
+#!/usr/bin/env bash
+count=\$(cat "$count_file" 2>/dev/null || echo 0)
+count=\$((count + 1))
+printf '%s\n' "\$count" > "$count_file"
+[ "\$count" -lt 3 ] || printf 'tg-message 1 pending\n'
+SH
+  cat > "$state/aaa-slow.check.sh" <<SH
+#!/usr/bin/env bash
+sleep 1.2
+: > "$dir/aaa-ran"
+SH
+  cat > "$state/bbb-slow.check.sh" <<SH
+#!/usr/bin/env bash
+sleep 1.2
+: > "$dir/bbb-ran"
+SH
+  cat > "$state/ccc-later.check.sh" <<SH
+#!/usr/bin/env bash
+: > "$dir/ccc-ran"
+SH
+  chmod 0700 "$telegram_check" "$state/aaa-slow.check.sh" \
+    "$state/bbb-slow.check.sh" "$state/ccc-later.check.sh"
+  for check in fm-telegram aaa-slow bbb-slow ccc-later; do
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$check" >/dev/null \
+      || fail "could not register inbound reentry fixture $check"
+  done
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_CHECK_TIMEOUT=3 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" || fail "reentry watcher did not surface the due Telegram wake"
+  [ "$(cat "$count_file")" = 3 ] || fail "Telegram was polled more or less than once per due point"
+  assert_present "$state/.last-inbound-check" "inbound-specific due marker was not persisted"
+  assert_present "$dir/aaa-ran" "first ordinary check made no progress before inbound reentry"
+  assert_present "$dir/bbb-ran" "second ordinary check made no progress between inbound polls"
+  assert_absent "$dir/ccc-ran" "ordinary tail continued after the actionable inbound poll"
+  grep -F "check: $telegram_check: tg-message 1 pending" "$out" >/dev/null \
+    || fail "due inbound reentry did not preserve actionable exit output"
+  pass "due inbound polls reenter the ordinary tail without duplicate polling or lost progress"
+}
+
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
   local dir state fakebin armout peer identity armpid status i
   dir=$(make_case arm-peer-startup-race)
@@ -1121,6 +1171,7 @@ test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_inbound_channel_check_precedes_other_checks
+test_inbound_channel_reenters_during_slow_check_tail
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_attached_death_loud_when_tasks_in_flight
