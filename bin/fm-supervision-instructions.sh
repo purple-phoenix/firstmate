@@ -6,12 +6,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
-
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$SCRIPT_DIR/fm-cadence-lib.sh"
 
 HARNESS=
 READ_ONLY=0
@@ -93,17 +88,8 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-cadence_env=$(fm_cadence_file "$CONFIG")
 
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
-cadence_env_sh=$(shell_quote "$cadence_env")
-
-if [ "$FAST_CADENCE" -eq 0 ] && [ -f "$cadence_env" ]; then
+if [ "$FAST_CADENCE" -eq 0 ] && "$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null; then
   FAST_CADENCE=1
 fi
 
@@ -112,8 +98,6 @@ render_snippet() {
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
-    line=${line//__FM_CADENCE_ENV_SH__/$cadence_env_sh}
-    line=${line//__FM_CADENCE_ENV__/$cadence_env}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -132,10 +116,6 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-  if [ "$FAST_CADENCE" -eq 1 ]; then
-    prefix="${prefix}source ${cadence_env_sh} first, then "
-  fi
-
   case "$HARNESS" in
     claude)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
@@ -202,7 +182,7 @@ else
   printf '%s\n' '- Away mode: inactive.'
 fi
 if [ "$FAST_CADENCE" -eq 1 ]; then
-  printf '%s%s%s\n' '- Fast check cadence: active for an inbound captain channel; source ' "$cadence_env" ' before launching any watcher process so the 30s cadence is inherited.'
+  printf '%s\n' '- Fast check cadence: active for an inbound captain channel; the watcher launch owner applies it through bin/fm-cadence.sh without sourcing config bytes.'
 else
   printf '%s\n' '- Fast check cadence: inactive; no inbound captain channel is armed, so use the default watcher cadence.'
 fi

@@ -854,32 +854,16 @@ function analyzeProgram(command, context, depth = 0) {
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
-// The generated watcher check-cadence file (bin/fm-cadence.sh owns it) is the only
-// thing an arm command may source. The pre-rename x-mode.env stays allowed so an arm
-// command copied from a session that started before the rename is not denied while
-// the next locked session start migrates the home; sourcing an absent file is a no-op.
-const CADENCE_SOURCE_BASENAMES = ["config/check-cadence.env", "config/x-mode.env"];
-
-function cadencePathAllowed(value, home) {
-  return CADENCE_SOURCE_BASENAMES.some((basename) => {
-    if (value === basename || value === `./${basename}`) return true;
-    if (!path.isAbsolute(value)) return false;
-    return path.normalize(value) === path.join(path.normalize(home), basename);
-  });
-}
-
 function ordinaryWordsOnly(tokens) {
   return tokens.every((token) => token.type === "word" && token.subs.length === 0);
 }
 
-function setupKind(info, context) {
+function setupKind(info) {
   const { tokens, position } = info;
   if (!ordinaryWordsOnly(tokens) || position.prefixAssignments > 0 || position.wrappers.length > 0) return "";
   const values = position.words.map((word) => word.value);
   if (values[0] === "cd" && values.length === 2) return "cd";
   if (values[0] === "export" && values.length === 2 && isAssignment(values[1])) return "export";
-  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && cadencePathAllowed(values[1], context.home)) return "source";
-  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && cadencePathAllowed(values[2], context.home)) return "test-source";
   return "";
 }
 
@@ -897,13 +881,8 @@ function blessedProgram(analysis, context) {
   if (!finalProtectedAllowed(nodeInfos.at(-1))) return false;
   if (nodeInfos.slice(0, -1).some((info) => info.protectedKind || info.nestedProtected)) return false;
 
-  const setup = nodeInfos.slice(0, -1).map((info) => setupKind(info, context));
+  const setup = nodeInfos.slice(0, -1).map((info) => setupKind(info));
   if (setup.some((kind) => !kind)) return false;
-  for (let i = 0; i < setup.length; i += 1) {
-    if (setup[i] !== "test-source") continue;
-    if (setup[i + 1] !== "source" || separators[i] !== "&&") return false;
-    i += 1;
-  }
   return true;
 }
 

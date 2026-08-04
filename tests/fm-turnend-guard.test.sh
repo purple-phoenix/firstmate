@@ -106,7 +106,6 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
-  cp "$ROOT/bin/fm-cadence-lib.sh" "$dir/bin/fm-cadence-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -309,7 +308,7 @@ test_hook_blocks_from_fm_home_state() {
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
 }
 
-test_hook_x_mode_reason_sources_cadence() {
+test_hook_x_mode_reason_uses_validated_cadence_owner() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode")
   home=$(cd "$dir" && pwd)
@@ -318,8 +317,9 @@ test_hook_x_mode_reason_sources_cadence() {
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
-  assert_contains "$out" "source '$home/config/check-cadence.env' first" "block reason must source the effective check cadence"
-  pass "fm-turnend-guard: the repair reason sources this home's cadence config"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "block reason must use the standard watcher launch owner"
+  assert_not_contains "$out" "source" "block reason must not source generated cadence config"
+  pass "fm-turnend-guard: the repair reason uses the validated launch owner"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -1110,7 +1110,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
-test_hook_x_mode_reason_sources_cadence
+test_hook_x_mode_reason_uses_validated_cadence_owner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry

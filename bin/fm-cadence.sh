@@ -19,11 +19,10 @@
 # already owns it for the "this home needs a live supervision cycle" decision, and
 # a home that needs a cycle for a channel is exactly a home that needs it fast.
 #
-# WHY A FILE AND NOT A WATCHER-SIDE READ: every harness protocol starts its watcher
-# through a shell it controls, so a sourceable env file is the one mechanism all of
-# them (claude's Stop auto-arm, codex's checkpoint, the pi extension, the opencode
-# plugin, grok's tracked background arm, and the away-mode daemon) can honor with
-# no new process, no second poller, and no watcher restart machinery of its own.
+# WHY A FILE: every watcher owner shares one generated cadence artifact without
+# adding a process or a second poller. The artifact is never sourced. The validated
+# apply command checks its exact bytes and metadata, then exports the fixed interval
+# itself before replacing its process with the requested watcher command.
 #
 # WHAT THIS SCRIPT WILL NOT PRETEND: fm-watch.sh reads FM_CHECK_INTERVAL once, at
 # process start. Reconciling this file does NOT re-cadence a watcher that is
@@ -46,6 +45,9 @@
 #                             channels, for operators and tests.
 #   fm-cadence.sh verify      Exit 0 only when the generated cadence file has
 #                             the exact content, mode, link count, and device.
+#   fm-cadence.sh apply -- COMMAND [ARG ...]
+#                             Run COMMAND with the fast interval only when the
+#                             generated cadence file passes the same validation.
 #
 # Home resolution is the usual one: FM_HOME, then FM_CONFIG_OVERRIDE /
 # FM_STATE_OVERRIDE for tests.
@@ -164,6 +166,16 @@ cmd_status() {
   fi
 }
 
+cmd_apply() {
+  [ "${1-}" = -- ] || { echo "usage: fm-cadence.sh apply -- COMMAND [ARG ...]" >&2; return 2; }
+  shift
+  [ "$#" -gt 0 ] || { echo "usage: fm-cadence.sh apply -- COMMAND [ARG ...]" >&2; return 2; }
+  if cadence_file_valid; then
+    export FM_CHECK_INTERVAL=$FAST_SECS
+  fi
+  exec "$@"
+}
+
 # `path` is on the hot path of every guard, turn-end hook, and session-start
 # render, so it stays a bare constant lookup; only the mutating and reporting
 # commands pay for the libraries below.
@@ -173,9 +185,14 @@ cmd_status() {
 #                          artifact; they are mode-neutral and carry no X behavior.
 #   fm-supervision-lib.sh - the armed-inbound-channel predicate.
 case "${1-}" in
-  reconcile|status|verify)
+  reconcile|status|verify|apply)
     # shellcheck source=bin/fm-x-lib.sh disable=SC1091
     . "$SCRIPT_DIR/fm-x-lib.sh"
+    ;;
+esac
+
+case "${1-}" in
+  reconcile|status)
     # shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
     . "$SCRIPT_DIR/fm-supervision-lib.sh"
     ;;
@@ -186,11 +203,12 @@ case "${1-}" in
   path)      printf '%s\n' "$CADENCE_FILE" ;;
   status)    cmd_status ;;
   verify)    cadence_file_valid ;;
+  apply)     shift; cmd_apply "$@" ;;
   -h|--help)
     sed -n '2,/^set -u$/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
     ;;
   *)
-    echo "usage: fm-cadence.sh reconcile|path|status|verify" >&2
+    echo "usage: fm-cadence.sh reconcile|path|status|verify|apply" >&2
     exit 2
     ;;
 esac

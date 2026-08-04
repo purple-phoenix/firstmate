@@ -26,7 +26,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
@@ -43,8 +42,6 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$SCRIPT_DIR/fm-cadence-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
@@ -199,7 +196,7 @@ if [ "$watcher_fresh" = false ] || [ "$arm_dead" = true ]; then
     queue_arg=0
     "$queue_pending" && queue_arg=1
     fast_cadence=0
-    [ -f "$(fm_cadence_file "$CONFIG")" ] && fast_cadence=1
+    "$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null && fast_cadence=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \

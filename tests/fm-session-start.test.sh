@@ -1193,7 +1193,7 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
-test_next_step_sources_x_mode_cadence() {
+test_next_step_applies_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
   IFS='|' read -r root home fakebin <<EOF
@@ -1210,7 +1210,7 @@ EOF
   assert_contains "$out" "CADENCE: 30s check cadence armed for X mode" "bootstrap did not arm the check cadence"
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
   assert_contains "$out" "- Fast check cadence: active" "supervision block did not mention the fast cadence"
-  assert_contains "$out" "$home/config/check-cadence.env" "supervision block did not name this home's cadence file"
+  assert_contains "$out" "without sourcing config bytes" "supervision block omitted the validated cadence boundary"
   assert_contains "$out" "An inbound captain channel is armed" "next step did not name the armed captain channel"
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
 
@@ -1219,8 +1219,8 @@ EOF
 
 # The same propagation, driven by the Telegram channel instead of X mode: bootstrap
 # reconciles the cadence for whatever armed it, and the emitted supervision block
-# tells the harness to source it before starting a watcher.
-test_next_step_sources_telegram_cadence() {
+# tells the harness that the watcher launch owner applies it.
+test_next_step_applies_telegram_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-telegram)
   IFS='|' read -r root home fakebin <<EOF
@@ -1247,7 +1247,7 @@ EOF
   assert_contains "$out" "CADENCE: 30s check cadence armed for the Telegram captain channel" \
     "bootstrap did not arm the cadence for the Telegram channel"
   assert_contains "$out" "- Fast check cadence: active" "supervision block did not mention the fast cadence"
-  assert_contains "$out" "$home/config/check-cadence.env" "supervision block did not name this home's cadence file"
+  assert_contains "$out" "without sourcing config bytes" "supervision block omitted the validated cadence boundary"
   assert_contains "$out" "An inbound captain channel is armed" "next step did not name the armed captain channel"
   assert_not_contains "$out" "FMX:" "a Telegram-only home must not be told anything about X mode"
   [ -f "$home/config/check-cadence.env" ] || fail "session start did not leave the cadence file armed"
@@ -1480,8 +1480,8 @@ test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
-test_next_step_sources_x_mode_cadence
-test_next_step_sources_telegram_cadence
+test_next_step_applies_x_mode_cadence
+test_next_step_applies_telegram_cadence
 test_next_step_default_home_has_no_cadence_guidance
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

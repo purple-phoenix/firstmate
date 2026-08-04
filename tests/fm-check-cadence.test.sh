@@ -52,17 +52,11 @@ arm_x()        { : > "$1/state/x-watch.check.sh"; }
 arm_telegram() { : > "$1/state/fm-telegram.check.sh"; }
 disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.sh; }
 
-# The cadence a watcher process would actually start with: source the file when it
-# exists, exactly as every harness protocol and the away-mode daemon do, then read
-# what a child inherits.
+# The cadence a watcher process would actually start with through the validated
+# launch boundary.
 effective_interval() {
-  local home=$1 file="$1/config/check-cadence.env"
-  if [ -f "$file" ]; then
-    # shellcheck source=/dev/null
-    ( . "$file" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
-  else
-    bash -c 'echo "${FM_CHECK_INTERVAL:-300}"'
-  fi
+  local home=$1
+  cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"'
 }
 
 assert_interval() {
@@ -206,8 +200,10 @@ test_transition_line_is_harness_aware() {
     "a claude primary must get the claude repair mechanism"
   assert_not_contains "$out" "fm-watch-checkpoint.sh" \
     "a claude primary must not be handed codex's foreground checkpoint"
-  assert_contains "$out" "source '$home/config/check-cadence.env' first" \
-    "the repair instruction must source this home's own cadence file"
+  assert_contains "$out" "bin/fm-watch-arm.sh" \
+    "the repair instruction must use the cadence-validating watcher owner"
+  assert_not_contains "$out" "source" \
+    "the repair instruction must not source generated cadence bytes"
   pass "the transition's repair instruction follows the detected primary harness"
 }
 
@@ -300,6 +296,40 @@ test_verify_rejects_noncanonical_artifacts() {
   pass "verify accepts only the exact private single-link generated artifact"
 }
 
+test_apply_never_evaluates_artifact_bytes() {
+  local home target sentinel got
+  home=$(make_home apply-boundary)
+  target="$home/cadence-target"
+  sentinel="$home/executed"
+  arm_telegram "$home"
+  cadence "$home" reconcile >/dev/null
+  got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
+  [ "$got" = 30 ] || fail "apply must export 30 for the validated artifact"
+
+  rm -f "$home/config/check-cadence.env"
+  printf 'touch %q\nexport FM_CHECK_INTERVAL=1\n' "$sentinel" > "$target"
+  chmod 0600 "$target"
+  ln -s "$target" "$home/config/check-cadence.env"
+  got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
+  [ "$got" = 300 ] || fail "apply must keep the default for a rejected artifact"
+  [ ! -e "$sentinel" ] || fail "apply evaluated rejected cadence bytes"
+
+  rm -f "$home/config/check-cadence.env"
+  ln "$target" "$home/config/check-cadence.env"
+  got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
+  [ "$got" = 300 ] || fail "apply must reject a hard-linked artifact"
+  [ ! -e "$sentinel" ] || fail "apply evaluated hard-linked cadence bytes"
+  pass "apply exports only the validated fixed cadence without evaluating file bytes"
+}
+
+test_watcher_launch_owners_use_apply_boundary() {
+  assert_grep 'fm-cadence.sh" apply -- "$WATCH"' "$ROOT/bin/fm-watch-arm.sh" \
+    "the arm owner must route watcher startup through cadence apply"
+  assert_grep 'fm-cadence.sh" apply -- "$SCRIPT_DIR/fm-watch.sh"' "$ROOT/bin/fm-watch-checkpoint.sh" \
+    "the checkpoint owner must route watcher startup through cadence apply"
+  pass "both standard watcher launch owners use the validated apply boundary"
+}
+
 test_cadence_file_carries_no_secret_and_no_channel_identity() {
   local home body
   home=$(make_home no-secret)
@@ -346,5 +376,7 @@ test_legacy_cadence_file_is_removed_when_nothing_is_armed
 test_symlinked_cadence_destination_is_refused
 test_generated_file_is_private
 test_verify_rejects_noncanonical_artifacts
+test_apply_never_evaluates_artifact_bytes
+test_watcher_launch_owners_use_apply_boundary
 test_cadence_file_carries_no_secret_and_no_channel_identity
 test_path_command_needs_no_home_state

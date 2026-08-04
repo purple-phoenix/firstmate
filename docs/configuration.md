@@ -378,7 +378,7 @@ A channel poll is the only thing that notices an inbound captain message, so a 3
 The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), or both.
 `bin/fm-supervision-lib.sh` owns that predicate for both purposes, so there is no second definition of "armed".
 
-The entire mechanism is one generated file, `config/check-cadence.env` (gitignored, mode 0600), which exports `FM_CHECK_INTERVAL=30`.
+The entire mechanism is one generated file, `config/check-cadence.env` (gitignored, mode 0600), whose canonical content declares `FM_CHECK_INTERVAL=30`.
 It exists exactly while at least one channel is armed and is absent otherwise, so a home with neither channel keeps the default cadence and nothing about it changes.
 Two armed channels share that one file: there is one cadence, one config owner, one watcher, and one supervision cycle regardless of how many channels are on.
 The fast cadence applies to every check the watcher sweeps, including authenticated PR polls, and no channel adds a poller, port, webhook, or process of its own.
@@ -391,7 +391,8 @@ It runs at every locked session-start bootstrap, and again inside `bin/fm-tg-set
 
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, reconciling the file does **not** re-cadence a watcher that is already running.
 No part of firstmate pretends otherwise: every transition line says the new cadence applies to the next supervision cycle and carries the emitted harness-specific repair instruction, and neither bootstrap nor `fm-cadence.sh` ever restarts a watcher itself.
-The active primary-harness supervision protocol owns how the sourced cadence reaches the watcher process, and the session-start supervision operating block includes the cadence instruction whenever the file exists.
+`bin/fm-cadence.sh apply` validates the file's exact content, mode, link count, and device, then exports the fixed interval itself without sourcing file bytes before replacing its process with the watcher command.
+The standard arm wrapper, the foreground checkpoint, and away mode all use that boundary, while the Pi and OpenCode extensions launch the standard arm wrapper without their own shell evaluation.
 While away mode is active the daemon owns the watcher instead of the harness protocol, so `bin/fm-supervise-daemon.sh` applies the same file per watcher spawn; because that watcher is one-shot, an away-mode cadence transition takes effect at the next wake without restarting the daemon.
 
 Firstmate versions before this contract generated `config/x-mode.env` for the X-only case.

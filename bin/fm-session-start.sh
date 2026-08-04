@@ -101,8 +101,6 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$SCRIPT_DIR/fm-cadence-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
@@ -311,8 +309,7 @@ fi
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 FAST_CADENCE_PRESENT=0
-FAST_CADENCE_ENV=$(fm_cadence_file "$CONFIG")
-[ -f "$FAST_CADENCE_ENV" ] && FAST_CADENCE_PRESENT=1
+"$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null && FAST_CADENCE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"

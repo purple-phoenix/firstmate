@@ -60,8 +60,7 @@ JS
 }
 
 test_tracked_extension_present_and_self_hashing() {
-  local text expected_config_source
-  expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
+  local text
   assert_present "$EXT" "tracked Pi primary watcher extension is missing"
   text=$(cat "$EXT")
   assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
@@ -86,9 +85,8 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
   assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
   assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
-  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
-  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective cadence config"
-  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
+  assert_contains "$text" 'spawn(armScript, ["--restart"]' "tracked extension does not launch the standard watcher arm owner"
+  assert_not_contains "$text" "check-cadence.env" "tracked extension must not evaluate generated cadence config"
   assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
   assert_not_contains "$text" "Always use this tool" "tracked extension kept broad tool-selection guidance"
   assert_contains "$text" "only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy" "tracked extension tool metadata is missing the Pi first-cycle or explicit-repair rule"
@@ -102,7 +100,6 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "function activateGeneration" "tracked extension does not activate a live generation for replacement sessions"
   assert_contains "$text" "function generationIsLive" "tracked extension does not gate arm mutations on the live generation"
   assert_contains "$text" "watcher: not armed - Pi session is shutting down" "tracked extension missing the terminal shutdown refusal"
-  assert_not_contains "$text" "[ -f config/check-cadence.env ]" "tracked extension kept a repo-relative cadence config path"
   pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
 }
 
@@ -118,12 +115,14 @@ test_spawn_template_mentions_pi_watch_placeholder() {
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
-  local repo home plugin out status
+  local repo home plugin out status sentinel
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  sentinel="$TMP_ROOT/pi-cadence-executed"
+  printf 'touch %q\n' "$sentinel" > "$home/config/check-cadence.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
@@ -192,6 +191,7 @@ EOF
   status=$?
   expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
   [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
+  [ ! -e "$sentinel" ] || fail "Pi watcher extension evaluated generated cadence bytes"
   pass "Pi extension reports external healthy watcher output"
 }
 
@@ -1249,7 +1249,8 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
   assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
-  assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
+  assert_contains "$text" 'fm-watch-arm.sh`, ["--restart"]' "OpenCode plugin does not restart into its own watcher child"
+  assert_not_contains "$text" "check-cadence.env" "OpenCode plugin must not evaluate generated cadence config"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
 }
@@ -1324,8 +1325,8 @@ EOF
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
 
-test_opencode_primary_watch_plugin_sources_effective_config() {
-  local plugin repo home log out status
+test_opencode_primary_watch_plugin_never_sources_config() {
+  local plugin repo home log out status sentinel
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   repo="$TMP_ROOT/opencode-effective-config-root"
   home="$TMP_ROOT/opencode-effective-config-home"
@@ -1333,11 +1334,9 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
-  # An armed inbound captain channel is what makes an empty-fleet home worth
-  # arming, and is also what generates the cadence config the arm must source
-  # (bin/fm-supervision-lib.sh's fm_supervision_channel_armed; bin/fm-cadence.sh).
   : > "$home/state/x-watch.check.sh"
-  printf 'export FM_POLL=7\n' > "$home/config/check-cadence.env"
+  sentinel="$TMP_ROOT/opencode-cadence-executed"
+  printf 'touch %q\nexport FM_POLL=7\n' "$sentinel" > "$home/config/check-cadence.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
@@ -1365,16 +1364,17 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   process.exit(1);
 }
 const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
-if (!text.includes("poll=7")) {
+if (!text.includes("poll=missing")) {
   console.error(text);
   process.exit(1);
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"
+  expect_code 0 "$status" "OpenCode watch plugin must launch without sourcing FM_HOME config"
   [ -z "$out" ] || fail "OpenCode effective-config test printed output: $out"
-  pass "OpenCode watcher plugin sources the effective config"
+  [ ! -e "$sentinel" ] || fail "OpenCode watcher plugin evaluated generated cadence bytes"
+  pass "OpenCode watcher plugin never sources generated cadence config"
 }
 
 test_opencode_primary_watch_plugin_requires_session_lock() {
@@ -2226,7 +2226,7 @@ test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
-test_opencode_primary_watch_plugin_sources_effective_config
+test_opencode_primary_watch_plugin_never_sources_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake

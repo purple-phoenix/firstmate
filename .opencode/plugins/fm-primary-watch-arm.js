@@ -289,7 +289,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/check-cadence.env" ] && . "$config_dir/check-cadence.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+  const armChild = spawn(`${paths.root}/bin/fm-watch-arm.sh`, ["--restart"], {
     cwd: paths.root,
     env,
     stdio: ["ignore", "pipe", "pipe"],

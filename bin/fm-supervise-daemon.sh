@@ -174,9 +174,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$FM_DAEMON_DIR/fm-cadence-lib.sh"
-
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -223,7 +220,6 @@ AFK_FLAG_NAME=".afk"
 # $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
-_config_root() { printf '%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; }
 
 # Replace this process with the watcher, first applying this home's generated check
 # cadence. Away mode owns supervision instead of the harness protocol, so the file
@@ -235,13 +231,8 @@ _config_root() { printf '%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; }
 # one-shot, a cadence transition therefore takes effect at the next wake instead of
 # needing a daemon restart. A missing file leaves the default cadence in place.
 exec_watcher_with_cadence() {
-  local watch=$1 cadence_env
-  cadence_env=$(fm_cadence_file "$(_config_root)")
-  if [ -f "$cadence_env" ]; then
-    # shellcheck source=/dev/null
-    . "$cadence_env"
-  fi
-  exec "$watch"
+  local watch=$1
+  exec "$FM_DAEMON_DIR/fm-cadence.sh" apply -- "$watch"
 }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------

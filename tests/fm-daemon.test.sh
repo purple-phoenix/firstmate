@@ -69,6 +69,23 @@ test_away_watcher_keeps_default_cadence_without_a_channel() {
   pass "away mode: a home with no captain channel keeps the default cadence"
 }
 
+test_away_watcher_never_sources_rejected_cadence() {
+  local dir probe target sentinel got
+  dir=$(make_supercase away-cadence-rejected)
+  mkdir -p "$dir/config"
+  probe=$(make_cadence_probe "$dir")
+  target="$dir/cadence-target"
+  sentinel="$dir/cadence-executed"
+  printf 'touch %q\nexport FM_CHECK_INTERVAL=1\n' "$sentinel" > "$target"
+  chmod 0600 "$target"
+  ln -s "$target" "$dir/config/check-cadence.env"
+  got=$( FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". '$DAEMON' >/dev/null 2>&1; exec_watcher_with_cadence '$probe'" )
+  [ "$got" = 300 ] || fail "away mode must keep the default for rejected cadence config"
+  [ ! -e "$sentinel" ] || fail "away mode evaluated rejected cadence bytes"
+  pass "away mode never sources rejected cadence config"
+}
+
 test_away_watcher_rereads_cadence_on_each_spawn() {
   local dir probe got
   dir=$(make_supercase away-cadence-transition)
@@ -1836,6 +1853,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 
 test_away_watcher_inherits_armed_check_cadence
 test_away_watcher_keeps_default_cadence_without_a_channel
+test_away_watcher_never_sources_rejected_cadence
 test_away_watcher_rereads_cadence_on_each_spawn
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock

@@ -73,7 +73,7 @@ The suites establish, in order:
 - **Migration.** A home carrying the pre-rename `config/x-mode.env` had it removed and replaced with the current owner in the armed case, and removed outright in the idle case, so no home is left with two cadence owners.
 - **Artifact safety.** The generated file is mode 0600, is refused rather than written when its destination is a symlink (the link target's bytes and mode were unchanged), and contains exactly one non-comment line - the interval export - with no token, chat id, user id, or bot identity.
 - **Away mode.** `exec_watcher_with_cadence` in `bin/fm-supervise-daemon.sh` started a probe watcher at 30s for an armed home and 300s for an unarmed one, and picked up a mid-away release on the next spawn, so the away-mode watcher is not stranded on the default cadence for the stretch the captain is most likely to message.
-- **Arm-command policy.** `bin/fm-arm-command-policy.mjs` allows sourcing only `config/check-cadence.env` (plus the pre-rename path, for arm commands carried over from a session that started before the rename) in the repo-relative, `./`-relative, and active-home absolute forms; an absolute path outside the active home is still denied.
+- **Arm-command policy.** `bin/fm-arm-command-policy.mjs` denies every cadence-source prefix on a watcher command; the protected arm and checkpoint owners apply the fixed interval only after `bin/fm-cadence.sh` validates the artifact without evaluating its bytes.
 
 ## Keychain owner
 
@@ -90,7 +90,7 @@ Creating the item itself requires an unlocked login keychain in an interactive s
   `tests/fm-turnend-guard.test.sh`, `tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-supervision-instructions.test.sh` all passed.
 - **Runtime backends** (`tmux`, `herdr`, `zellij`, `orca`, `cmux`, and the blocked `codex-app`): not applicable after inspection. The channel spawns nothing, reads no pane or composer, and sends no keystrokes; its wakes travel the ordinary durable wake queue.
 - **Away mode**: wake handling unchanged - `classify_check` in `bin/fm-supervise-daemon.sh` escalates every `check:` wake, so a Telegram wake reaches the captain's session exactly as an X-mode or dashboard wake does.
-  The daemon now also applies the generated cadence per watcher spawn, because away mode owns the watcher instead of the harness protocol that would otherwise have sourced it. `tests/fm-daemon.test.sh` and `tests/fm-supervision-events.test.sh` cover both paths.
+  The daemon also routes each watcher spawn through the validated cadence owner because away mode owns that launch instead of a primary-harness wrapper. `tests/fm-daemon.test.sh` and `tests/fm-supervision-events.test.sh` cover both paths.
 - **X mode and dashboard commands**: independently armable, each keeping its own check, records, and wake vocabulary.
   X mode's own artifact is now just its relay poll shim: the cadence it used to write moved to the shared owner, which both channels arm identically, so a home with both gets one cadence and one file. `tests/fm-x-mode.test.sh` asserts that end of it; the dashboard command poll is unchanged and `tests/fm-dash.test.sh` was unaffected.
 - **Secondmate homes**: the Telegram configuration is deliberately absent from `FM_INHERITABLE_CONFIG` in `bin/fm-config-inherit-lib.sh`, so it is never propagated. That is required rather than incidental: Telegram permits one `getUpdates` consumer per bot, so two homes sharing a token would fight over updates.

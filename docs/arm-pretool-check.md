@@ -96,15 +96,12 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <cadence path>` or `. <cadence path>`.
-- `[ -f <cadence path> ] && source <cadence path>` and the equivalent dot form.
-
-The allowed cadence paths are `config/check-cadence.env`, `./config/check-cadence.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/check-cadence.env`.
-The pre-rename `config/x-mode.env` is accepted in the same three forms, so an arm command carried over from a session that started before the rename is not denied while the next locked session start migrates the home.
-An absolute cadence path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
-`&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.
+`&&` is accepted after setup so a failed `cd` or `export` prevents the protected call from running under the wrong setup.
+
+Cadence source nodes are never approved.
+The protected arm and checkpoint owners apply only the validator's fixed interval and never evaluate generated config bytes.
 
 The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
@@ -191,7 +188,7 @@ Every harness was instructed to issue these exact shell command strings as separ
 ```sh
 printf 'UNRELATED_EXECUTED\n'
 pgrep -fl '/bin/fm-watch.sh' || true
-source '<scratch-project>/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180
+bin/fm-watch-checkpoint.sh --seconds 180
 tmux send-keys -t isolated-pi-lab "printf '%s\n' 'bin/fm-watch-arm.sh &'"; tmux send-keys -t isolated-pi-lab Enter
 bin/fm-watch-arm.sh &
 ```

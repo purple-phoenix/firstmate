@@ -255,9 +255,9 @@ case "$out" in
   *"applies to the NEXT supervision cycle, not one already running"*) ;;
   *) fail "enable must not imply a running watcher rereads the cadence, got: $out" ;;
 esac
-# shellcheck source=/dev/null
-cadence_interval=$( . "$HOME_DIR/config/check-cadence.env" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
-[ "$cadence_interval" = 30 ] || fail "sourcing the cadence file must start a watcher at 30s"
+cadence_interval=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-cadence.sh" apply -- \
+  bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
+[ "$cadence_interval" = 30 ] || fail "validated cadence apply must start a watcher at 30s"
 # Re-running enable is idempotent and does not re-announce a transition.
 cadence_sum=$(shasum < "$HOME_DIR/config/check-cadence.env")
 out=$(tg fm-tg-setup.sh enable 2>&1) || fail "re-enable must succeed: $out"

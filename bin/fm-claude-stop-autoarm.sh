@@ -49,7 +49,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
@@ -58,8 +57,6 @@ EPOCH="$STATE/.claude-autoarm-epoch"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$SCRIPT_DIR/fm-cadence-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
@@ -128,12 +125,6 @@ write_epoch() {  # <outcome>
 }
 
 write_epoch arming
-
-# Watcher check cadence: source the generated config so a home with an armed
-# inbound captain channel polls at its 30s cadence (bin/fm-cadence.sh contract).
-CADENCE_ENV=$(fm_cadence_file "$CONFIG")
-# shellcheck source=/dev/null
-[ -f "$CADENCE_ENV" ] && . "$CADENCE_ENV"
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

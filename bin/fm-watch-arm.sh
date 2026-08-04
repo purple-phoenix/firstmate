@@ -495,7 +495,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   write_arm_death_marker "no live watcher with a fresh beacon"
   exit 1
 }
-"$WATCH" >"$child_out" &
+"$SCRIPT_DIR/fm-cadence.sh" apply -- "$WATCH" >"$child_out" &
 child=$!
 cycle_begin "$child" started
 child_done=0

@@ -686,13 +686,13 @@ test_bootstrap_activates_on_env_token() {
   assert_present "$home/config/check-cadence.env" "bootstrap must drop the cadence config"
   assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/check-cadence.env" "cadence must be 30s"
   assert_absent "$home/config/x-mode.env" "bootstrap must not write the pre-rename cadence path"
-  # Cadence inheritance: sourcing the config exports the 30s interval to a child,
-  # exactly how fm-watch-arm.sh's forked watcher inherits it.
+  # Cadence inheritance: the validated launch boundary exports the 30s interval
+  # to its watcher child.
   local inherited
-  # shellcheck source=/dev/null
-  inherited=$( . "$home/config/check-cadence.env" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
+  inherited=$(FM_HOME="$home" "$ROOT/bin/fm-cadence.sh" apply -- \
+    bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$inherited" = "30" ] \
-    || fail "sourcing the cadence config must export FM_CHECK_INTERVAL=30 to a child"
+    || fail "validated cadence apply must export FM_CHECK_INTERVAL=30 to a child"
   # Idempotent: re-running changes nothing, does not duplicate the shim, and stays
   # silent because neither the shim nor the cadence transitioned.
   sum1=$(cat "$home/state/x-watch.check.sh" "$home/config/check-cadence.env" | shasum)

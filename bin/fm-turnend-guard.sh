@@ -61,7 +61,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
@@ -81,8 +80,6 @@ done
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
-# shellcheck source=bin/fm-cadence-lib.sh
-. "$SCRIPT_DIR/fm-cadence-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
@@ -147,7 +144,7 @@ block_stop() {
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   fast_cadence=0
-  [ -f "$(fm_cadence_file "$CONFIG")" ] && fast_cadence=1
+  "$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null && fast_cadence=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --fast-cadence "$fast_cadence" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
