@@ -218,7 +218,7 @@ A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitigno
 That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while parent-thread context may still include other public accounts.
-On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [X mode configuration reference](configuration.md#x-mode-env).
+On the locked session-start bootstrap step, that token creates the local polling artifact described in the [X mode configuration reference](configuration.md#x-mode-env), and arms the shared fast check cadence owned by the [watcher check cadence reference](configuration.md#watcher-check-cadence-configcheck-cadenceenv).
 Without the token, the locked session-start bootstrap step removes those artifacts on opt-out and otherwise stays silent, so non-X users see no behavior change.
 Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [X mode configuration reference](configuration.md#x-mode-env) owns the durable offer-marker and re-offer contract.
 The `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-post context for conversational continuity, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.

@@ -6,8 +6,8 @@
 # resolves. Until the operator completes bin/fm-tg-setup.sh, nothing here runs.
 #
 # The watcher runs this through the registered state/fm-telegram.check.sh shim on
-# its normal check cadence, and its contract is the standard one: printing a line
-# wakes firstmate, silence keeps it sleeping.
+# the shared check cadence owned by bin/fm-cadence.sh, and its contract is the
+# standard one: printing a line wakes firstmate, silence keeps it sleeping.
 #
 #   new captain message(s)   -> commit each as a durable inbox record, then print
 #                               "tg-message <n> pending"

@@ -221,6 +221,20 @@ AFK_FLAG_NAME=".afk"
 # classifiers can take an explicit state arg without depending on globals.
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
 
+# Replace this process with the watcher, first applying this home's generated check
+# cadence. Away mode owns supervision instead of the harness protocol, so the file
+# the protocol would have sourced has to be applied here, or an armed inbound
+# captain channel would silently fall back to the 300s sweep for the whole time the
+# captain is away - the exact stretch a Telegram message is most likely to arrive
+# in. Callers run this in a subshell, so the daemon's own environment is never
+# mutated and each spawn re-reads the file: because the away-mode watcher is
+# one-shot, a cadence transition therefore takes effect at the next wake instead of
+# needing a daemon restart. A missing file leaves the default cadence in place.
+exec_watcher_with_cadence() {
+  local watch=$1
+  exec "$FM_DAEMON_DIR/fm-cadence.sh" apply -- "$watch"
+}
+
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
   _stat_file_mtime() { stat -f %m "$1" 2>/dev/null; }
@@ -1429,7 +1443,7 @@ fm_super_main() {
 
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    ( exec_watcher_with_cadence "$WATCH" ) >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }
 

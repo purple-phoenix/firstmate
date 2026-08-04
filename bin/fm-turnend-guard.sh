@@ -61,7 +61,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
@@ -141,12 +140,12 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk fast_cadence reason rule
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
-  x_mode=0
-  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  fast_cadence=0
+  "$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null && fast_cadence=1
+  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --fast-cadence "$fast_cadence" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {

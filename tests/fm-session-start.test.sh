@@ -1193,7 +1193,7 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
-test_next_step_sources_x_mode_cadence() {
+test_next_step_applies_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
   IFS='|' read -r root home fakebin <<EOF
@@ -1207,11 +1207,82 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
+  assert_contains "$out" "CADENCE: 30s check cadence armed for X mode" "bootstrap did not arm the check cadence"
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
-  assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
+  assert_contains "$out" "- Fast check cadence: active" "supervision block did not mention the fast cadence"
+  assert_contains "$out" "without sourcing config bytes" "supervision block omitted the validated cadence boundary"
+  assert_contains "$out" "An inbound captain channel is armed" "next step did not name the armed captain channel"
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
 
   pass "session start emits X-mode cadence guidance in the harness supervision block"
+}
+
+# The same propagation, driven by the Telegram channel instead of X mode: bootstrap
+# reconciles the cadence for whatever armed it, and the emitted supervision block
+# tells the harness that the watcher launch owner applies it.
+test_next_step_applies_telegram_cadence() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-telegram)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" curl jq
+  # The channel's armed state is exactly its registered check shim; no bot, token,
+  # or pairing is involved in the cadence decision. Registering it is what keeps
+  # session start's own check migration from quarantining it as unarmed.
+  mkdir -p "$home/state"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'export FM_HOME=%q\n' "$home"
+    printf 'exec %q\n' "$ROOT/bin/fm-tg-poll.sh"
+  } > "$home/state/fm-telegram.check.sh"
+  chmod 700 "$home/state/fm-telegram.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" fm-telegram >/dev/null \
+    || fail "setup: the Telegram check could not be registered"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "CADENCE: 30s check cadence armed for the Telegram captain channel" \
+    "bootstrap did not arm the cadence for the Telegram channel"
+  assert_contains "$out" "- Fast check cadence: active" "supervision block did not mention the fast cadence"
+  assert_contains "$out" "without sourcing config bytes" "supervision block omitted the validated cadence boundary"
+  assert_contains "$out" "An inbound captain channel is armed" "next step did not name the armed captain channel"
+  assert_not_contains "$out" "FMX:" "a Telegram-only home must not be told anything about X mode"
+  [ -f "$home/config/check-cadence.env" ] || fail "session start did not leave the cadence file armed"
+
+  # Idempotent across sessions: a second start reconciles to the same state and
+  # does not re-announce a transition that did not happen.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "CADENCE:" "a steady-state session start must not re-announce the cadence"
+  assert_contains "$out" "- Fast check cadence: active" "the second session lost the cadence guidance"
+
+  pass "session start arms and reports the Telegram check cadence, idempotently"
+}
+
+# A home with neither channel must be completely unaffected: no cadence file, no
+# cadence line, and no cadence guidance in the emitted supervision block.
+test_next_step_default_home_has_no_cadence_guidance() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-no-cadence)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "CADENCE:" "a home with no captain channel must not report a cadence transition"
+  # The harness protocol snippet names the cadence file conditionally ("when it
+  # exists"); what must be absent is the current-state stanza claiming it is active
+  # and the next-step guidance, because this home has no such file.
+  assert_not_contains "$out" "Fast check cadence: active" "a home with no captain channel must not get cadence guidance"
+  assert_not_contains "$out" "An inbound captain channel is armed" "a home with no captain channel must not claim one"
+  assert_absent "$home/config/check-cadence.env" "a home with no captain channel must not gain a cadence file"
+
+  pass "session start leaves a home with no captain channel entirely on the default cadence"
 }
 
 test_next_step_afk_delegates_to_daemon() {
@@ -1409,7 +1480,9 @@ test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
-test_next_step_sources_x_mode_cadence
+test_next_step_applies_x_mode_cadence
+test_next_step_applies_telegram_cadence
+test_next_step_default_home_has_no_cadence_guidance
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization

@@ -681,19 +681,26 @@ test_bootstrap_activates_on_env_token() {
   assert_present "$home/state/x-watch.check.sh" "bootstrap must drop the check shim"
   [ -x "$home/state/x-watch.check.sh" ] || fail "the check shim must be executable"
   assert_grep "fm-x-poll.sh" "$home/state/x-watch.check.sh" "the shim must exec the poll script"
-  assert_present "$home/config/x-mode.env" "bootstrap must drop the cadence config"
-  assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/x-mode.env" "cadence must be 30s"
-  # Cadence inheritance: sourcing the config exports the 30s interval to a child,
-  # exactly how fm-watch-arm.sh's forked watcher inherits it.
+  assert_contains "$out" "CADENCE: 30s check cadence armed for X mode" \
+    "bootstrap must announce the armed check cadence"
+  assert_present "$home/config/check-cadence.env" "bootstrap must drop the cadence config"
+  assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/check-cadence.env" "cadence must be 30s"
+  assert_absent "$home/config/x-mode.env" "bootstrap must not write the pre-rename cadence path"
+  # Cadence inheritance: the validated launch boundary exports the 30s interval
+  # to its watcher child.
   local inherited
-  # shellcheck source=/dev/null
-  inherited=$( . "$home/config/x-mode.env" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
+  inherited=$(FM_HOME="$home" "$ROOT/bin/fm-cadence.sh" apply -- \
+    bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$inherited" = "30" ] \
-    || fail "sourcing the cadence config must export FM_CHECK_INTERVAL=30 to a child"
-  # Idempotent: re-running changes nothing and does not duplicate the shim.
-  sum1=$(cat "$home/state/x-watch.check.sh" "$home/config/x-mode.env" | shasum)
-  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
-  sum2=$(cat "$home/state/x-watch.check.sh" "$home/config/x-mode.env" | shasum)
+    || fail "validated cadence apply must export FM_CHECK_INTERVAL=30 to a child"
+  # Idempotent: re-running changes nothing, does not duplicate the shim, and stays
+  # silent because neither the shim nor the cadence transitioned.
+  sum1=$(cat "$home/state/x-watch.check.sh" "$home/config/check-cadence.env" | shasum)
+  local rerun
+  rerun=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$rerun" "CADENCE:" "a steady-state rerun must not re-announce the cadence"
+  sum2=$(cat "$home/state/x-watch.check.sh" "$home/config/check-cadence.env" | shasum)
   [ "$sum1" = "$sum2" ] || fail "bootstrap X-mode setup must be idempotent"
   n=$(find "$home/state" -maxdepth 1 -name 'x-watch*' | wc -l | tr -d ' ')
   [ "$n" = "1" ] || fail "bootstrap must not duplicate the shim (found $n)"
@@ -732,7 +739,7 @@ SH
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
   assert_absent "$home/state/x-watch.check.sh" "missing jq must not arm the check shim"
-  assert_absent "$home/config/x-mode.env" "missing jq must not write the cadence config"
+  assert_absent "$home/config/check-cadence.env" "missing jq must not write the cadence config"
   pass "bootstrap reports missing X-mode dependencies before arming"
 }
 
@@ -742,10 +749,10 @@ test_bootstrap_does_not_announce_when_arm_fails() {
   printf 'FMX_PAIRING_TOKEN=tok-boot\n' > "$home/.env"
   printf '%s\n' 'not a directory' > "$home/config"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "FMX: X mode off - failed to arm relay poll shim or 30s cadence" \
+  assert_contains "$out" "FMX: X mode off - failed to arm relay poll shim" \
     "bootstrap must report a failed X-mode activation"
   assert_not_contains "$out" "FMX: X mode on" \
-    "bootstrap must not announce X mode when the shim or cadence was not armed"
+    "bootstrap must not announce X mode when the shim was not armed"
   assert_absent "$home/state/x-watch.check.sh" "failed X-mode activation must not leave an armed shim"
   pass "bootstrap does not report X mode on when activation artifacts cannot be written"
 }
@@ -761,12 +768,12 @@ test_bootstrap_does_not_follow_x_artifact_symlinks() {
   printf 'external cadence sentinel\n' > "$cadence_target"
   chmod 0640 "$shim_target" "$cadence_target"
   ln -s "$shim_target" "$home/state/x-watch.check.sh"
-  ln -s "$cadence_target" "$home/config/x-mode.env"
+  ln -s "$cadence_target" "$home/config/check-cadence.env"
   ln -s "$home/external-quarantine" "$home/state/.pr-check-quarantine"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>"$home/bootstrap.err")
 
-  assert_contains "$out" "FMX: X mode off - failed to arm relay poll shim or 30s cadence" \
+  assert_contains "$out" "FMX: X mode off - failed to arm relay poll shim" \
     "bootstrap must reject linked X-mode destinations"
   assert_not_contains "$out" "FMX: X mode on" \
     "bootstrap must not announce X mode after rejecting linked destinations"
@@ -779,7 +786,7 @@ test_bootstrap_does_not_follow_x_artifact_symlinks() {
   [ "$(path_mode "$cadence_target")" = 640 ] \
     || fail "bootstrap changed the linked cadence target mode"
   assert_absent "$home/state/x-watch.check.sh" "bootstrap must remove the rejected shim link"
-  assert_absent "$home/config/x-mode.env" "bootstrap must remove the rejected cadence link"
+  assert_absent "$home/config/check-cadence.env" "bootstrap must remove the rejected cadence link"
   pass "bootstrap rejects linked X artifacts without touching their targets"
 }
 
@@ -790,7 +797,7 @@ test_bootstrap_inert_without_token() {
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "bootstrap must say nothing about X mode without a token"
   assert_absent "$home/state/x-watch.check.sh" "no token -> no check shim"
-  assert_absent "$home/config/x-mode.env" "no token -> no cadence config"
+  assert_absent "$home/config/check-cadence.env" "no token -> no cadence config"
   # .env present but token empty -> still off.
   home="$TMP_ROOT/boot-empty"; mkdir -p "$home"
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
@@ -866,18 +873,21 @@ test_bootstrap_opt_out_cleanup() {
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_present "$home/state/x-watch.check.sh" "opt-in must create the shim"
-  assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
+  assert_present "$home/config/check-cadence.env" "opt-in must create the cadence config"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
   out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
+  assert_contains "$out" "CADENCE: default 300s check cadence restored" \
+    "opt-out must announce the restored default cadence"
   assert_contains "$out" "Claude Code background task" "opt-out remediation must use the harness-aware repair renderer"
   assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
-  assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"
+  assert_absent "$home/config/check-cadence.env" "opt-out must remove the cadence config"
   # Steady-state off: another run with nothing to remove is silent.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "steady-state off must be silent"
+  assert_not_contains "$out" "CADENCE:" "steady-state off must not re-announce the cadence"
   pass "bootstrap cleans up X artifacts on opt-out and is silent once off"
 }
 
@@ -887,7 +897,7 @@ test_bootstrap_opt_out_reports_cleanup_failure() {
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_present "$home/state/x-watch.check.sh" "opt-in must create the shim before cleanup failure"
-  assert_present "$home/config/x-mode.env" "opt-in must create the cadence config before cleanup failure"
+  assert_present "$home/config/check-cadence.env" "opt-in must create the cadence config before cleanup failure"
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/rm" <<'SH'
 #!/usr/bin/env bash
@@ -896,10 +906,17 @@ SH
   chmod +x "$fakebin/rm"
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "FMX: X mode off - failed to remove relay poll shim or 30s cadence" \
+  assert_contains "$out" "FMX: X mode off - failed to remove relay poll shim" \
     "opt-out cleanup failure must be reported"
+  # The shim survived the failed removal, so this home still HAS an armed inbound
+  # channel and the fast cadence is still the correct state for it. The cadence
+  # owner must therefore stay silent rather than report a transition that did not
+  # happen, and must not strand the home on the default cadence while a live relay
+  # poll shim remains.
+  assert_not_contains "$out" "CADENCE:" \
+    "a shim that survived cleanup is still armed, so the cadence must not transition"
   assert_present "$home/state/x-watch.check.sh" "failed opt-out cleanup must leave the stale shim visible"
-  assert_present "$home/config/x-mode.env" "failed opt-out cleanup must leave the stale cadence visible"
+  assert_present "$home/config/check-cadence.env" "failed opt-out cleanup must leave the stale cadence visible"
   pass "bootstrap reports failed X artifact cleanup on opt-out"
 }
 

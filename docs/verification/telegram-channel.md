@@ -51,6 +51,35 @@ Asserted structurally over `bin/fm-tg-*.sh`: no `setWebhook`, `nc -l`, `--listen
 The registered `state/fm-telegram.check.sh` printed exactly one bounded line while messages were pending, satisfied `fm_custom_check_registered` from `bin/fm-check-lib.sh`, and lost its registration when its bytes were tampered with - so the watcher refuses it rather than executing it.
 `fm_supervision_needed` from `bin/fm-supervision-lib.sh` returned true for a home with an armed channel and no fleet work, which is what keeps a Telegram-only home on one live supervision cycle.
 
+## Check cadence
+
+2026-08-03, macOS 15.6 (Darwin 24.6.0), node v26.5.0, jq 1.7.1, ShellCheck 0.11.0.
+
+```sh
+bin/fm-test-run.sh tests/fm-check-cadence.test.sh tests/fm-telegram.test.sh \
+  tests/fm-x-mode.test.sh tests/fm-supervision-instructions.test.sh \
+  tests/fm-daemon.test.sh tests/fm-arm-pretool-check.test.sh
+```
+
+`FM_TEST_SUMMARY total=6 failed=0 skipped_gate=0`.
+
+An enabled channel raises this home from the 300s default sweep to 30s through the single generated `config/check-cadence.env` owned by `bin/fm-cadence.sh` ([`configuration.md`](../configuration.md#watcher-check-cadence-configcheck-cadenceenv)).
+The suites establish, in order:
+
+- **The matrix.** A home with neither channel wrote no cadence file and a watcher would start at 300s; a Telegram-only home and an X-only home each started at 30s; a home with both produced exactly one file in `config/`, so two armed channels never yield two config owners.
+- **Bounded load.** The cadence changes only how often the existing watcher sweeps; `bin/fm-tg-poll.sh` keeps its own bounded long poll (`FM_TG_POLL_TIMEOUT`, default 10s, within `FM_CHECK_TIMEOUT`), its 100-record ingress bound, its ledger reservations, and its once-per-cause error dedupe, all still asserted by `tests/fm-telegram.test.sh`.
+- **Transitions.** `enable` armed the cadence and re-running it left the file byte-identical without re-announcing a transition; `disable` and `uninstall` released it; `disable` with X mode still armed deliberately kept it; and repeated `reconcile` runs were byte-stable.
+- **No false claim of a live re-read.** `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` once at process start, and every transition line was asserted to say the new cadence applies to the next supervision cycle and to carry the emitted harness repair instruction rather than restarting anything.
+- **Migration.** A home carrying the pre-rename `config/x-mode.env` had it removed and replaced with the current owner in the armed case, and removed outright in the idle case, so no home is left with two cadence owners.
+- **Artifact safety.** The generated file is mode 0600, is refused rather than written when its destination is a symlink (the link target's bytes and mode were unchanged), and contains exactly one non-comment line - the interval export - with no token, chat id, user id, or bot identity.
+- **Away mode.** `exec_watcher_with_cadence` in `bin/fm-supervise-daemon.sh` started a probe watcher at 30s for an armed home and 300s for an unarmed one, and picked up a mid-away release on the next spawn, so the away-mode watcher is not stranded on the default cadence for the stretch the captain is most likely to message.
+- **Arm-command policy.** `bin/fm-arm-command-policy.mjs` denies every cadence-source prefix on a watcher command; the protected arm and checkpoint owners apply the fixed interval only after `bin/fm-cadence.sh` validates the artifact without evaluating its bytes.
+- **Tail scheduling.** `tests/fm-watcher-lock.test.sh` runs two individually slow ordinary checks while a Telegram check becomes due between each one, proving the single watcher re-enters the validated inbound dispatcher exactly at those due points, preserves ordinary-check progress, and exits on the resulting captain wake before starting the next ordinary check; a separate refused-marker case proves a dangling marker symlink yields one actionable error, zero channel-process starts, and no same-sweep retry.
+
+On 2026-08-04, `bash tests/fm-supervision-instructions.test.sh && bash tests/fm-watch-checkpoint.test.sh` completed with exit 0.
+The renderer test proves that Kimi's normalized unknown fallback uses the bounded checkpoint owner instead of a raw watcher launch, and the checkpoint test proves that owner applies a valid cadence while refusing a symlinked executable payload at the default cadence without evaluating its bytes.
+On 2026-08-04, `bash tests/fm-watcher-lock.test.sh` completed with exit 0.
+
 ## Keychain owner
 
 The `security` prompt path this channel uses (`add-generic-password ... -w` with the value on standard input, no keychain argument after `-w`) was confirmed on 2026-08-02 to consume stdin rather than an argument: run non-interactively it reached `password data for new item: retype password for new item:` and then refused with `security: SecKeychainItemCreateFromContent (<default>): User interaction is not allowed`, creating nothing.
@@ -62,9 +91,12 @@ Creating the item itself requires an unlocked login keychain in an interactive s
 
 - **Primary harnesses** (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`): the channel adds a registered watcher check and an agent skill, neither of which is harness-specific.
   The one shared-behavior change is `bin/fm-supervision-lib.sh` treating an armed channel as a supervision need; Claude's tokenless auto-arm and cooperative turn-end guard consume that full predicate directly, while the other harness protocols keep or re-arm their ordinary watcher cycle under the always-loaded supervision contract.
+  The check cadence rides the validated launch owner for every primary path: `tests/fm-supervision-instructions.test.sh` asserts that `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` preserve their own repair mechanisms, while Kimi's normalized unknown fallback names the bounded checkpoint owner rather than raw `fm-watch.sh`; `tests/fm-watch-checkpoint.test.sh` covers both accepted and refused cadence artifacts on that fallback path.
   `tests/fm-turnend-guard.test.sh`, `tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-supervision-instructions.test.sh` all passed.
 - **Runtime backends** (`tmux`, `herdr`, `zellij`, `orca`, `cmux`, and the blocked `codex-app`): not applicable after inspection. The channel spawns nothing, reads no pane or composer, and sends no keystrokes; its wakes travel the ordinary durable wake queue.
-- **Away mode**: unchanged. `classify_check` in `bin/fm-supervise-daemon.sh` escalates every `check:` wake, so a Telegram wake reaches the captain's session exactly as an X-mode or dashboard wake does. `tests/fm-daemon.test.sh` and `tests/fm-supervision-events.test.sh` cover that path.
-- **X mode and dashboard commands**: both untouched and independently armable; each channel keeps its own check, records, and wake vocabulary. `tests/fm-x-mode.test.sh` and `tests/fm-dash.test.sh` were unaffected.
+- **Away mode**: wake handling unchanged - `classify_check` in `bin/fm-supervise-daemon.sh` escalates every `check:` wake, so a Telegram wake reaches the captain's session exactly as an X-mode or dashboard wake does.
+  The daemon also routes each watcher spawn through the validated cadence owner because away mode owns that launch instead of a primary-harness wrapper. `tests/fm-daemon.test.sh` and `tests/fm-supervision-events.test.sh` cover both paths.
+- **X mode and dashboard commands**: independently armable, each keeping its own check, records, and wake vocabulary.
+  X mode's own artifact is now just its relay poll shim: the cadence it used to write moved to the shared owner, which both channels arm identically, so a home with both gets one cadence and one file. `tests/fm-x-mode.test.sh` asserts that end of it; the dashboard command poll is unchanged and `tests/fm-dash.test.sh` was unaffected.
 - **Secondmate homes**: the Telegram configuration is deliberately absent from `FM_INHERITABLE_CONFIG` in `bin/fm-config-inherit-lib.sh`, so it is never propagated. That is required rather than incidental: Telegram permits one `getUpdates` consumer per bot, so two homes sharing a token would fight over updates.
 - **Legacy check migration**: `bin/fm-pr-check-migrate.sh` preserves any check that passes `fm_custom_check_registered`, which the Telegram check does. `tests/fm-pr-check-security.test.sh` passed.

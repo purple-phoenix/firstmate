@@ -75,7 +75,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
-| `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
+| `fm-supervision-lib.sh`  | Shared armed-captain-channel and in-flight-work-without-fresh-watcher-beacon predicates |
+| `fm-cadence.sh`          | Single owner of the watcher check cadence: reconcile and validate `config/check-cadence.env`, then apply the fixed interval at watcher launch |
+| `fm-cadence-lib.sh`      | Shared check-cadence constants and generated-file body for the cadence owner and status consumers |
 | `fm-push-transition-lib.sh` | Shared watcher owner for native push-transition escalation                       |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |

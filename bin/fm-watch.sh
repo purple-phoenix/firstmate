@@ -507,6 +507,85 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+inbound_check_marker_valid() {
+  local marker="$STATE/.last-inbound-check" device line timestamp
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    device=$(stat -f %d "$STATE" 2>/dev/null) || return 1
+  else
+    device=$(stat -c %d "$STATE" 2>/dev/null) || return 1
+  fi
+  fmx_single_link_file_mode_valid "$marker" 600 "$device" || return 1
+  exec 9< "$marker" || return 1
+  IFS= read -r line <&9 || { exec 9<&-; return 1; }
+  if IFS= read -r _ <&9; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  timestamp=${line#fm-inbound-check-v1 }
+  [ "$line" = "fm-inbound-check-v1 $timestamp" ] || return 1
+  case "$timestamp" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+run_due_inbound_checks() {
+  local c out id reason marker_body checked=0 rejected=
+  if [ ! -e "$STATE/fm-telegram.check.sh" ] && [ ! -e "$STATE/x-watch.check.sh" ]; then
+    return 0
+  fi
+  if inbound_check_marker_valid \
+    && [ "$(age_of "$STATE/.last-inbound-check")" -lt "$CHECK_INTERVAL" ]; then
+    return 0
+  fi
+  marker_body="fm-inbound-check-v1 $(date +%s)"
+  if ! fmx_generated_write_if_changed "$STATE/.last-inbound-check" "$marker_body" 600; then
+    reason="check: inbound cadence marker unavailable; no captain-channel poll was attempted"
+    fm_wake_append check inbound-cadence-marker "$reason" || exit 1
+    wake "$reason"
+  fi
+  for c in "$STATE/fm-telegram.check.sh" "$STATE/x-watch.check.sh"; do
+    [ -e "$c" ] || continue
+    checked=1
+    out=
+    if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      if [ "$DEFER_MIGRATED_X_CHECK" -eq 1 ]; then
+        DEFER_MIGRATED_X_CHECK=0
+        continue
+      fi
+      if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+        && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
+        FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+        out=$FM_CHECK_RESULT
+      else
+        rejected="$rejected $c"
+        continue
+      fi
+    else
+      id=$(basename "$c" .check.sh)
+      if fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+        run_check_capture "$FM_CUSTOM_CHECK_SNAPSHOT" || exit 1
+        out=$FM_CHECK_RESULT
+        fm_custom_check_snapshot_cleanup
+      else
+        fm_custom_check_snapshot_cleanup
+        rejected="$rejected $c"
+        continue
+      fi
+    fi
+    if [ -n "$out" ]; then
+      reason="check: $c: $out"
+      fm_wake_append check "$c" "$reason" || exit 1
+      wake "$reason"
+    fi
+  done
+  [ "$checked" -eq 1 ] || return 0
+  if [ -n "$rejected" ]; then
+    reason="check: rejected unauthenticated state checks:$rejected"
+    fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+    wake "$reason"
+  fi
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -626,6 +705,12 @@ fi
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
+DEFER_MIGRATED_X_CHECK=0
+state_device=$(fm_pr_file_device "$STATE" 2>/dev/null || true)
+if [ -n "$state_device" ] \
+  && fmx_poll_shim_v1_valid "$STATE/x-watch.check.sh" "$FM_HOME" "$FM_ROOT" "$state_device"; then
+  DEFER_MIGRATED_X_CHECK=1
+fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
   echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
   exit 1
@@ -699,50 +784,45 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
-  # Slow per-task checks (firstmate writes these, e.g. a PR merge/preview poll).
-  # Time-based via .last-check mtime so the cadence survives watcher restarts.
+  # Slow checks. Authenticated inbound captain channels have their own durable
+  # schedule and run first, then again between ordinary checks whenever due.
+  # Ordinary checks remain time-based via .last-check mtime.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  run_due_inbound_checks
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      case "$c" in
+        "$STATE/fm-telegram.check.sh"|"$STATE/x-watch.check.sh") continue ;;
+      esac
       is_pr_poll=0
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
-        if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
-          && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
-          out=$FM_CHECK_RESULT
-        else
-          rejected_checks="$rejected_checks $c"
-          continue
-        fi
+      id=$(basename "$c" .check.sh)
+      if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+        is_pr_poll=1
+        provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
+        url=$FM_PR_POLL_SNAPSHOT_URL
+        host=$FM_PR_POLL_SNAPSHOT_HOST
+        path=$FM_PR_POLL_SNAPSHOT_PATH
+        number=$FM_PR_POLL_SNAPSHOT_NUMBER
+        FM_PR_POLL_TASK_ID=$id FM_PR_POLL_STATE=$STATE \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          "$provider" "$url" "$host" "$path" "$number" || exit 1
+        out=$FM_CHECK_RESULT
+      elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+        custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+        run_check_capture "$custom_snapshot" || exit 1
+        out=$FM_CHECK_RESULT
+        fm_custom_check_snapshot_cleanup
       else
-        id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-          is_pr_poll=1
-          provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
-          url=$FM_PR_POLL_SNAPSHOT_URL
-          host=$FM_PR_POLL_SNAPSHOT_HOST
-          path=$FM_PR_POLL_SNAPSHOT_PATH
-          number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          FM_PR_POLL_TASK_ID=$id FM_PR_POLL_STATE=$STATE \
-            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
-          out=$FM_CHECK_RESULT
-        elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
-          custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
-          out=$FM_CHECK_RESULT
-          fm_custom_check_snapshot_cleanup
-        else
-          fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
-          continue
-        fi
+        fm_custom_check_snapshot_cleanup
+        rejected_checks="$rejected_checks $c"
+        run_due_inbound_checks
+        continue
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
@@ -763,6 +843,7 @@ while :; do
         touch "$STATE/.last-check"
         wake "$reason"
       fi
+      run_due_inbound_checks
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"

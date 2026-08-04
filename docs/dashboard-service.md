@@ -58,7 +58,8 @@ The design keeps the web process outside every fleet-mutation path:
 
 1. The captain clicks a send or verdict control for a `CAP-NN` action, structured decision answer, idea verdict, parking-lot unpark, recurring run-now request, or needs-you your-go request.
 2. The service validates the request (see trust design) and writes one durable `fm-dash-command.v1` record into `state/dash-inbox/` with an atomic temp-file rename, mode 0600.
-3. The registered `fm-dash` watcher check notices the pending record on its normal cadence (`FM_CHECK_INTERVAL`, default 300 seconds) and wakes the running firstmate through the standard durable wake queue.
+3. The registered `fm-dash` watcher check notices the pending record on the shared watcher cadence and wakes the running firstmate through the standard durable wake queue.
+   [`configuration.md`](configuration.md#watcher-check-cadence-configcheck-cadenceenv) owns that cadence: it defaults to 300 seconds and is 30 seconds while an inbound captain channel is armed.
 4. Firstmate claims the records with `bin/fm-dash-inbox.sh claim` and handles each record by its kind under the capacity skill's dashboard-command semantics.
 5. Claiming touches `state/dash-inbox/.model-stale`; while auto-render is enabled the service polls that marker and reruns the producer promptly, so the model catches up with handled clicks well before the next full auto-render interval.
 

@@ -98,7 +98,10 @@ async function isPrimaryRoot(root, home) {
 
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
+  // An armed inbound captain channel needs a cycle with an empty fleet; this
+  // mirrors fm_supervision_channel_armed in bin/fm-supervision-lib.sh.
+  if (existsSync(`${paths.state}/x-watch.check.sh`)) return true;
+  if (existsSync(`${paths.state}/fm-telegram.check.sh`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
   } catch {
@@ -286,7 +289,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+  const armChild = spawn(`${paths.root}/bin/fm-watch-arm.sh`, ["--restart"], {
     cwd: paths.root,
     env,
     stdio: ["ignore", "pipe", "pipe"],
