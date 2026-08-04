@@ -548,6 +548,10 @@ run_due_inbound_checks() {
     checked=1
     out=
     if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      if [ "$DEFER_MIGRATED_X_CHECK" -eq 1 ]; then
+        DEFER_MIGRATED_X_CHECK=0
+        continue
+      fi
       if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
         && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
         FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
@@ -701,6 +705,12 @@ fi
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
+DEFER_MIGRATED_X_CHECK=0
+state_device=$(fm_pr_file_device "$STATE" 2>/dev/null || true)
+if [ -n "$state_device" ] \
+  && fmx_poll_shim_v1_valid "$STATE/x-watch.check.sh" "$FM_HOME" "$FM_ROOT" "$state_device"; then
+  DEFER_MIGRATED_X_CHECK=1
+fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
   echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
   exit 1
