@@ -75,6 +75,9 @@ The suites establish, in order:
 - **Away mode.** `exec_watcher_with_cadence` in `bin/fm-supervise-daemon.sh` started a probe watcher at 30s for an armed home and 300s for an unarmed one, and picked up a mid-away release on the next spawn, so the away-mode watcher is not stranded on the default cadence for the stretch the captain is most likely to message.
 - **Arm-command policy.** `bin/fm-arm-command-policy.mjs` denies every cadence-source prefix on a watcher command; the protected arm and checkpoint owners apply the fixed interval only after `bin/fm-cadence.sh` validates the artifact without evaluating its bytes.
 
+On 2026-08-04, `bash tests/fm-supervision-instructions.test.sh && bash tests/fm-watch-checkpoint.test.sh` completed with exit 0.
+The renderer test proves that Kimi's normalized unknown fallback uses the bounded checkpoint owner instead of a raw watcher launch, and the checkpoint test proves that owner applies a valid cadence while refusing a symlinked executable payload at the default cadence without evaluating its bytes.
+
 ## Keychain owner
 
 The `security` prompt path this channel uses (`add-generic-password ... -w` with the value on standard input, no keychain argument after `-w`) was confirmed on 2026-08-02 to consume stdin rather than an argument: run non-interactively it reached `password data for new item: retype password for new item:` and then refused with `security: SecKeychainItemCreateFromContent (<default>): User interaction is not allowed`, creating nothing.
@@ -86,7 +89,7 @@ Creating the item itself requires an unlocked login keychain in an interactive s
 
 - **Primary harnesses** (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`): the channel adds a registered watcher check and an agent skill, neither of which is harness-specific.
   The one shared-behavior change is `bin/fm-supervision-lib.sh` treating an armed channel as a supervision need; Claude's tokenless auto-arm and cooperative turn-end guard consume that full predicate directly, while the other harness protocols keep or re-arm their ordinary watcher cycle under the always-loaded supervision contract.
-  The check cadence rides the same mechanism every harness already had for X mode: `tests/fm-supervision-instructions.test.sh` asserts that the cadence prefix reaches `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and the unknown fallback without displacing that harness's own repair mechanism, that an absent cadence file produces no such instruction, and that away mode and read-only keep their own ownership answers instead.
+  The check cadence rides the validated launch owner for every primary path: `tests/fm-supervision-instructions.test.sh` asserts that `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` preserve their own repair mechanisms, while Kimi's normalized unknown fallback names the bounded checkpoint owner rather than raw `fm-watch.sh`; `tests/fm-watch-checkpoint.test.sh` covers both accepted and refused cadence artifacts on that fallback path.
   `tests/fm-turnend-guard.test.sh`, `tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-supervision-instructions.test.sh` all passed.
 - **Runtime backends** (`tmux`, `herdr`, `zellij`, `orca`, `cmux`, and the blocked `codex-app`): not applicable after inspection. The channel spawns nothing, reads no pane or composer, and sends no keystrokes; its wakes travel the ordinary durable wake queue.
 - **Away mode**: wake handling unchanged - `classify_check` in `bin/fm-supervise-daemon.sh` escalates every `check:` wake, so a Telegram wake reaches the captain's session exactly as an X-mode or dashboard wake does.
