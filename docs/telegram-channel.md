@@ -65,7 +65,7 @@ Nothing in firstmate prints it, passes it as a command argument, writes it into 
 
 Firstmate polls Telegram outbound and nothing more:
 
-- It calls the Bot API's `getUpdates` with a bounded long poll every 30 seconds while the channel is enabled.
+- On the configured fast cadence, it calls the Bot API's `getUpdates` with a bounded long poll at most every 30 seconds while the channel is enabled.
 - **No port is opened.** No webhook is registered - enabling the channel explicitly clears any webhook, so the pull path is the only path.
 - Nothing but Telegram itself sits in the middle: no OpenClaw, relay, tunnel, Funnel, or other third-party service.
 
@@ -76,10 +76,12 @@ Telegram holds an unread update for at most 24 hours, so the next poll picks it 
 Enabling the channel switches this home to the 30-second check cadence owned by [`configuration.md`](configuration.md#watcher-check-cadence-configcheck-cadenceenv), so **expect firstmate to notice a message within about 30 seconds** and to start answering it on its next turn.
 That is the honest worst case for pickup, not for a reply: how long the answer itself takes depends on what you asked for.
 
-Two things change that number, and both are stated where they happen rather than hidden:
+Three things change that number, and all are stated where they happen rather than hidden:
 
 - **A supervision cycle that was already running when you enabled the channel keeps its old cadence until it restarts.** The `enable` command says so and prints the exact restart instruction for your harness. Until then pickup stays on the old 300-second cadence.
-- **Nothing is supervising at all.** Then nothing polls, and the message waits until firstmate is supervising again (within Telegram's 24-hour retention). `bin/fm-tg-setup.sh status` showing `monitored: no` is this case.
+- **Cadence reconciliation failed.** The `enable` command says that the fast cadence is not armed and keeps the 300-second expectation instead of promising faster pickup; fix its reported blocker, then run `enable` again.
+- **Nothing is supervising at all.** Then nothing polls, and the message waits until firstmate is supervising again (within Telegram's 24-hour retention).
+  The session-start and turn-end supervision diagnostics report this separately from `bin/fm-tg-setup.sh status`, whose `monitored` field describes only whether the Telegram check is registered.
 
 ## Setup
 
