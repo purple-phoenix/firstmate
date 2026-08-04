@@ -239,6 +239,10 @@ test_legacy_cadence_file_is_removed_when_nothing_is_armed() {
   assert_absent "$home/config/x-mode.env" "the pre-rename cadence file must be removed"
   assert_absent "$home/config/check-cadence.env" "an idle home must not gain a cadence file"
   assert_interval "$home" 300 "a disarmed migrated home must run at the default cadence"
+  assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
+    "the legacy-only release must be honest about an already-running watcher"
+  assert_contains "$out" "repair missing watcher supervision" \
+    "the legacy-only release must carry the harness supervision repair instruction"
   pass "a home with only the pre-rename cadence file returns to the default cadence"
 }
 
@@ -267,6 +271,33 @@ test_generated_file_is_private() {
   mode=$(path_mode "$home/config/check-cadence.env")
   [ "$mode" = 600 ] || fail "the generated cadence file must be mode 0600 (got $mode)"
   pass "the generated cadence file is owner-only"
+}
+
+test_verify_rejects_noncanonical_artifacts() {
+  local home target body
+  home=$(make_home verify-artifact)
+  arm_telegram "$home"
+  cadence "$home" reconcile >/dev/null
+  cadence "$home" verify || fail "verify must accept the generated cadence artifact"
+  body=$(cat "$home/config/check-cadence.env")
+
+  chmod 0644 "$home/config/check-cadence.env"
+  cadence "$home" verify >/dev/null 2>&1 && fail "verify must reject the wrong mode"
+  cadence "$home" reconcile >/dev/null
+
+  target="$home/cadence-hardlink"
+  cp "$home/config/check-cadence.env" "$target"
+  chmod 0600 "$target"
+  rm -f "$home/config/check-cadence.env"
+  ln "$target" "$home/config/check-cadence.env"
+  cadence "$home" verify >/dev/null 2>&1 && fail "verify must reject a hard-linked artifact"
+
+  rm -f "$home/config/check-cadence.env" "$target"
+  printf '%s\n' "$body" > "$target"
+  chmod 0600 "$target"
+  ln -s "$target" "$home/config/check-cadence.env"
+  cadence "$home" verify >/dev/null 2>&1 && fail "verify must reject a symlinked artifact"
+  pass "verify accepts only the exact private single-link generated artifact"
 }
 
 test_cadence_file_carries_no_secret_and_no_channel_identity() {
@@ -314,5 +345,6 @@ test_legacy_cadence_file_is_migrated
 test_legacy_cadence_file_is_removed_when_nothing_is_armed
 test_symlinked_cadence_destination_is_refused
 test_generated_file_is_private
+test_verify_rejects_noncanonical_artifacts
 test_cadence_file_carries_no_secret_and_no_channel_identity
 test_path_command_needs_no_home_state

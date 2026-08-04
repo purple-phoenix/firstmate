@@ -730,6 +730,40 @@ SH
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
+test_inbound_channel_check_precedes_other_checks() {
+  local dir state fakebin out telegram_check task_check
+  dir=$(make_case inbound-check-priority)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  telegram_check="$state/fm-telegram.check.sh"
+  task_check="$state/aaa-task.check.sh"
+  mark_pr_check_migration_complete "$state"
+  cat > "$telegram_check" <<'SH'
+#!/usr/bin/env bash
+printf 'tg-message 1 pending\n'
+SH
+  cat > "$task_check" <<SH
+#!/usr/bin/env bash
+: > "$dir/task-check-ran"
+printf 'done: unrelated task\n'
+SH
+  chmod 0700 "$telegram_check" "$task_check"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" fm-telegram >/dev/null \
+    || fail "could not register Telegram priority check"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" aaa-task >/dev/null \
+    || fail "could not register unrelated priority fixture"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" \
+    || fail "priority watcher did not surface the Telegram wake"
+  grep -F "check: $telegram_check: tg-message 1 pending" "$out" >/dev/null \
+    || fail "the inbound Telegram check was not dispatched first"
+  [ ! -e "$dir/task-check-ran" ] \
+    || fail "an unrelated lexically earlier check ran before the inbound channel"
+  pass "authenticated inbound channel checks precede unrelated task checks"
+}
+
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
   local dir state fakebin armout peer identity armpid status i
   dir=$(make_case arm-peer-startup-race)
@@ -1085,6 +1119,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
+test_inbound_channel_check_precedes_other_checks
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_attached_death_loud_when_tasks_in_flight

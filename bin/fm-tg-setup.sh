@@ -278,17 +278,18 @@ unregister_check() { rm -f -- "$CHECK" "$TRUST" 2>/dev/null || true; }
 # outcome - and the restart it needs - from the command they just ran, instead of
 # waiting for the next session start to converge it silently.
 reconcile_cadence() {
-  local out
-  out=$("$SCRIPT_DIR/fm-cadence.sh" reconcile 2>/dev/null) || true
+  local out rc=0
+  out=$("$SCRIPT_DIR/fm-cadence.sh" reconcile 2>/dev/null) || rc=$?
   [ -n "$out" ] && note "  ${out#CADENCE: }"
-  return 0
+  return "$rc"
 }
 
 # What the operator should actually expect after a reconcile, read back from the
 # file rather than assumed: a reconcile that failed must not leave a promise of
 # 30-second pickup standing.
 report_pickup() {
-  if [ -f "$("$SCRIPT_DIR/fm-cadence.sh" path 2>/dev/null)" ]; then
+  local reconciled=$1
+  if [ "$reconciled" -eq 1 ] && "$SCRIPT_DIR/fm-cadence.sh" verify 2>/dev/null; then
     note "  firstmate reads this chat every 30 seconds."
   else
     note "  the fast check cadence is not armed, so pickup stays on the 300-second cadence until that is fixed."
@@ -316,8 +317,9 @@ cmd_enable() {
   write_check
   config_merge '.enabled = true'
   note "enabled: this Telegram chat is now polled for your messages."
-  reconcile_cadence
-  report_pickup
+  local cadence_reconciled=0
+  reconcile_cadence && cadence_reconciled=1
+  report_pickup "$cadence_reconciled"
   note "  transport is outbound long polling only; no port is opened and no webhook is registered."
   note "  this chat is not end-to-end encrypted - never send credentials, keys, or recovery codes through it."
 }

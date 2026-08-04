@@ -44,6 +44,8 @@
 #   fm-cadence.sh path        Print the cadence file path for this home.
 #   fm-cadence.sh status      Print "fast <path>" or "default", plus the armed
 #                             channels, for operators and tests.
+#   fm-cadence.sh verify      Exit 0 only when the generated cadence file has
+#                             the exact content, mode, link count, and device.
 #
 # Home resolution is the usual one: FM_HOME, then FM_CONFIG_OVERRIDE /
 # FM_STATE_OVERRIDE for tests.
@@ -80,6 +82,20 @@ supervision_repair() {
   printf '%s' "$out"
 }
 
+cadence_file_valid() {
+  local parent parent_device body
+  parent=${CADENCE_FILE%/*}
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+  else
+    parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
+  fi
+  fmx_single_link_file_mode_valid "$CADENCE_FILE" 600 "$parent_device" || return 1
+  body=$(fm_cadence_body)
+  cmp -s "$CADENCE_FILE" <(printf '%s\n' "$body")
+}
+
 cmd_reconcile() {
   local want=0 body rc=0 legacy_note=''
   fm_supervision_channel_armed "$STATE" && want=1
@@ -103,16 +119,18 @@ cmd_reconcile() {
     }
     # Unchanged content is left byte-identical by the writer, so a steady-state
     # session neither rewrites the file nor prints anything.
-    if fmx_generated_present "$CADENCE_FILE" \
-      && [ -z "$legacy_note" ] \
-      && cmp -s "$CADENCE_FILE" <(fm_cadence_body); then
+    if cadence_file_valid && [ -z "$legacy_note" ]; then
       return "$rc"
     fi
     body=$(fm_cadence_body)
     if fmx_generated_write_if_changed "$CADENCE_FILE" "$body" 600; then
       echo "CADENCE: ${FAST_SECS}s check cadence armed for $(armed_channels)${legacy_note}; it applies to the NEXT supervision cycle, not one already running - $(supervision_repair)"
     else
-      echo "CADENCE: failed to arm the ${FAST_SECS}s check cadence; captain messages stay on the 300s cadence"
+      if [ -n "$legacy_note" ]; then
+        echo "CADENCE: failed to arm the ${FAST_SECS}s check cadence after removing the superseded config/x-mode.env; captain messages use 300s on the NEXT supervision cycle, not one already running - $(supervision_repair)"
+      else
+        echo "CADENCE: failed to arm the ${FAST_SECS}s check cadence; captain messages stay on the 300s cadence"
+      fi
       rc=1
     fi
     return "$rc"
@@ -126,7 +144,7 @@ cmd_reconcile() {
       rc=1
     fi
   elif [ -n "$legacy_note" ]; then
-    echo "CADENCE: removed the superseded config/x-mode.env; no inbound captain channel is armed, so the default 300s check cadence applies to the next supervision cycle"
+    echo "CADENCE: removed the superseded config/x-mode.env; no inbound captain channel is armed, so the default 300s check cadence applies to the NEXT supervision cycle, not one already running - $(supervision_repair)"
   fi
   return "$rc"
 }
@@ -134,7 +152,7 @@ cmd_reconcile() {
 cmd_status() {
   local names
   names=$(armed_channels)
-  if fmx_generated_present "$CADENCE_FILE"; then
+  if cadence_file_valid; then
     printf 'fast %s\n' "$CADENCE_FILE"
   else
     printf 'default\n'
@@ -155,7 +173,7 @@ cmd_status() {
 #                          artifact; they are mode-neutral and carry no X behavior.
 #   fm-supervision-lib.sh - the armed-inbound-channel predicate.
 case "${1-}" in
-  reconcile|status)
+  reconcile|status|verify)
     # shellcheck source=bin/fm-x-lib.sh disable=SC1091
     . "$SCRIPT_DIR/fm-x-lib.sh"
     # shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
@@ -167,11 +185,12 @@ case "${1-}" in
   reconcile) cmd_reconcile ;;
   path)      printf '%s\n' "$CADENCE_FILE" ;;
   status)    cmd_status ;;
+  verify)    cadence_file_valid ;;
   -h|--help)
     sed -n '2,/^set -u$/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
     ;;
   *)
-    echo "usage: fm-cadence.sh reconcile|path|status" >&2
+    echo "usage: fm-cadence.sh reconcile|path|status|verify" >&2
     exit 2
     ;;
 esac

@@ -268,6 +268,29 @@ case "$out" in
 esac
 pass "enable: arms the 30s check cadence idempotently and is honest about the restart it needs"
 
+cadence_body=$(cat "$HOME_DIR/config/check-cadence.env")
+tg fm-tg-setup.sh disable >/dev/null || fail "disable before cadence refusal checks must succeed"
+cadence_target="$TMP_ROOT/cadence-target"
+printf '%s\n' "$cadence_body" > "$cadence_target"
+chmod 0600 "$cadence_target"
+ln -s "$cadence_target" "$HOME_DIR/config/check-cadence.env"
+out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable should preserve the channel when cadence reconciliation fails: $out"
+case "$out" in *"every 30 seconds"*) fail "a symlink refusal left a 30-second pickup promise: $out" ;; esac
+case "$out" in *"fast check cadence is not armed"*) ;; *) fail "a symlink refusal did not report the slower pickup: $out" ;; esac
+rm -f "$HOME_DIR/config/check-cadence.env" "$cadence_target"
+out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must repair cadence after symlink removal: $out"
+case "$out" in *"every 30 seconds"*) ;; *) fail "repaired cadence did not restore the pickup claim: $out" ;; esac
+
+tg fm-tg-setup.sh disable >/dev/null || fail "disable before hard-link refusal check must succeed"
+printf '%s\n' "$cadence_body" > "$cadence_target"
+chmod 0600 "$cadence_target"
+ln "$cadence_target" "$HOME_DIR/config/check-cadence.env"
+out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable should preserve the channel when hard-link reconciliation fails: $out"
+case "$out" in *"every 30 seconds"*) fail "a hard-link refusal left a 30-second pickup promise: $out" ;; esac
+rm -f "$HOME_DIR/config/check-cadence.env" "$cadence_target"
+out=$(tg fm-tg-setup.sh enable 2>&1) || fail "enable must repair cadence after hard-link removal: $out"
+pass "enable reports fast pickup only after a validated cadence reconcile"
+
 out=$(tg fm-tg-poll.sh 2>&1)
 [ "$out" = "tg-message 1 pending" ] || fail "the first post-challenge message must remain pollable, got: $out"
 [ "$(jq -r .text "$HOME_DIR/state/tg/inbox/tg-41.json")" = "first real message" ] \

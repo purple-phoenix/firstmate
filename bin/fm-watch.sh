@@ -699,7 +699,9 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
-  # Slow per-task checks (firstmate writes these, e.g. a PR merge/preview poll).
+  # Slow checks. Authenticated inbound captain channels run first so unrelated
+  # bounded PR or custom checks cannot delay message pickup or exit the watcher
+  # before those channels are polled.
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate
@@ -708,8 +710,20 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
-    for c in "$STATE"/*.check.sh; do
+    seen_telegram=0
+    seen_x=0
+    for c in "$STATE/fm-telegram.check.sh" "$STATE/x-watch.check.sh" "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      case "$c" in
+        "$STATE/fm-telegram.check.sh")
+          [ "$seen_telegram" -eq 0 ] || continue
+          seen_telegram=1
+          ;;
+        "$STATE/x-watch.check.sh")
+          [ "$seen_x" -eq 0 ] || continue
+          seen_x=1
+          ;;
+      esac
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \

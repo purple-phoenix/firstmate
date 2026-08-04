@@ -382,6 +382,7 @@ The entire mechanism is one generated file, `config/check-cadence.env` (gitignor
 It exists exactly while at least one channel is armed and is absent otherwise, so a home with neither channel keeps the default cadence and nothing about it changes.
 Two armed channels share that one file: there is one cadence, one config owner, one watcher, and one supervision cycle regardless of how many channels are on.
 The fast cadence applies to every check the watcher sweeps, including authenticated PR polls, and no channel adds a poller, port, webhook, or process of its own.
+Validated Telegram and X inbound checks are dispatched before authenticated PR and custom checks, so a slow or actionable task check cannot delay captain-message pickup or end the cycle before the channel checks run.
 That is a deliberate trade rather than an oversight: every check stays individually bounded by `FM_CHECK_TIMEOUT`, and an armed home runs each check at most twice a minute, so an open task PR costs two forge status calls a minute - well inside an authenticated GitHub hourly limit at any realistic fleet size.
 The Telegram poll's own bounded long poll (`FM_TG_POLL_TIMEOUT`, default 10s, always within `FM_CHECK_TIMEOUT`) and its backpressure and error-deduplication limits are unchanged by the cadence, so the fast sweep costs at most two bounded Bot API calls a minute.
 
