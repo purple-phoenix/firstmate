@@ -56,6 +56,7 @@ disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.
 # launch boundary.
 effective_interval() {
   local home=$1
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
   cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"'
 }
 
@@ -303,6 +304,7 @@ test_apply_never_evaluates_artifact_bytes() {
   sentinel="$home/executed"
   arm_telegram "$home"
   cadence "$home" reconcile >/dev/null
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
   got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$got" = 30 ] || fail "apply must export 30 for the validated artifact"
 
@@ -310,12 +312,14 @@ test_apply_never_evaluates_artifact_bytes() {
   printf 'touch %q\nexport FM_CHECK_INTERVAL=1\n' "$sentinel" > "$target"
   chmod 0600 "$target"
   ln -s "$target" "$home/config/check-cadence.env"
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
   got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$got" = 300 ] || fail "apply must keep the default for a rejected artifact"
   [ ! -e "$sentinel" ] || fail "apply evaluated rejected cadence bytes"
 
   rm -f "$home/config/check-cadence.env"
   ln "$target" "$home/config/check-cadence.env"
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
   got=$(cadence "$home" apply -- bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$got" = 300 ] || fail "apply must reject a hard-linked artifact"
   [ ! -e "$sentinel" ] || fail "apply evaluated hard-linked cadence bytes"
@@ -323,8 +327,10 @@ test_apply_never_evaluates_artifact_bytes() {
 }
 
 test_watcher_launch_owners_use_apply_boundary() {
+  # shellcheck disable=SC2016 # The fixed-string needle must keep WATCH literal.
   assert_grep 'fm-cadence.sh" apply -- "$WATCH"' "$ROOT/bin/fm-watch-arm.sh" \
     "the arm owner must route watcher startup through cadence apply"
+  # shellcheck disable=SC2016 # The fixed-string needle must keep SCRIPT_DIR literal.
   assert_grep 'fm-cadence.sh" apply -- "$SCRIPT_DIR/fm-watch.sh"' "$ROOT/bin/fm-watch-checkpoint.sh" \
     "the checkpoint owner must route watcher startup through cadence apply"
   pass "both standard watcher launch owners use the validated apply boundary"

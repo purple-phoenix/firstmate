@@ -689,6 +689,7 @@ test_bootstrap_activates_on_env_token() {
   # Cadence inheritance: the validated launch boundary exports the 30s interval
   # to its watcher child.
   local inherited
+  # shellcheck disable=SC2016 # The child shell expands the cadence variable.
   inherited=$(FM_HOME="$home" "$ROOT/bin/fm-cadence.sh" apply -- \
     bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
   [ "$inherited" = "30" ] \

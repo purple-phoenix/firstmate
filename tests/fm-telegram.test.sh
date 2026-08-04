@@ -255,6 +255,7 @@ case "$out" in
   *"applies to the NEXT supervision cycle, not one already running"*) ;;
   *) fail "enable must not imply a running watcher rereads the cadence, got: $out" ;;
 esac
+# shellcheck disable=SC2016 # The child shell expands the cadence variable.
 cadence_interval=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-cadence.sh" apply -- \
   bash -c 'echo "${FM_CHECK_INTERVAL:-300}"')
 [ "$cadence_interval" = 30 ] || fail "validated cadence apply must start a watcher at 30s"

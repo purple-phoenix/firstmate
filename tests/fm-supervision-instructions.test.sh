@@ -25,10 +25,12 @@ test_unknown_fallback() {
   assert_contains "$out" "primary harness: unknown" "unknown heading missing"
   assert_contains "$out" "Mode: Unknown harness fallback." "unknown fallback snippet missing"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "unknown fallback bypassed the validated bounded checkpoint owner"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$out" 'bounded foreground wait over `bin/fm-watch.sh`' "unknown fallback still directs a raw watcher launch"
   out=$("$RENDER" --harness kimi)
   assert_contains "$out" "primary harness: unknown" "kimi did not normalize to the unknown fallback"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "kimi fallback bypassed the validated bounded checkpoint owner"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$out" 'bounded foreground wait over `bin/fm-watch.sh`' "kimi fallback still directs a raw watcher launch"
   pass "renderer falls back to unknown.md for unverified harness names"
 }
@@ -173,6 +175,7 @@ test_grok_command_uses_arm_boundary() {
   config="$TMP_ROOT/grok-config"
   mkdir -p "$home/state" "$config"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --fast-cadence 1)
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_contains "$out" '`bin/fm-watch-arm.sh`' "grok arm command did not use the standard launch owner"
   assert_not_contains "$out" "check-cadence.env" "grok command must not name or source generated cadence config"
   pass "grok uses the standard validated watcher launch owner"
