@@ -1257,7 +1257,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-merge-approve{margin-top:.9rem;border:1px solid var(--good);background:var(--good);color:var(--bg);font-weight:800;padding:.6rem 1.2rem;cursor:pointer;font-size:.9rem;min-height:2.75rem}
   .fmdash-merge-approve[disabled]{opacity:.45;cursor:default}
   .fmdash-merge-refused{border:1px solid var(--warn);color:var(--warn);padding:.6rem .8rem;margin-top:1rem;font-size:.85rem}
-  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}
+  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer{position:static}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}
   </style>
   <script>
   (() => {

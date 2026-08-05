@@ -1424,7 +1424,7 @@ test_served_page_has_zero_copy_affordances() {
 test_acknowledgment_stacks_at_narrow_viewports() {
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   assert_contains "$RESP" '.fmdash-ack{display:inline-block' "served dashboard lacks the desktop acknowledgment style"
-  assert_contains "$RESP" '@media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}' \
+  assert_contains "$RESP" '@media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer{position:static}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}' \
     "390px acknowledgment does not return to the prompt's single explicit grid column"
   pass "acknowledged prompts stack in one explicit column at narrow viewports"
 }

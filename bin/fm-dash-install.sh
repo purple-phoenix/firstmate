@@ -4,7 +4,8 @@
 # Single owner of dashboard-service persistence: the launchd agent that keeps
 # bin/fm-dash-serve.mjs running across reboots, the tailscale serve proxy that
 # exposes it tailnet-only at one stable HTTPS URL, config/dash.json, and the
-# registered fm-dash watcher check that lets clicked commands wake firstmate.
+# registered fm-dash watcher check that lets captain commands and chat messages
+# wake firstmate.
 # It never enables Funnel: the serve mapping is tailnet-only by construction and
 # install verifies Funnel is off for the served port, tearing the mapping back
 # down and refusing if any Funnel exposure is detected.
@@ -13,7 +14,7 @@
 #   install       write config, launchd agent, tailscale serve mapping, and the
 #                 fm-dash watcher check; idempotent, prints the stable URL
 #   uninstall     remove the serve mapping, launchd agent, and watcher registration;
-#                 keeps config and any pending commands in state/dash-inbox/
+#                 keeps config and durable dashboard records
 #   status        report agent, serve mapping, and pending-command state
 #   print-plist   print the launchd plist to stdout without installing
 #   write-check   write and register only the fm-dash watcher check
@@ -23,8 +24,8 @@
 #   --serve-port <n>  tailnet HTTPS port for tailscale serve (default 8443)
 #   --captain <login> authorized tailnet login; repeatable; defaults to the
 #                     tailnet self login reported by tailscale status
-#   --read-only       serve the dashboard without command dispatch and remove the
-#                     watcher check; for running the service ahead of command wiring
+#   --read-only       serve the dashboard without inbound command, chat, or merge
+#                     writes and remove the watcher check
 # FM_HOME selects the home; scripts and the service always run from this
 # checkout. docs/dashboard-service.md owns the architecture and evidence.
 set -u

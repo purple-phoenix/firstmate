@@ -617,6 +617,11 @@ step = "chat-bubble"; const chatResult = await waitFor(`
   if (!bubble) return false;
   const text = bubble.querySelector(".fmdash-msg-text");
   const link = text.querySelector("a");
+  const privacy = document.querySelector(".fmdash-chat-note");
+  const composer = document.querySelector(".fmdash-composer");
+  privacy.open = true;
+  const privacyRect = privacy.getBoundingClientRect();
+  const composerRect = composer.getBoundingClientRect();
   return {
     text: text.textContent,
     injected: window.__xss === 1 || !!text.querySelector("img"),
@@ -624,6 +629,7 @@ step = "chat-bubble"; const chatResult = await waitFor(`
     state: bubble.querySelector(".fmdash-msg-state").textContent,
     noPageOverflow: document.documentElement.scrollWidth <= window.innerWidth,
     privacy: document.querySelector(".fmdash-chat-note").textContent.includes("not end-to-end application encryption"),
+    privacyClearOfComposer: privacyRect.bottom <= composerRect.top,
     width: window.innerWidth,
   };`);
 
@@ -677,6 +683,7 @@ JS
         && r.chat.state.includes("Sent to firstmate")
         && r.chat.noPageOverflow === true
         && r.chat.privacy === true
+        && r.chat.privacyClearOfComposer === true
         && r.review.facts.includes("https://github.com/example/repo/pull/12")
         && r.review.facts.includes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         && r.review.facts.includes("squash")
