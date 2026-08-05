@@ -307,7 +307,12 @@ test_preview_and_approve_validation() {
 # the guarded consumer with fake evidence and a fake merge owner: the full
 # click-to-merge path with refusal-first semantics.
 test_guarded_consumer_end_to_end() {
-  local out rc nonce
+  local i out rc nonce
+  for i in $(seq 1 60); do
+    printf '{"schema":"fm-dash-command.v1","id":"CAP-%02d","prompt":"ordinary"}\n' "$i" \
+      > "$HOME_DIR/state/dash-inbox/z-$i.json"
+    chmod 600 "$HOME_DIR/state/dash-inbox/z-$i.json"
+  done
   FM_HOME="$HOME_DIR" "$INBOX_SH" claim > "$TMP_ROOT/claim.out" || fail "inbox claim failed"
   assert_grep 'fm-dash-merge.sh' "$TMP_ROOT/claim.out" "claim guidance does not route merge approvals to the guarded consumer"
   # shellcheck disable=SC2016 # JavaScript template literals, not shell
@@ -320,7 +325,9 @@ test_guarded_consumer_end_to_end() {
       if (r.kind === "merge-approval") { console.log(r.nonce); break; }
     }
   ' "$HOME_DIR/state/dash-inbox/archive")
-  [ -n "$nonce" ] || fail "claimed merge approval not found in the archive"
+  [ -n "$nonce" ] || fail "archive pruning deleted an unconsumed merge approval"
+  [ "$(find "$HOME_DIR/state/dash-inbox/archive" -name '*.json' | grep -c .)" = 51 ] \
+    || fail "archive pruning did not retain 50 ordinary records plus the live merge approval"
 
   cat > "$TMP_ROOT/live-evidence.json" <<EOF
 {"schema":"fm-dash-pr-evidence.v1","task":"ready-safe","available":true,"eligible":true,"reason":null,
@@ -334,7 +341,7 @@ EOF
   [ "$rc" = 0 ] || fail "guarded consumer refused a valid approval (rc $rc): $out"
   assert_contains "$out" "merged: $PR_URL at $HEAD_A" "consumer did not report the merged outcome"
   [ "$(grep -c . "$MERGE_LOG")" = 1 ] || fail "the merge owner was not called exactly once"
-  assert_grep "ready-safe $PR_URL -- --squash" "$MERGE_LOG" "the merge owner call lost its bindings"
+  assert_grep "ready-safe $PR_URL -- --squash --match-head-commit $HEAD_A" "$MERGE_LOG" "the merge owner call lost its exact-head binding"
   [ -f "$HOME_DIR/state/dash-merge/consumed/$nonce" ] || fail "consumption ledger record missing"
   assert_grep 'outcome=merged' "$HOME_DIR/state/dash-merge/consumed/$nonce" "consumption outcome not recorded"
 
@@ -343,6 +350,13 @@ EOF
     EVIDENCE_FIXTURE="$TMP_ROOT/live-evidence.json" "$MERGE_SH" ready-safe 2>&1) || rc=$?
   [ "$rc" = 3 ] || fail "a replayed consumed approval was not refused with exit 3 (rc $rc): $out"
   [ "$(grep -c . "$MERGE_LOG")" = 1 ] || fail "a replay caused a second merge attempt"
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-new","prompt":"ordinary"}\n' \
+    > "$HOME_DIR/state/dash-inbox/zz-new.json"
+  chmod 600 "$HOME_DIR/state/dash-inbox/zz-new.json"
+  FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "post-consumption archive pruning failed"
+  if grep -R -l -F "\"nonce\": \"$nonce\"" "$HOME_DIR/state/dash-inbox/archive" >/dev/null 2>&1; then
+    fail "archive pruning retained an already-consumed merge approval"
+  fi
   pass "one approval merges exactly once through the guarded owner and can never merge again"
 }
 
@@ -576,6 +590,16 @@ step = "chat-nav"; await waitFor(`return document.querySelector('[data-dashboard
 step = "open-chat"; await evaluate(`location.hash = "#chat"; true;`);
 step = "chat-visible"; await waitFor(`const page = document.getElementById("chat"); return page && !page.hidden;`);
 step = "chat-send"; const chatProbe = await evaluate(`(async () => {
+  const nativeFetch = window.fetch.bind(window);
+  let dropFirstChatResponse = true;
+  window.fetch = async (...args) => {
+    const response = await nativeFetch(...args);
+    if (dropFirstChatResponse && String(args[0]).includes("/api/chat/send")) {
+      dropFirstChatResponse = false;
+      throw new Error("synthetic lost response");
+    }
+    return response;
+  };
   const input = document.querySelector(".fmdash-composer textarea");
   const send = document.querySelector(".fmdash-composer-row .fmdash-send");
   input.value = "Preview probe <img src=x onerror=window.__xss=1> https://example.ts.net/report";
@@ -583,6 +607,11 @@ step = "chat-send"; const chatProbe = await evaluate(`(async () => {
   return true;
 })()`);
 if (!chatProbe) throw new Error("chat composer not interactive");
+step = "chat-retry-ready"; await waitFor(`
+  const offline = document.querySelector(".fmdash-chat-offline");
+  const input = document.querySelector(".fmdash-composer textarea");
+  return offline && offline.classList.contains("fmdash-on") && input.value.includes("Preview probe");`);
+step = "chat-retry"; await evaluate(`document.querySelector(".fmdash-composer-row .fmdash-send").click(); true;`);
 step = "chat-bubble"; const chatResult = await waitFor(`
   const bubble = document.querySelector(".fmdash-msg-captain");
   if (!bubble) return false;
@@ -657,7 +686,8 @@ JS
       if (!ok) { console.error(raw); process.exit(1); }
     });
   ' || fail "browser preview assertions failed: $result"
-  [ -n "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null)" ] || fail "the browser chat send left no durable record"
+  [ "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null | grep -c .)" = 1 ] \
+    || fail "the browser retry did not reuse its draft idempotency key"
   # The browser click became a durable typed approval; consume it through the
   # real claim and the guarded consumer against the fake merge owner.
   FM_HOME="$HOME_DIR" "$INBOX_SH" claim >/dev/null || fail "claim after browser approval failed"

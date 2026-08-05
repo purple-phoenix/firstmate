@@ -216,7 +216,7 @@ if [ "$recheck" != ok ]; then
 fi
 
 write_outcome "merging" || true
-if "$MERGE_BIN" "$ID" "$R_URL" -- "--$R_METHOD"; then
+if "$MERGE_BIN" "$ID" "$R_URL" -- "--$R_METHOD" --match-head-commit "$R_HEAD"; then
   write_outcome "merged" || true
   echo "merged: $R_URL at $R_HEAD (approved by $R_BY via dashboard)"
   exit 0

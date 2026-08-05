@@ -2294,6 +2294,7 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         earlier.addEventListener("click", () => { if (oldestLoaded) refreshChat(oldestLoaded); });
         search.addEventListener("input", renderLog);
         let sending = false;
+        let pendingSend = null;
         async function sendChat() {
           if (sending) return;
           const text = input.value.trim();
@@ -2301,10 +2302,16 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
           sending = true;
           sendButton.disabled = true;
           sendButton.textContent = "Sending…";
-          const clientKey = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2, 10));
+          if (!pendingSend || pendingSend.text !== text) {
+            pendingSend = {
+              text,
+              clientKey: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2, 10)),
+            };
+          }
           try {
-            const res = await postJson2("/api/chat/send", { text, client_key: clientKey });
+            const res = await postJson2("/api/chat/send", { text, client_key: pendingSend.clientKey });
             const out = await res.json();
+            pendingSend = null;
             if (out.status === "queued" || out.status === "already-received") {
               input.value = "";
               offline.classList.remove("fmdash-on");

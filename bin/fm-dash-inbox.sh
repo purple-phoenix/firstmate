@@ -4,8 +4,9 @@
 # Single owner of state/dash-inbox/ consumption: listing pending
 # fm-dash-command.v1 records written by bin/fm-dash-serve.mjs and claiming them
 # durably. "claim" prints each record before archiving it under
-# state/dash-inbox/archive/ (newest 50 kept), so an interruption can re-surface
-# a command but can never silently lose one. Delivery is at-least-once across
+# state/dash-inbox/archive/ (newest 50 ordinary records plus every live,
+# unconsumed merge approval kept), so an interruption can re-surface a command
+# but can never silently lose one. Delivery is at-least-once across
 # interruption, and the capacity skill requires idempotency checks before
 # handling re-surfaced CAP actions, decision answers, idea verdicts, unpark
 # requests, recurring run-now requests, needs-you your-go requests, or exact
@@ -31,6 +32,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 INBOX="$STATE/dash-inbox"
 ARCHIVE="$INBOX/archive"
+MERGE_CONSUMED="$STATE/dash-merge/consumed"
 ARCHIVE_KEEP=50
 
 usage() {
@@ -63,11 +65,28 @@ print_record() {
 }
 
 prune_archive() {
-  local extra
-  extra=$(find "$ARCHIVE" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | tail -n +$((ARCHIVE_KEEP + 1)))
-  [ -n "$extra" ] || return 0
-  printf '%s\n' "$extra" | while IFS= read -r old; do
-    rm -f -- "$old"
+  local kept=0 old
+  find "$ARCHIVE" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | while IFS= read -r old; do
+    if node -e '
+      const fs = require("node:fs");
+      const path = require("node:path");
+      try {
+        const record = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        if (record.schema !== "fm-dash-command.v1" || record.kind !== "merge-approval") process.exit(1);
+        if (!/^[0-9a-f]{32}$/.test(record.nonce)) process.exit(1);
+        const expiry = Date.parse(record.expires_at);
+        if (!Number.isFinite(expiry) || Date.now() >= expiry) process.exit(1);
+        process.exit(fs.existsSync(path.join(process.argv[2], record.nonce)) ? 1 : 0);
+      } catch {
+        process.exit(1);
+      }
+    ' "$old" "$MERGE_CONSUMED"; then
+      continue
+    fi
+    kept=$((kept + 1))
+    if [ "$kept" -gt "$ARCHIVE_KEEP" ]; then
+      rm -f -- "$old"
+    fi
   done
 }
 
