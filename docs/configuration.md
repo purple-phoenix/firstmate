@@ -120,6 +120,8 @@ The optional persistent dashboard service publishes `data/capacity-dashboard.htm
 [`dashboard-service.md`](dashboard-service.md) owns its captain-facing capabilities and trust design.
 `config/dash.json` (local, gitignored, written by `bin/fm-dash-install.sh`) holds `port` (loopback service port, default 8847), `serve_port` (active tailnet HTTPS port, default 8443), `captain_logins` (the tailnet logins allowed to reach the service), `read_only` (serve, refresh, and auto-render without command dispatch), and `auto_refresh_seconds` (producer rerun interval, default 900, 0 disables); the service fails closed without a matching `Tailscale-User-Login` identity.
 The service reads the producer's opt-in `state/dash-refs.json` identity sidecar (`fm-capacity.mjs --refs`) to enrich the served page; the on-disk dashboard itself stays identity-opaque.
+A writable install also serves the captain chat destination and the exact PR merge approval flow owned by [`dashboard-service.md`](dashboard-service.md): chat records live under mode-0700 `state/dash-chat/` (`messages/`, `archive/`, and the one-reply-per-message `replies/` ledger consumed and written through `bin/fm-dash-chat.sh`), merge approvals ride `state/dash-inbox/` as typed `kind=merge-approval` records, and their one-time consumption ledger lives under `state/dash-merge/consumed/` (written only by `bin/fm-dash-merge.sh`).
+A registered `state/fm-dash.check.sh` makes the dashboard an armed inbound captain channel under the "Watcher check cadence" section below, so the home keeps a live supervision cycle and the 30-second cadence; `read_only: true` removes that check and refuses chat and merge routes along with dispatch.
 The dashboard renders self-clearing waits as a calm resumes-by-itself treatment distinct from blocked work that needs an actor: validation and CI may use estimates from their own past runs, future time gates use exact deadline math, and an ambiguous declared external delay shows elapsed time with "time unknown".
 A declared pause whose evidence shows the wait is on the captain instead renders as needs-your-action with no progress bar or ETA; `bin/fm-wait-progress.mjs` owns the estimator and the producer-owned private rolling record `data/capacity-wait-history.json` (`fm-capacity-wait-history.v1`) it estimates from, and `bin/fm-capacity.mjs --help` owns the honesty rules.
 `bin/fm-dash-serve.mjs --help` owns routes and the one-click allowlist, `bin/fm-dash-install.sh --help` owns launchd persistence and the never-Funnel tailscale serve wiring, and `bin/fm-dash-inbox.sh --help` owns command consumption.
@@ -375,7 +377,7 @@ This section is the single owner of when that default is replaced, and `bin/fm-c
 
 A home with an **armed inbound captain channel** sweeps every 30 seconds instead.
 A channel poll is the only thing that notices an inbound captain message, so a 300-second sweep is a 300-second delivery delay, which is the whole reason the faster cadence exists.
-The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), or both.
+The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), the dashboard command-and-chat channel (`state/fm-dash.check.sh`), or any combination.
 `bin/fm-supervision-lib.sh` owns that predicate for both purposes, so there is no second definition of "armed".
 
 The entire mechanism is one generated file, `config/check-cadence.env` (gitignored, mode 0600), whose canonical content declares `FM_CHECK_INTERVAL=30`.
@@ -518,6 +520,13 @@ FM_TG_DRY_RUN=          # truthy records replies to state/tg/outbox/ instead of 
 FM_TG_PAIR_WAIT=60      # default seconds bin/fm-tg-setup.sh pair listens for its one-time captain challenge
 FM_TG_TASK_UPDATE_MAX=3   # captain-facing updates per linked task before its final outcome; clamped to 998
 FM_TG_SECURITY_BIN=security   # keychain client used by the token owner, mainly for tests
+FM_DASH_CHAT_MAX_CHARS=4000   # longest accepted captain dashboard chat message
+FM_DASH_CHAT_REPLY_MAX_CHARS=8000   # longest fm-dash-chat.sh reply; longer material goes behind a link
+FM_DASH_CHAT_HISTORY_KEEP=500   # answered chat messages kept in the bounded history archive
+FM_DASH_MERGE_TTL_SECS=900    # dashboard merge-approval validity window; override is for tests only
+FM_DASH_PR_GH_BIN=gh          # gh binary used by the merge evidence probe, for tests only
+FM_DASH_PR_EVIDENCE_BIN=      # evidence-probe override for fm-dash-merge.sh, for tests only
+FM_DASH_PR_MERGE_BIN=         # merge-owner override for fm-dash-merge.sh, for tests only
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for the Stop auto-arm's claim, health, or fresh rewake epoch before re-blocking

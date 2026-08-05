@@ -4,8 +4,9 @@
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
 # work (a state/<id>.meta exists) or an inbound captain channel armed - an X-mode
-# relay poll (state/x-watch.check.sh) or the Telegram channel
-# (state/fm-telegram.check.sh) - and whether its watcher has a fresh liveness beacon
+# relay poll (state/x-watch.check.sh), the Telegram channel
+# (state/fm-telegram.check.sh), or the dashboard command-and-chat channel
+# (state/fm-dash.check.sh) - and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # The armed-channel half is also the cadence predicate; bin/fm-cadence.sh owns what
 # that means for FM_CHECK_INTERVAL.
@@ -25,12 +26,14 @@ fm_sup_stat_mtime() {
 
 # fm_supervision_channel_armed <state-dir>
 # Exit 0 (true) exactly when an inbound captain channel is armed in this home:
-# X-mode relay polling, the Telegram captain channel, or both. This is the single
-# owner of that predicate - bin/fm-cadence.sh reuses it, because a home that needs
-# a live cycle for a captain channel is exactly a home that needs it to poll fast.
+# X-mode relay polling, the Telegram captain channel, the dashboard
+# command-and-chat channel (its registered check delivers captain clicks and
+# chat messages), or any combination. This is the single owner of that
+# predicate - bin/fm-cadence.sh reuses it, because a home that needs a live
+# cycle for a captain channel is exactly a home that needs it to poll fast.
 fm_supervision_channel_armed() {
   local state=$1
-  [ -f "$state/x-watch.check.sh" ] || [ -f "$state/fm-telegram.check.sh" ]
+  [ -f "$state/x-watch.check.sh" ] || [ -f "$state/fm-telegram.check.sh" ] || [ -f "$state/fm-dash.check.sh" ]
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]

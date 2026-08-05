@@ -365,17 +365,27 @@ write_check() {
   cat > "$CHECK" <<'SHIM'
 #!/bin/sh
 # fm-dash watcher check - wakes firstmate when captain dashboard commands are
-# pending in state/dash-inbox/. Written and registered by bin/fm-dash-install.sh.
+# pending in state/dash-inbox/ or captain chat messages are pending in
+# state/dash-chat/messages/. Written and registered by bin/fm-dash-install.sh.
 state_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 inbox="$state_dir/dash-inbox"
-[ -d "$inbox" ] || exit 0
+chat="$state_dir/dash-chat/messages"
 count=0
-for f in "$inbox"/*.json; do
-  [ -e "$f" ] || continue
-  count=$((count + 1))
-done
-[ "$count" -gt 0 ] || exit 0
-printf 'dashboard: %s captain command(s) pending - run bin/fm-dash-inbox.sh claim and handle them under the capacity skill\n' "$count"
+if [ -d "$inbox" ]; then
+  for f in "$inbox"/*.json; do
+    [ -e "$f" ] || continue
+    count=$((count + 1))
+  done
+fi
+chat_count=0
+if [ -d "$chat" ]; then
+  for f in "$chat"/*.json; do
+    [ -e "$f" ] || continue
+    chat_count=$((chat_count + 1))
+  done
+fi
+[ "$count" -gt 0 ] || [ "$chat_count" -gt 0 ] || exit 0
+printf 'dashboard: %s captain command(s) and %s chat message(s) pending - run bin/fm-dash-inbox.sh claim and bin/fm-dash-chat.sh claim and handle them under the capacity skill\n' "$count" "$chat_count"
 SHIM
   chmod 700 "$CHECK"
   "$SCRIPT_DIR/fm-check-register.sh" fm-dash || err "could not register the fm-dash watcher check"

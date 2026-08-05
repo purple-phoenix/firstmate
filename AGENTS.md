@@ -72,7 +72,7 @@ config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inhe
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
-config/check-cadence.env  generated fast watcher check cadence for an armed inbound captain channel (X mode, Telegram, or both); LOCAL, gitignored; applied only through bin/fm-cadence.sh and never sourced
+config/check-cadence.env  generated fast watcher check cadence for an armed inbound captain channel (X mode, Telegram, the dashboard channel, or any combination); LOCAL, gitignored; applied only through bin/fm-cadence.sh and never sourced
 config/dash.json     optional capacity dashboard service settings (loopback port, authorized captain tailnet logins); LOCAL, gitignored; written by bin/fm-dash-install.sh (docs/dashboard-service.md)
 config/telegram.json config/telegram-token  optional Telegram captain-channel settings and its weaker fallback token file; LOCAL, gitignored; written by bin/fm-tg-setup.sh (section 15)
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -110,10 +110,12 @@ state/               volatile runtime signals; gitignored
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
-  fm-dash.check.sh   registered dashboard-service command poll; wakes firstmate while captain dashboard commands are pending (section 7; docs/dashboard-service.md)
+  fm-dash.check.sh   registered dashboard-service poll and armed-inbound-channel marker; wakes firstmate while captain dashboard commands or chat messages are pending (section 7; docs/dashboard-service.md)
   fm-telegram.check.sh  registered Telegram captain-channel poll; wakes firstmate while captain messages are pending (section 15)
   tg/                durable Telegram message queue, update cursor, and reply ledger; present only when the channel is configured (section 15)
-  dash-inbox/        durable captain commands clicked on the served capacity dashboard; delivered at least once with idempotency checks under the capacity skill
+  dash-inbox/        durable captain commands clicked on the served capacity dashboard, including typed exact merge approvals; delivered at least once with idempotency checks under the capacity skill
+  dash-chat/         durable captain dashboard chat: messages/, claimed archive/, and the one-reply-per-message replies/ ledger owned by bin/fm-dash-chat.sh
+  dash-merge/        one-time merge-approval consumption ledger written only by bin/fm-dash-merge.sh
   dash-refs.json     producer-owned private mapping from opaque dashboard references to real identities, written by fm-capacity.mjs --refs for the authenticated dashboard service
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .wake-queue.seq    monotonic wake sequence used to distinguish a normal watcher wake handoff from a silent arm-cycle death
@@ -323,6 +325,7 @@ For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher for merge detection plus GitHub ready-PR preview liveness.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
+A dashboard exact merge approval is explicit authority for that one PR version only after `bin/fm-dash-merge.sh` validates and consumes it; the capacity skill and `docs/dashboard-service.md` own that flow, and no other dashboard or chat input authorizes a merge.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
@@ -345,7 +348,7 @@ When the captain invokes `/user-journey-audit` or explicitly asks for a user-jou
 That invocation narrowly authorizes confirmed ordinary reversible bug implementation, never feature implementation or merge, and the skill owns the conditional procedure.
 
 When the captain invokes `/capacity` or asks about capacity, bottlenecks, pipeline utilization, work supply, idle lanes, or maximizing fleet throughput, load `capacity`.
-Also load `capacity` on a `check:` wake naming `fm-dash.check.sh`: it delivers captain-clicked dashboard commands, and the skill owns their claim and handling.
+Also load `capacity` on a `check:` wake naming `fm-dash.check.sh`: it delivers captain-clicked dashboard commands, exact merge approvals, and captain chat messages, and the skill owns their claim and handling.
 That read-mostly skill owns the conditional procedure and must never invent work, dispatch for utilization, or weaken lifecycle safety.
 
 ## 8. Supervision protocol

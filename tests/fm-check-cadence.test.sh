@@ -4,11 +4,11 @@
 # "Watcher check cadence".
 #
 # The contract under test: a home with an armed inbound captain channel (X-mode
-# relay polling, the Telegram captain channel, or both) generates ONE
-# config/check-cadence.env exporting FM_CHECK_INTERVAL=30; a home with neither
-# has no such file and keeps fm-watch.sh's 300s default. Both channels share the
-# single file, so two armed channels never produce two config owners or two
-# supervision cycles.
+# relay polling, the Telegram captain channel, the dashboard command-and-chat
+# channel, or any combination) generates ONE config/check-cadence.env exporting
+# FM_CHECK_INTERVAL=30; a home with none has no such file and keeps
+# fm-watch.sh's 300s default. All channels share the single file, so several
+# armed channels never produce two config owners or two supervision cycles.
 #
 # Nothing here touches a real bot, token, pairing, inbox, or reply ledger: the
 # armed state of each channel is exactly the presence of its generated check
@@ -50,7 +50,8 @@ path_mode() {
 
 arm_x()        { : > "$1/state/x-watch.check.sh"; }
 arm_telegram() { : > "$1/state/fm-telegram.check.sh"; }
-disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.sh; }
+arm_dash()     { : > "$1/state/fm-dash.check.sh"; }
+disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.sh "$1"/state/fm-dash.check.sh; }
 
 # The cadence a watcher process would actually start with through the validated
 # launch boundary.
@@ -101,6 +102,24 @@ test_x_only_home_goes_fast() {
     "arming X mode must announce the 30s cadence"
   assert_interval "$home" 30 "an X-only home must keep its existing 30s cadence"
   pass "an X-only home is unchanged: still the 30s cadence"
+}
+
+test_dashboard_only_home_goes_fast() {
+  local home out
+  home=$(make_home dash-only)
+  arm_dash "$home"
+  out=$(cadence "$home" reconcile)
+  assert_contains "$out" "CADENCE: 30s check cadence armed for the dashboard channel" \
+    "arming the dashboard channel must announce the 30s cadence"
+  assert_present "$home/config/check-cadence.env" "the dashboard channel alone must arm the cadence file"
+  assert_interval "$home" 30 "a dashboard-only home must start its watcher at 30s"
+  # Removing the dashboard check restores the default like any other channel.
+  disarm "$home"
+  out=$(cadence "$home" reconcile)
+  assert_contains "$out" "CADENCE: default 300s check cadence restored" \
+    "disarming the dashboard channel must restore the default"
+  assert_interval "$home" 300 "a disarmed dashboard home must return to 300s"
+  pass "an installed writable dashboard is an armed captain channel on the 30s cadence"
 }
 
 test_both_channels_share_one_cadence_owner() {
@@ -371,6 +390,7 @@ test_path_command_needs_no_home_state() {
 test_default_home_keeps_the_default_cadence
 test_telegram_only_home_goes_fast
 test_x_only_home_goes_fast
+test_dashboard_only_home_goes_fast
 test_both_channels_share_one_cadence_owner
 test_dropping_one_of_two_channels_stays_fast
 test_reconcile_is_idempotent

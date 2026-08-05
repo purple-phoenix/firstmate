@@ -1,7 +1,7 @@
 # Persistent tailnet-only capacity dashboard service
 
-This document owns the architecture narrative, trust design, and verification evidence for the always-on capacity dashboard.
-Mechanics live with their owners: `docs/configuration.md` (config schema), `bin/fm-dash-serve.mjs --help` (routes and one-click allowlist), `bin/fm-dash-install.sh --help` (persistence and tailscale wiring), `bin/fm-dash-inbox.sh --help` (command consumption), and the capacity skill (handling semantics for delivered commands).
+This document owns the architecture narrative, trust design, and verification evidence for the always-on capacity dashboard, including its captain chat destination and exact PR merge approval flow.
+Mechanics live with their owners: `docs/configuration.md` (config schema), `bin/fm-dash-serve.mjs --help` (routes and one-click allowlist), `bin/fm-dash-install.sh --help` (persistence and tailscale wiring), `bin/fm-dash-inbox.sh --help` (command consumption), `bin/fm-dash-chat.sh --help` (chat claiming and replies), `bin/fm-dash-pr-evidence.mjs` (read-only merge evidence), `bin/fm-dash-merge.sh --help` (guarded merge-approval consumption), and the capacity skill (handling semantics for delivered commands).
 
 ## What it is
 
@@ -28,6 +28,7 @@ The service publishes the producer-generated `data/capacity-dashboard.html` at o
 - The Ideas page renders `data/ideas/idea-backlog.md`; each idea opens its pitch (`data/ideas/pitches/IDEA-XX.md` when present, else the concept summary) with Approve, Deny, and Add-suggestions controls.
 - The producer's collapsed parking lot of captain-parked work (active hold kind `parked`, kept out of the blocked band by `bin/fm-capacity.mjs`) is enriched with each item's real title, park reason, and backlog `since` date labeled "on the books since", plus an Unpark button; the click only enqueues an `unpark` command record and firstmate lifts the hold through the normal backlog lifecycle.
 - The producer's calm Recurring section of scheduled cadence work (active hold kind `future` with a still-future `--until` date, kept out of the blocked band by `bin/fm-capacity.mjs`) is enriched with each item's real title, schedule reason, and last completed run with its recorded artifact link, plus a Run now button; the click only enqueues a `run-now` command record and firstmate lifts the schedule hold and dispatches through the normal lifecycle.
+- A Chat destination gives the captain a phone-ready conversation with the same Firstmate agent over the tailnet, and an approval-ready task with a green GitHub PR gets an exact merge review; both are served-page abilities owned by their sections below, and the offline file carries neither.
 - A service bar shows how many captain commands are queued for firstmate.
 - Every acknowledgeable action or verdict acknowledges instantly: the served page renders its state straight from the durable command channel, so a pending record renders "Sent to firstmate - in progress", a claimed record renders "Received - being worked" with its claim time, and a claimed click within the last six hours keeps a re-emitted stable action ID rendered as previously approved or denied instead of a bare verdict control.
 - Acknowledgment labels remain readable at narrow phone widths by stacking into the prompt's single content column.
@@ -47,9 +48,15 @@ The on-disk dashboard stays identity-opaque: the producer's opt-in `--refs` side
 
 - `bin/fm-dash-serve.mjs` - the HTTP service, bound to 127.0.0.1 only.
 - `bin/fm-dash-install.sh` - launchd agent (`RunAtLoad` + `KeepAlive`, so it survives reboots and crashes), `tailscale serve` mapping, `config/dash.json`, and the registered `fm-dash` watcher check.
-- `state/dash-inbox/` - durable captain command records (`fm-dash-command.v1`), one file per clicked action.
-- `state/fm-dash.check.sh` - watcher check registered through `bin/fm-check-register.sh`; prints one line while commands are pending so the watcher wakes firstmate.
+- `state/dash-inbox/` - durable captain command records (`fm-dash-command.v1`), one file per clicked action or merge approval.
+- `state/dash-chat/` - durable captain chat records: `messages/` (unclaimed `fm-dash-chat-message.v1`), `archive/` (claimed), and `replies/` (the one-per-message `fm-dash-chat-reply.v1` ledger).
+- `state/dash-merge/consumed/` - the merge-approval consumption ledger: one nonce-named outcome record per consumed approval, written only by `bin/fm-dash-merge.sh`.
+- `state/fm-dash.check.sh` - watcher check registered through `bin/fm-check-register.sh`; prints one line while commands or chat messages are pending so the watcher wakes firstmate.
+  Its presence makes the dashboard an armed inbound captain channel under `bin/fm-supervision-lib.sh`, so the home keeps a live supervision cycle and the 30-second check cadence exactly like Telegram and X mode.
 - `bin/fm-dash-inbox.sh` - firstmate's list/claim helper; claim prints each record before archiving it under `state/dash-inbox/archive/`, so an interruption may re-surface a command but cannot silently lose one.
+- `bin/fm-dash-chat.sh` - firstmate's chat claim/reply helper with the same print-before-archive delivery shape plus a create-only reply ledger, so a message is delivered at least once and answered at most once.
+- `bin/fm-dash-pr-evidence.mjs` - the read-only trusted probe that turns a task's recorded GitHub PR into typed merge-review evidence; it never mutates anything.
+- `bin/fm-dash-merge.sh` - the only consumer of merge-approval records; it revalidates every binding, claims the one-time nonce, independently rechecks the live PR, and merges exclusively through `bin/fm-pr-merge.sh`.
 
 ## Inbound command channel
 
@@ -65,7 +72,7 @@ The design keeps the web process outside every fleet-mutation path:
 
 Consequences of that shape:
 
-- The service holds no session with firstmate, no terminal access, and no merge, dispatch, or teardown capability; compromise of the web process yields at most bogus dashboard command records, which firstmate still re-resolves through every normal lifecycle authority check.
+- The service holds no session with firstmate, no terminal access, and no direct merge, dispatch, or teardown capability; compromise of the web process yields at most bogus dashboard command, chat, or approval records, which firstmate still re-resolves through every normal lifecycle authority check - a forged merge approval additionally fails `bin/fm-dash-merge.sh`'s independent live recheck unless the named PR genuinely is the open, green, captain-ready one recorded on the task.
 - Delivery is durable: a click made while firstmate is down waits in the inbox and is delivered on the next watcher cycle or session start sweep of pending checks.
 - Delivery latency is the watcher check cadence, not instantaneous; the page acknowledges the click instantly from the durable record, then says honestly that the command is queued for firstmate rather than pretending execution.
 - Commands survive service restarts, firstmate restarts, and reboots because the inbox is plain durable state.
@@ -90,9 +97,51 @@ Dispatch is validated against records the server itself reads:
 - An unpark request must name an item the currently served dashboard itself lists in its parking lot and resolve through the current-generation refs sidecar; the record only asks firstmate to lift the parked hold through the normal backlog lifecycle, and the service never edits any backlog.
 - A run-now request must name an item the currently served dashboard itself lists as recurring and resolve through the current-generation refs sidecar; the record only asks firstmate to lift the schedule hold and dispatch through the normal lifecycle, and the service never edits any backlog or dispatches work itself.
 - A your-go request must name an item the currently served dashboard itself lists as awaiting the captain (a `data-your-go-ref` anchor) and resolve through the current-generation refs sidecar, with one of the go, park, or guidance actions; the record only routes the captain's verdict to firstmate for normal-lifecycle re-resolution, a your-go answer for a decision shares that decision's durable acknowledgment identity, and a newer verdict for the same item replaces its pending predecessor under a fresh immutable inbox name.
-- The only free text accepted anywhere is bounded captain-authored content: an idea-suggestion note, decision custom answer, or your-go guidance note authenticated as above and delivered as data for Firstmate, never interpreted or executed by the service.
+- A chat message must be bounded, well-formed text (length-capped, malformed Unicode and control characters refused, backpressure past the pending bound) with a valid client idempotency key, and is stored verbatim as data for Firstmate, never interpreted, executed, or rendered as markup.
+- A merge preview or approval must name a currently listed approval-ready item that resolves through the current-generation refs sidecar to a main-home task with a canonical GitHub PR; the approval is written only when the server's own fresh forge evidence is eligible and matches what the captain reviewed, and it is consumed only by `bin/fm-dash-merge.sh`.
+- The only free text accepted anywhere is bounded captain-authored content: a chat message, idea-suggestion note, decision custom answer, or your-go guidance note authenticated as above and delivered as data for Firstmate, never interpreted or executed by the service.
 - A newer approve or deny verdict is published under a fresh immutable inbox name before the unchanged older pending verdict is removed, while suggestions remain additive.
-- Destructive, irreversible, and security-sensitive choices stay in captain chat structurally: no current `CAP-NN` prompt grants such authority, the capacity skill forbids treating a dashboard approval as merge or discard authority, decision records carry an explicit re-confirm-in-chat boundary for destructive consequences, and firstmate re-resolves every claimed command through the normal lifecycle before acting.
+- Destructive, irreversible, and security-sensitive choices stay in trusted channels structurally, with exactly one deliberately engineered exception: a validated exact PR merge approval (its own section below).
+  No `CAP-NN` prompt, chat message, decision answer, your-go click, or generic control grants such authority; decision records carry an explicit re-confirm-in-chat boundary for destructive consequences, and firstmate re-resolves every claimed command through the normal lifecycle before acting.
+  There is no free-form command field, shell allowlist, generic action executor, or plugin registry, and an inbox record of any unknown sensitive kind is refused and routed to trusted discussion rather than interpreted.
+
+## Captain chat
+
+The authenticated served page carries a Chat destination: a phone-ready conversation with the same firstmate agent, inside the same service, identity checks, and supervision cycle - not a second agent, service, webhook, or watcher.
+It exists for the same reason the Telegram channel does - SSH from a phone is miserable - but stays entirely on the tailnet.
+
+- A sent message becomes one bounded `fm-dash-chat-message.v1` record in `state/dash-chat/messages/` (atomic rename, mode 0600), carrying the authenticated captain login and a client idempotency key, so double-taps, retries, and concurrent tabs never create a second record.
+- The registered `fm-dash` watcher check counts unclaimed chat messages exactly like pending commands, so delivery rides the same wake path on the 30-second armed-channel cadence; no new poller, daemon, or process exists.
+- `bin/fm-dash-chat.sh claim` prints each message before archiving it (at-least-once delivery), and `bin/fm-dash-chat.sh reply <message_id> --text-file <path>` records the answer through a create-only ledger that refuses a second reply, so an interrupted turn can replay delivery without ever double-answering.
+- The page renders sent, received, and answered states straight from those directories, keeps a bounded searchable history with load-earlier paging, and prunes only answered messages beyond the configured bound.
+- Chat text is captain input for firstmate to read - never shell, a path, script source, or HTML.
+  Both sides of the conversation render as text nodes; the only markup ever created from content is a safe `https://` link.
+  A chat message carries no authority by itself: instructions re-enter the normal lifecycle, and merge, destructive, irreversible, and security-sensitive asks keep their existing confirmation boundaries.
+- The privacy statement shown in the UI is the honest one: traffic between the captain's device and the firstmate machine is protected by Tailscale WireGuard encryption plus HTTPS, including across DERP relays, but this is not end-to-end application encryption - content is plaintext at the two endpoints, and local history is protected by endpoint security and FileVault rather than application-level content encryption.
+- Credentials are never solicited or wanted here: the UI warns that passwords, keys, tokens, and recovery codes go to the terminal or keychain, and firstmate never asks for one in chat.
+- Long reports, evidence boards, and test output stay behind tailnet-only links rather than being pasted into chat.
+- There are no content-bearing push notifications; the conversation is fetched over the tailnet when the captain opens the page.
+
+## Exact PR merge approval
+
+The one deliberately engineered sensitive action: the captain can approve merging one exact, reviewed pull-request version from the dashboard.
+Every other destructive, irreversible, or security-sensitive action keeps its trusted-channel boundary, and unknown sensitive action kinds are refused.
+
+The flow keeps the web process outside the merge path end to end:
+
+1. The producer marks a task approval-ready exactly as before; the served page offers "Review merge…" only for such a row whose main-home task records a canonical GitHub PR.
+2. Opening the review spawns the read-only `bin/fm-dash-pr-evidence.mjs` probe server-side (never with client-supplied input; the task and URL come from the server-read refs sidecar and task record).
+   The confirmation surface shows the full canonical PR URL, repository and PR number, title, base branch, the exact immutable head SHA, merge method, the current check set with each result, recorded risk and validation mode where available, and the approval validity window.
+3. A merge control is active only when the fresh evidence shows an open, non-draft, mergeable PR whose current checks are all terminal green - a superset of the required-check set, so it is never weaker than branch protection.
+   Draft, red, pending, closed, merged, conflicting, unreadable, unknown-head, or missing-evidence PRs render an honest refusal with no active control.
+4. Approval requires a separate explicit confirmation - a review attestation naming the PR number and exact version, then a dedicated approve action - never a generic Go-ahead or a chat message.
+5. The service re-probes the forge, requires the client-echoed URL, head SHA, check-set identity, and method to match its own fresh evidence, and writes one typed `kind=merge-approval` record bound immutably to the canonical URL, repository, number, exact head SHA, task identity, merge method, check-set/result identity, captain tailnet login, creation time, short expiry, and a one-time nonce.
+   Any change to code, checks, method, task, login, or mergeability between review and consumption invalidates the approval.
+6. Firstmate claims the record through the normal inbox and hands it ONLY to `bin/fm-dash-merge.sh`, which revalidates every binding, claims the nonce with a create-only consumption record BEFORE any merge attempt (so replays, concurrent runs, replaced records, and crash-restarts can never merge twice), independently rechecks the live PR through the evidence probe, and merges exclusively through the guarded `bin/fm-pr-merge.sh` owner.
+   A consumed, expired, or invalidated approval never regains authority; the captain approves again from a fresh review.
+
+A validated exact dashboard merge approval is the captain's explicit merge word for that one PR version.
+Approval never comes from chat prose, a dashboard visit, a generic decision, prior PR approval, or a stale or already-consumed record.
 
 ## Decision options document
 
@@ -155,3 +204,8 @@ The launchd bootstrap and live `tailscale serve` mapping mutate the host machine
 Same date and environment: supervisor-home decision projection passed through `bash tests/fm-fleet-snapshot-view.test.sh` (16 tests), the capacity refs regression, and the live dashboard-service regression; a structured remote record rendered its title, context, recommendation marker, options, and approval flow, while a concrete unreadable reason and a bounded-out home rendered honest unavailable rows whose generic controls still wrote valid commands, and the main-home detail response stayed unchanged.
 2026-07-31, macOS 15.6, node v26.5.0: `bash tests/fm-capacity.test.sh` and `bash tests/fm-dash.test.sh` passed against the four-question brief, canonical work and live-agent projections, active-first person ordering, focused page routing, Ideas-page enrichment, bounded recent-completion wording, 320-390px stacking, and preserved narrow-screen captain controls.
 2026-08-01, macOS 15.6, node v26.5.0: `bash tests/fm-capacity.test.sh` and `bash tests/fm-dash.test.sh` passed with self-clearing waits excluded from Brief Stuck but retained on Work and in the manifest, the existing primary recommendation projected through the same stable action path, and a served Chrome DevTools layout probe confirming the row and its action control fit without page overflow at exactly 390px.
+2026-08-05, macOS 15.6, node v26.5.0, ShellCheck 0.11.0: captain chat and exact merge approval passed end to end.
+`bash tests/fm-dash.test.sh` (32 tests) covered the serve-layer-only chat destination with its honest transport statement and credential warning; identity failing closed on every chat route with no record written; refusal of empty, oversized, malformed-Unicode, control-character, and keyless messages; captain text stored verbatim as data and never appearing in served HTML; client-key idempotency across retries and concurrent tabs; at-least-once claim delivery with at-most-once ledgered replies and sent/received/answered states rendered from the durable records; the wake shim counting commands and chat messages in one line; and read-only mode refusing chat and merge routes.
+`bash tests/fm-dash-merge.test.sh` (5 tests) covered the evidence probe's eligibility matrix (draft, red, pending, closed, merged, conflicting, unreadable, non-GitHub, and missing-evidence PRs all refused); preview and approval validating identity, row currency, fresh-evidence echo cross-check, and eligibility before writing one mode-0600 typed record bound to URL, repository, number, exact head, method, check-set identity, captain login, expiry, and nonce; the guarded consumer merging exactly once through the (fake) merge owner with the full refusal matrix - expired, wrong-login, non-GitHub, wrong-PR, symlinked, malformed, and task-mismatched records refused; head or check changes at the independent live recheck invalidating the consumed approval; a crash-claimed nonce and a failed attempt never retrying - and a live headless Chrome preview that sent chat at 390px (markup-bearing text rendered inert, https link safe, no page overflow) and click-approved one exact merge on desktop through review, attestation, and confirmation into the durable record that the real claim path delivered to the guarded consumer exactly once, plus the red-PR refusal rendering with no active control.
+`bash tests/fm-check-cadence.test.sh` confirmed the installed writable dashboard is an armed inbound captain channel on the shared 30-second cadence.
+No real PR, forge, merge, live dashboard service, tailscale mapping, or launchd state was touched: gh, the evidence probe, and the merge owner were fixture fakes throughout.
