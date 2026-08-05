@@ -27,7 +27,7 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 The default cross-harness mode exits silently with no work in flight.
-Claude's `--claude` mode also treats an armed inbound captain channel - `state/x-watch.check.sh` or `state/fm-telegram.check.sh` - as supervision need, so relay and Telegram polling remain guarded without an in-flight task.
+Claude's `--claude` mode also treats an armed inbound captain channel - `state/x-watch.check.sh`, `state/fm-telegram.check.sh`, or `state/fm-dash.check.sh` - as supervision need, so relay, Telegram, and writable dashboard polling remain guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.

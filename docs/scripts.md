@@ -21,6 +21,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-dash-serve.mjs`      | Serve the capacity dashboard tailnet-only with captain-authenticated interactions (docs/dashboard-service.md) |
 | `fm-dash-install.sh`     | Install the persistent dashboard service: launchd agent, never-Funnel tailscale serve mapping, and registered fm-dash check |
 | `fm-dash-inbox.sh`       | List and claim durable captain dashboard commands from `state/dash-inbox/`           |
+| `fm-dash-chat.sh`        | Claim captain dashboard chat messages and record the one reply per message           |
+| `fm-dash-pr-evidence.mjs` | Read-only typed merge-review evidence for one task's recorded GitHub PR             |
+| `fm-dash-merge.sh`       | Validate and one-time-consume an exact dashboard merge approval through the guarded merge owner |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-task-add.sh`         | Create backlog items with creation-time task-ID validation and safe mint fitting     |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |

@@ -8,6 +8,7 @@ set -u
 
 SERVE="$ROOT/bin/fm-dash-serve.mjs"
 INBOX_SH="$ROOT/bin/fm-dash-inbox.sh"
+CHAT_SH="$ROOT/bin/fm-dash-chat.sh"
 INSTALL_SH="$ROOT/bin/fm-dash-install.sh"
 CAPACITY="$ROOT/bin/fm-capacity.mjs"
 TMP_ROOT=$(fm_test_tmproot fm-dash)
@@ -1094,6 +1095,18 @@ EOF
   [ "$REQ_STATUS" = 403 ] || fail "read-only dispatch was not refused (got $REQ_STATUS)"
   req POST "http://127.0.0.1:$PORT/api/dispatch" "$CAPTAIN" '{"idea":"IDEA-01","verdict":"approve"}'
   [ "$REQ_STATUS" = 403 ] || fail "read-only idea verdict was not refused (got $REQ_STATUS)"
+  assert_contains "$RESP" 'refused' "read-only refusal is not explicit"
+  assert_contains "$(req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"; printf %s "$RESP")" '"chat":false' "read-only page still declares the chat destination"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"hello","client_key":"read-only-key-1"}'
+  [ "$REQ_STATUS" = 403 ] || fail "read-only chat send was not refused (got $REQ_STATUS)"
+  [ ! -d "$HOME_DIR/state/dash-chat/messages" ] || [ -z "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null)" ] \
+    || fail "read-only chat send wrote a record"
+  req GET "http://127.0.0.1:$PORT/api/chat/history" "$CAPTAIN"
+  [ "$REQ_STATUS" = 403 ] || fail "read-only chat history was not refused (got $REQ_STATUS)"
+  req GET "http://127.0.0.1:$PORT/api/merge/preview?ref=item-01" "$CAPTAIN"
+  [ "$REQ_STATUS" = 403 ] || fail "read-only merge preview was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/merge/approve" "$CAPTAIN" '{"ref":"item-01"}'
+  [ "$REQ_STATUS" = 403 ] || fail "read-only merge approve was not refused (got $REQ_STATUS)"
   stop_server
   write_config "$HOME_DIR" "$PORT"
   pass "read-only mode serves the page and refuses every mutation"
@@ -1108,9 +1121,22 @@ test_check_shim_wakes_only_when_pending() {
   pending_record="$HOME_DIR/state/dash-inbox/1-test-CAP-06.json"
   printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x"}\n' > "$pending_record"
   out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
-  assert_contains "$out" '1 captain command(s) pending' "check shim did not report the pending command"
+  assert_contains "$out" '1 captain command(s) and 0 chat message(s) pending' "check shim did not report the pending command"
   assert_contains "$out" 'fm-dash-inbox.sh claim' "check shim does not name the claim helper"
+  assert_contains "$out" 'fm-dash-chat.sh claim' "check shim does not name the chat claim helper"
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "check shim printed more than one line"
+  local chat_record="$HOME_DIR/state/dash-chat/messages/1754000000-00c0ffee.json"
+  mkdir -p "$HOME_DIR/state/dash-chat/messages"
+  printf '{"schema":"fm-dash-chat-message.v1","message_id":"1754000000-00c0ffee","text":"hi"}\n' > "$chat_record"
+  out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
+  assert_contains "$out" '1 captain command(s) and 1 chat message(s) pending' "check shim did not count the pending chat message"
+  rm -f "$pending_record"
+  out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
+  assert_contains "$out" '0 captain command(s) and 1 chat message(s) pending' "check shim did not wake on a chat message alone"
+  rm -f "$chat_record"
+  out=$(sh "$HOME_DIR/state/fm-dash.check.sh")
+  [ -z "$out" ] || fail "check shim woke with nothing pending: $out"
+  printf '{"schema":"fm-dash-command.v1","id":"CAP-06","prompt":"x"}\n' > "$pending_record"
   FM_HOME="$HOME_DIR" "$INSTALL_SH" unregister-check >/dev/null || fail "unregister-check failed"
   [ ! -e "$HOME_DIR/state/fm-dash.check.sh" ] || fail "unregister-check left the watcher check installed"
   [ ! -e "$HOME_DIR/state/fm-dash.check-trust" ] || fail "unregister-check left the watcher trust registration installed"
@@ -1398,7 +1424,7 @@ test_served_page_has_zero_copy_affordances() {
 test_acknowledgment_stacks_at_narrow_viewports() {
   req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
   assert_contains "$RESP" '.fmdash-ack{display:inline-block' "served dashboard lacks the desktop acknowledgment style"
-  assert_contains "$RESP" '@media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}}' \
+  assert_contains "$RESP" '@media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer{position:static}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}' \
     "390px acknowledgment does not return to the prompt's single explicit grid column"
   pass "acknowledged prompts stack in one explicit column at narrow viewports"
 }
@@ -1548,6 +1574,117 @@ JS
   pass "served Recommended next and its existing action path fit a 390px browser viewport"
 }
 
+test_chat_destination_is_serve_layer_only() {
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "served page read failed (got $REQ_STATUS)"
+  assert_contains "$RESP" '"chat":true' "served page does not declare the chat destination"
+  assert_contains "$RESP" 'fmdash-chatpage' "served page lacks the chat page"
+  assert_contains "$RESP" 'Chat with your firstmate' "served page lacks the chat heading"
+  assert_contains "$RESP" '/api/chat/history' "served chat does not read the durable history"
+  assert_contains "$RESP" 'Tailscale WireGuard encryption plus HTTPS' "served chat omits the honest transport statement"
+  assert_contains "$RESP" 'not end-to-end application encryption' "served chat overstates the encryption guarantee"
+  assert_contains "$RESP" 'Never send passwords, API keys, tokens, or recovery codes here' "served chat omits the credential warning"
+  assert_not_contains "$(cat "$HOME_DIR/data/capacity-dashboard.html")" 'fmdash-chatpage' "the offline artifact grew the chat destination"
+  assert_not_contains "$(cat "$HOME_DIR/data/capacity-dashboard.html")" '/api/chat/' "the offline artifact talks to the chat API"
+  pass "chat exists only on the authenticated served page, with an honest privacy statement"
+}
+
+test_chat_identity_and_content_validation() {
+  local stored file
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "" '{"text":"anyone there?","client_key":"stranger-key-01"}'
+  [ "$REQ_STATUS" = 403 ] || fail "identity-less chat send was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "mallory@example.com" '{"text":"open the pod bay doors","client_key":"stranger-key-02"}'
+  [ "$REQ_STATUS" = 403 ] || fail "wrong-identity chat send was not refused (got $REQ_STATUS)"
+  req GET "http://127.0.0.1:$PORT/api/chat/history" "mallory@example.com"
+  [ "$REQ_STATUS" = 403 ] || fail "wrong-identity chat history was not refused (got $REQ_STATUS)"
+  [ -z "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null)" ] || fail "a refused chat send left a record"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"","client_key":"captain-key-01"}'
+  [ "$REQ_STATUS" = 400 ] || fail "empty chat message was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" "{\"text\":\"$(printf 'a%.0s' $(seq 1 4001))\",\"client_key\":\"captain-key-02\"}"
+  [ "$REQ_STATUS" = 400 ] || fail "oversized chat message was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"broken \ud800 surrogate","client_key":"captain-key-03"}'
+  [ "$REQ_STATUS" = 400 ] || fail "malformed-unicode chat message was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"bell \u0007 char","client_key":"captain-key-04"}'
+  [ "$REQ_STATUS" = 400 ] || fail "control-character chat message was not refused (got $REQ_STATUS)"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"no key"}'
+  [ "$REQ_STATUS" = 400 ] || fail "keyless chat message was not refused (got $REQ_STATUS)"
+  [ -z "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null)" ] || fail "a refused chat message left a record"
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"<script>alert(1)</script> up for a status? https://example.ts.net/report","client_key":"captain-key-05"}'
+  [ "$REQ_STATUS" = 200 ] || fail "valid chat send failed (got $REQ_STATUS)"
+  assert_contains "$RESP" '"status":"queued"' "valid chat send did not queue"
+  file=$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' | head -1)
+  [ -n "$file" ] || fail "queued chat message left no durable record"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$file")" = 600 ] || fail "chat record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$file")" = 600 ] || fail "chat record is not mode 0600" ;;
+  esac
+  stored=$(cat "$file")
+  assert_contains "$stored" '"schema": "fm-dash-chat-message.v1"' "chat record lacks its schema"
+  assert_contains "$stored" "\"requested_by\": \"$CAPTAIN\"" "chat record lacks the authenticated captain identity"
+  req GET "http://127.0.0.1:$PORT/api/chat/history" "$CAPTAIN"
+  [ "$REQ_STATUS" = 200 ] || fail "chat history read failed (got $REQ_STATUS)"
+  assert_contains "$RESP" '<script>alert(1)</script>' "chat history does not return the captain text verbatim as JSON data"
+  req GET "http://127.0.0.1:$PORT/" "$CAPTAIN"
+  assert_not_contains "$RESP" '<script>alert(1)</script>' "captain chat text leaked into the served HTML"
+  pass "chat fails closed on identity and refuses oversized, malformed, control-character, and keyless content"
+}
+
+test_chat_idempotency_and_duplicate_sends() {
+  local first_id count
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"double tap","client_key":"captain-dup-key"}'
+  [ "$REQ_STATUS" = 200 ] || fail "first duplicate-key send failed"
+  first_id=$(printf '%s' "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).message_id))')
+  req POST "http://127.0.0.1:$PORT/api/chat/send" "$CAPTAIN" '{"text":"double tap","client_key":"captain-dup-key"}'
+  [ "$REQ_STATUS" = 200 ] || fail "second duplicate-key send failed"
+  assert_contains "$RESP" '"status":"already-received"' "duplicate client key did not deduplicate"
+  assert_contains "$RESP" "$first_id" "duplicate send did not return the original message"
+  count=$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' | grep -c 'json' || true)
+  [ "$count" = 2 ] || fail "duplicate client key created a second record (have $count, expected 2 including the prior test's message)"
+  pass "the same client key from a retry or concurrent tab never creates a second message"
+}
+
+test_chat_claim_reply_states_and_replay() {
+  local out ids id reply_file history
+  out=$(FM_HOME="$HOME_DIR" "$CHAT_SH" list)
+  assert_contains "$out" 'pending: 2 captain chat message(s)' "chat list does not show pending messages"
+  req GET "http://127.0.0.1:$PORT/api/chat/history" "$CAPTAIN"
+  assert_contains "$RESP" '"state":"sent"' "an unclaimed message does not render as sent"
+  out=$(FM_HOME="$HOME_DIR" "$CHAT_SH" claim)
+  assert_contains "$out" 'delivered: 2 captain chat message(s)' "chat claim did not deliver"
+  assert_contains "$out" 'exactly one answer per message' "chat claim does not carry the single-reply contract"
+  [ -z "$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' 2>/dev/null)" ] || fail "claim left messages unarchived"
+  ids=$(find "$HOME_DIR/state/dash-chat/archive" -name '*.json' -exec basename {} .json \; | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$ids" | grep -c .)" = 2 ] || fail "claim did not archive both messages"
+  req GET "http://127.0.0.1:$PORT/api/chat/history" "$CAPTAIN"
+  assert_contains "$RESP" '"state":"received"' "a claimed message does not render as received"
+  id=$(printf '%s\n' "$ids" | head -1)
+  printf 'Aye - status is green. Full report: https://example.ts.net/report\n' > "$TMP_ROOT/chat-reply.txt"
+  FM_HOME="$HOME_DIR" "$CHAT_SH" reply "$id" --text-file "$TMP_ROOT/chat-reply.txt" || fail "chat reply failed"
+  reply_file="$HOME_DIR/state/dash-chat/replies/$id.json"
+  [ -f "$reply_file" ] || fail "chat reply left no ledger record"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$reply_file")" = 600 ] || fail "chat reply record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$reply_file")" = 600 ] || fail "chat reply record is not mode 0600" ;;
+  esac
+  local rc=0
+  FM_HOME="$HOME_DIR" "$CHAT_SH" reply "$id" --text-file "$TMP_ROOT/chat-reply.txt" 2>/dev/null || rc=$?
+  [ "$rc" = 3 ] || fail "a second reply for the same message was not refused with exit 3 (got $rc)"
+  history=$(req GET "http://127.0.0.1:$PORT/api/chat/history" "$CAPTAIN"; printf %s "$RESP")
+  assert_contains "$history" '"state":"answered"' "an answered message does not render as answered"
+  assert_contains "$history" 'Aye - status is green' "the reply text is not served"
+  out=$(FM_HOME="$HOME_DIR" "$CHAT_SH" claim)
+  assert_contains "$out" 'no pending captain chat messages' "an empty queue still claimed something"
+  cp "$HOME_DIR/state/dash-chat/archive/$id.json" "$HOME_DIR/state/dash-chat/messages/$id.json"
+  out=$(FM_HOME="$HOME_DIR" "$CHAT_SH" claim)
+  assert_contains "$out" 'no pending captain chat messages' "a replayed already-archived message was double-delivered"
+  [ ! -e "$HOME_DIR/state/dash-chat/messages/$id.json" ] || fail "the replayed duplicate message was not cleaned up"
+  rc=0
+  FM_HOME="$HOME_DIR" "$CHAT_SH" reply "1754000001-deadbeef" --text-file "$TMP_ROOT/chat-reply.txt" 2>/dev/null || rc=$?
+  [ "$rc" = 2 ] || fail "a reply to an unknown message id was not refused (got $rc)"
+  find "$HOME_DIR/state/dash-chat" -name '*.json' -delete
+  pass "chat delivery is at-least-once, replies are at-most-once, and states track the durable records"
+}
+
 test_service_contract_docs_and_ownership() {
   assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
   assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
@@ -1565,6 +1702,16 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'Secondmate briefs, metadata, status tails, and chat remain prohibited' "$ROOT/docs/dashboard-service.md" "service doc broadens secondmate detail ingestion"
   assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
   assert_grep 'at-least-once' "$INBOX_SH" "inbox consumer omits its delivery contract"
+  assert_grep 'Captain chat' "$ROOT/docs/dashboard-service.md" "service doc omits the chat destination"
+  assert_grep 'Exact PR merge approval' "$ROOT/docs/dashboard-service.md" "service doc omits the merge approval flow"
+  assert_grep 'not end-to-end application encryption' "$ROOT/docs/dashboard-service.md" "service doc overstates the encryption guarantee"
+  assert_grep 'dash-chat' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-chat"
+  assert_grep 'dash-merge' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-merge"
+  assert_grep 'fm-dash-merge.sh' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not route merge approvals to the guarded consumer"
+  assert_grep 'fm-dash-chat.sh claim' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not claim chat messages"
+  assert_grep 'unknown kind' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not refuse unknown sensitive record kinds"
+  assert_grep 'fm-dash.check.sh' "$ROOT/bin/fm-supervision-lib.sh" "the dashboard channel is not an armed inbound captain channel"
+  assert_grep 'at-least-once' "$CHAT_SH" "chat consumer omits its delivery contract"
   pass "the service is documented and wired into the operating contract"
 }
 
@@ -1595,6 +1742,10 @@ test_launchd_env_and_degraded_render_selfcheck
 test_served_page_has_zero_copy_affordances
 test_acknowledgment_stacks_at_narrow_viewports
 test_served_recommendation_fits_a_390px_browser
+test_chat_destination_is_serve_layer_only
+test_chat_identity_and_content_validation
+test_chat_idempotency_and_duplicate_sends
+test_chat_claim_reply_states_and_replay
 test_service_contract_docs_and_ownership
 
 echo "fm-dash tests passed"

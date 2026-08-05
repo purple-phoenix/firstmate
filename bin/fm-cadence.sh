@@ -10,10 +10,11 @@
 # The whole mechanism is ONE generated file, config/check-cadence.env, which
 # exports FM_CHECK_INTERVAL=30. It exists exactly while an inbound captain channel
 # is armed - X mode relay polling (state/x-watch.check.sh), the Telegram captain
-# channel (state/fm-telegram.check.sh), or both - and is absent otherwise, so a
-# home with neither keeps the default cadence and nothing about it changes. Both
-# channels resolve to the SAME file: two armed channels are still one cadence, one
-# config owner, and one supervision cycle.
+# channel (state/fm-telegram.check.sh), the dashboard command-and-chat channel
+# (state/fm-dash.check.sh), or any combination - and is absent otherwise, so a
+# home with none keeps the default cadence and nothing about it changes. All
+# channels resolve to the SAME file: several armed channels are still one cadence,
+# one config owner, and one supervision cycle.
 #
 # The armed-channel predicate is not duplicated here; bin/fm-supervision-lib.sh
 # already owns it for the "this home needs a live supervision cycle" decision, and
@@ -73,6 +74,10 @@ armed_channels() {
   if [ -f "$STATE/fm-telegram.check.sh" ]; then
     [ -n "$names" ] && names="$names and the Telegram captain channel" \
       || names="the Telegram captain channel"
+  fi
+  if [ -f "$STATE/fm-dash.check.sh" ]; then
+    [ -n "$names" ] && names="$names and the dashboard channel" \
+      || names="the dashboard channel"
   fi
   printf '%s' "$names"
 }

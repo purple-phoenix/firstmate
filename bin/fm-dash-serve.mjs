@@ -47,6 +47,28 @@
  * are refused (route those through captain chat). The server binds 127.0.0.1
  * only, so the only remote path in is the tailnet proxy.
  *
+ * Captain chat: the authenticated served page carries a Chat destination that
+ * reaches the same firstmate agent through durable local records only. A sent
+ * message becomes one fm-dash-chat-message.v1 record in
+ * state/dash-chat/messages/ (atomic, mode 0600, bounded, idempotent by
+ * client_key); bin/fm-dash-chat.sh claims messages and records exactly one
+ * fm-dash-chat-reply.v1 answer per message. Chat text is captain input for
+ * firstmate to read - never shell, a path, script source, HTML, or authority
+ * by itself - and the page renders every side of the conversation as text
+ * nodes, never markup.
+ *
+ * Exact PR merge approval: an approval-ready row whose task records a
+ * canonical GitHub PR can open a merge review. The service itself never talks
+ * to the forge and never merges: it spawns the read-only trusted
+ * bin/fm-dash-pr-evidence.mjs probe, renders the evidence, and an explicit
+ * confirmation writes one typed kind=merge-approval fm-dash-command.v1 record
+ * bound to the exact PR identity, head SHA, check-set identity, merge method,
+ * captain login, short expiry, and one-time nonce. Only firstmate's guarded
+ * bin/fm-dash-merge.sh consumer - which revalidates every binding and
+ * independently rechecks the live PR - may turn that record into a merge
+ * through bin/fm-pr-merge.sh. Every other sensitive action kind remains
+ * refused here; there is no generic command surface.
+ *
  * Environment: FM_HOME selects the home (defaults to this checkout);
  * FM_DASH_CAPACITY_ARGS appends producer fixture args for tests ONLY and must
  * stay unset in real deployments. Run --help for routes and config schema.
@@ -90,6 +112,21 @@ const ACK_PRIOR_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STALE_POLL_MS = Number(process.env.FM_DASH_STALE_POLL_MS) > 0 ? Number(process.env.FM_DASH_STALE_POLL_MS) : 30000;
 const STALE_MARKER = path.join(INBOX, ".model-stale");
 const STALE_REFRESH_MARKER = path.join(INBOX, ".model-stale.refreshing");
+const CHAT_DIR = path.join(STATE, "dash-chat");
+const CHAT_MESSAGES = path.join(CHAT_DIR, "messages");
+const CHAT_ARCHIVE = path.join(CHAT_DIR, "archive");
+const CHAT_REPLIES = path.join(CHAT_DIR, "replies");
+const CHAT_MAX_CHARS = Number(process.env.FM_DASH_CHAT_MAX_CHARS) > 0 ? Number(process.env.FM_DASH_CHAT_MAX_CHARS) : 4000;
+const CHAT_PENDING_MAX = 100;
+const CHAT_HISTORY_LIMIT = 200;
+const MERGE_EVIDENCE_BIN = path.join(ROOT, "bin", "fm-dash-pr-evidence.mjs");
+const MERGE_DIR = path.join(STATE, "dash-merge");
+const MERGE_CONSUMED = path.join(MERGE_DIR, "consumed");
+const EVIDENCE_TIMEOUT_MS = 30000;
+// A merge approval is deliberately short-lived: long enough to survive the
+// 30-second wake cadence plus handling, short enough that a stale review
+// cannot linger as authority. FM_DASH_MERGE_TTL_SECS is for tests ONLY.
+const MERGE_TTL_SECS = Number(process.env.FM_DASH_MERGE_TTL_SECS) > 0 ? Number(process.env.FM_DASH_MERGE_TTL_SECS) : 900;
 
 // One-click eligible action IDs. Every current CAP action only requests
 // lifecycle-safe guidance or work that re-enters normal authority checks
@@ -132,13 +169,28 @@ Idea suggestions stay additive and never acknowledge persistently. Routes:
   POST /api/dispatch  validated CAP action, decision answer, idea verdict,
                       parking-lot unpark request, recurring run-now request,
                       or needs-you your-go request (go, park, or guidance)
+  GET  /api/chat/history   bounded captain chat history (limit, before)
+  POST /api/chat/send      one bounded captain chat message with a client
+                           idempotency key; stored as a durable record for
+                           bin/fm-dash-chat.sh, never executed
+  GET  /api/merge/preview  read-only merge evidence for one currently listed
+                           approval-ready task (ref), via the trusted
+                           bin/fm-dash-pr-evidence.mjs probe
+  POST /api/merge/approve  one typed, expiring, one-time-nonce merge-approval
+                           record for exactly the previewed PR head; consumed
+                           only by the guarded bin/fm-dash-merge.sh
 All routes except /healthz require a Tailscale-User-Login header matching a
 configured captain login and fail closed otherwise. Dispatch refuses IDs not in
 both the served dashboard and the fixed one-click allowlist, refuses an
 unpark for any item the served dashboard does not currently list as parked,
 refuses a run-now for any item it does not currently list as recurring, and
 refuses a your-go for any item it does not currently list as awaiting the
-captain. Browser POSTs must also be same-origin.
+captain. Merge approval refuses any task not currently listed as
+approval-ready with a canonical GitHub PR, and refuses whenever the fresh
+forge evidence is not an open, non-draft, mergeable PR with every current
+check terminal green or differs from what the captain reviewed. Browser POSTs
+must also be same-origin. read_only additionally refuses chat and merge
+routes.
 `);
   process.exit(exitCode);
 }
@@ -240,6 +292,207 @@ function removePendingIfUnchanged(record) {
   }
 }
 
+// --- captain chat ----------------------------------------------------------
+// Durable, bounded, local-only conversation records. The service only writes
+// captain messages and reads the three chat directories; bin/fm-dash-chat.sh
+// owns claiming (messages/ -> archive/) and the one-reply-per-message ledger
+// in replies/. All content is data: it is stored verbatim, served as JSON,
+// and rendered client-side as text nodes only.
+
+const CHAT_MESSAGE_ID = /^[0-9]{1,19}-[0-9a-f]{8}$/;
+const CHAT_CLIENT_KEY = /^[A-Za-z0-9-]{8,64}$/;
+
+function readChatDir(dir, state) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const records = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+      if (record?.schema === "fm-dash-chat-message.v1"
+        && typeof record.message_id === "string"
+        && CHAT_MESSAGE_ID.test(record.message_id)
+        && typeof record.text === "string") {
+        records.push({ record, state });
+      }
+    } catch {
+      // An unreadable record renders nothing rather than markup or a guess.
+    }
+  }
+  return records;
+}
+
+function readChatReply(messageId) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(CHAT_REPLIES, `${messageId}.json`), "utf8"));
+    if (record?.schema === "fm-dash-chat-reply.v1" && typeof record.text === "string") {
+      return { text: record.text, replied_at: typeof record.replied_at === "string" ? record.replied_at : null };
+    }
+  } catch {
+    // No reply yet.
+  }
+  return null;
+}
+
+function chatHistory(limit, before) {
+  const all = [...readChatDir(CHAT_MESSAGES, "sent"), ...readChatDir(CHAT_ARCHIVE, "received")]
+    .sort((a, b) => (a.record.message_id < b.record.message_id ? -1 : 1));
+  const upper = typeof before === "string" && CHAT_MESSAGE_ID.test(before)
+    ? all.filter((entry) => entry.record.message_id < before)
+    : all;
+  const bounded = Math.min(Math.max(1, limit || 100), CHAT_HISTORY_LIMIT);
+  const slice = upper.slice(-bounded);
+  return {
+    messages: slice.map(({ record, state }) => {
+      const reply = readChatReply(record.message_id);
+      return {
+        message_id: record.message_id,
+        text: record.text,
+        requested_by: typeof record.requested_by === "string" ? record.requested_by : null,
+        requested_at: typeof record.requested_at === "string" ? record.requested_at : null,
+        state: reply ? "answered" : state,
+        reply,
+      };
+    }),
+    has_more: upper.length > slice.length,
+    pending_unclaimed: readChatDir(CHAT_MESSAGES, "sent").length,
+  };
+}
+
+function chatTextProblem(text) {
+  if (typeof text !== "string" || text.trim() === "") return "a message needs text";
+  if (text.length > CHAT_MAX_CHARS) return `messages are limited to ${CHAT_MAX_CHARS} characters; send long material as a link`;
+  if (typeof text.isWellFormed === "function" ? !text.isWellFormed() : /\p{Cs}/u.test(text)) return "the message contains malformed text and was not stored";
+  // Keep newlines and tabs; refuse every other control character so stored
+  // records stay terminal- and log-safe.
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return "the message contains unsupported control characters";
+  return null;
+}
+
+function findChatByClientKey(clientKey) {
+  for (const dir of [CHAT_MESSAGES, CHAT_ARCHIVE]) {
+    for (const { record } of readChatDir(dir, "any")) {
+      if (record.client_key === clientKey) return record;
+    }
+  }
+  return null;
+}
+
+function enqueueChatMessage(text, clientKey, login) {
+  fs.mkdirSync(CHAT_MESSAGES, { recursive: true, mode: 0o700 });
+  const record = {
+    schema: "fm-dash-chat-message.v1",
+    message_id: `${Math.floor(Date.now() / 1000)}-${randomBytes(4).toString("hex")}`,
+    text,
+    client_key: clientKey,
+    requested_by: login,
+    requested_at: new Date().toISOString(),
+  };
+  const tmp = path.join(CHAT_MESSAGES, `.tmp-${randomBytes(6).toString("hex")}`);
+  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, path.join(CHAT_MESSAGES, `${record.message_id}.json`));
+  return record;
+}
+
+// --- exact PR merge review -------------------------------------------------
+// The service's only forge knowledge comes from spawning the read-only
+// trusted evidence probe with a server-resolved task id; no client-supplied
+// value ever reaches that spawn. Approval records are typed, bound, and
+// consumed exclusively by bin/fm-dash-merge.sh on the firstmate side.
+
+function runMergeEvidence(taskId) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [MERGE_EVIDENCE_BIN, taskId], {
+      cwd: ROOT,
+      env: { ...process.env, FM_HOME },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const chunks = [];
+    let size = 0;
+    const timer = setTimeout(() => child.kill("SIGKILL"), EVIDENCE_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => {
+      size += chunk.length;
+      if (size <= 1024 * 1024) chunks.push(chunk);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve({ available: false, eligible: false, reason: "the merge evidence probe could not run" });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || size > 1024 * 1024) {
+        resolve({ available: false, eligible: false, reason: "the merge evidence probe could not run" });
+        return;
+      }
+      try {
+        const evidence = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (evidence?.schema !== "fm-dash-pr-evidence.v1") throw new Error("schema");
+        resolve(evidence);
+      } catch {
+        resolve({ available: false, eligible: false, reason: "the merge evidence probe returned an unreadable record" });
+      }
+    });
+  });
+}
+
+// A merge review is offered only for a row the current dashboard itself lists
+// as awaiting captain approval, whose main-home task records a canonical
+// GitHub PR. The returned task id comes from the server-read refs sidecar.
+function mergeReviewTarget(ref) {
+  if (!/^item-\d{2,}$/.test(ref)) return null;
+  const dashboard = readDashboard();
+  if (!dashboard || !dashboard.html.includes(`data-your-go-ref="${ref}" data-your-go-kind="approval"`)) return null;
+  const refsFile = readRefs(dashboard.generated);
+  const entry = refsFile?.refs?.[ref];
+  if (!entry || entry.kind !== "item") return null;
+  const separator = entry.value.indexOf("/");
+  if (entry.value.slice(0, separator) !== "main") return null;
+  const id = entry.value.slice(separator + 1);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) return null;
+  const meta = readMeta(id);
+  if (!meta.pr || !/^https:\/\/github\.com\//.test(meta.pr)) return null;
+  return { task: id, url: meta.pr, generated: dashboard.generated };
+}
+
+function mergeConsumedOutcome(nonce) {
+  if (typeof nonce !== "string" || !/^[0-9a-f]{32}$/.test(nonce)) return null;
+  try {
+    const text = fs.readFileSync(path.join(MERGE_CONSUMED, nonce), "utf8");
+    const outcome = text.split("\n").filter((line) => line.startsWith("outcome=")).pop();
+    return outcome ? outcome.slice("outcome=".length) : null;
+  } catch {
+    return null;
+  }
+}
+
+// The captain-facing lifecycle of the newest approval for one task: a pending
+// record is "sent", a claimed record is "received", and a consumed nonce
+// reports the guarded consumer's recorded outcome honestly.
+function mergeApprovalState(taskId) {
+  const candidates = [];
+  for (const record of pendingRecords()) {
+    if (record.kind === "merge-approval" && record.task === taskId) candidates.push({ record, status: "pending" });
+  }
+  for (const { record } of archivedRecords()) {
+    if (record.kind === "merge-approval" && record.task === taskId) candidates.push({ record, status: "claimed" });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => ((a.record.requested_at || "") < (b.record.requested_at || "") ? -1 : 1));
+  const newest = candidates[candidates.length - 1];
+  return {
+    status: newest.status,
+    requested_at: newest.record.requested_at || null,
+    head_sha: newest.record.head_sha || null,
+    expires_at: newest.record.expires_at || null,
+    outcome: newest.status === "claimed" ? mergeConsumedOutcome(newest.record.nonce) : null,
+  };
+}
+
 // --- click acknowledgment ---------------------------------------------------
 // An acknowledgeable click must never disappear back into an undecided-looking
 // button. Source of truth is the durable command channel itself: a record still
@@ -284,6 +537,7 @@ function ackKey(record) {
     if (typeof record.decision_identity === "string") return `decision:${record.decision_identity}`;
     return typeof record.work_identity === "string" ? `yourgo:${record.work_identity}` : null;
   }
+  if (record.kind === "merge-approval") return typeof record.task === "string" ? `merge:${record.task}` : null;
   return /^CAP-\d{2}$/.test(record.id) ? `cap:${record.id}` : null;
 }
 
@@ -532,6 +786,12 @@ function yourGoEntries(dashboardHtml, refsFile) {
     const row = backlogFor(owner).find((item) => item.id === id) || null;
     const parsed = row ? titleAnnotations(row.title) : null;
     const reason = parsed?.fields["hold"] || null;
+    // An approval-ready main-home task with a recorded GitHub PR gets the
+    // exact merge review path; the row's generic controls stay unchanged and
+    // grant no merge authority.
+    const mergeCandidate = rowKind === "approval"
+      && owner === "main"
+      && /^https:\/\/github\.com\//.test(readMeta(id).pr || "");
     entries.push({
       ref,
       row_kind: rowKind,
@@ -541,6 +801,7 @@ function yourGoEntries(dashboardHtml, refsFile) {
       reason,
       has_options: false,
       ask: reason && DELIVERABLE_ASK.test(reason) ? reason : null,
+      merge_candidate: mergeCandidate,
     });
   }
   return entries;
@@ -912,6 +1173,9 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
     usage: extras?.usage || { status: "unavailable", providers: [] },
     degraded: extras?.degraded === true,
     acks: extras?.acks || {},
+    chat: readOnly !== true,
+    chatMaxChars: CHAT_MAX_CHARS,
+    mergeTtlSeconds: MERGE_TTL_SECS,
   });
   return `<style>
   .fmdash-bar{display:flex;justify-content:space-between;align-items:center;gap:.6rem 1.5rem;flex-wrap:wrap;padding:.6rem clamp(1rem,6vw,5rem);border-bottom:1px solid var(--line);background:var(--bg)}
@@ -956,7 +1220,44 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
   .fmdash-guide{width:100%;margin-top:.5rem;padding:.5rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair);font-size:.85rem}
   .fmdash-ack{display:inline-block;border:1px solid var(--good);color:var(--good);font-weight:700;font-size:.76rem;padding:.35rem .7rem;align-self:center;grid-column:2}
   .fmdash-ack-chip{margin-left:.6rem;padding:.15rem .5rem;font-size:.7rem;grid-column:auto}
-  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}}
+  .fmdash-chatpage *,.fmdash-panel *{box-sizing:border-box}
+  .fmdash-chatpage .wrap{max-width:46rem}
+  .fmdash-chat-note{border:1px solid var(--hair);padding:.6rem .8rem;margin-top:1rem;font-size:.78rem;color:var(--muted)}
+  .fmdash-chat-note summary{cursor:pointer;color:var(--ink2);font-weight:700}
+  .fmdash-chat-note p{margin-top:.5rem;line-height:1.45}
+  .fmdash-chat-tools{display:flex;gap:.5rem;align-items:center;margin-top:1rem;flex-wrap:wrap}
+  .fmdash-chat-search{flex:1 1 12rem;min-width:0;padding:.55rem .7rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair);font-size:.9rem}
+  .fmdash-chat-log{list-style:none;margin:1rem 0 0;padding:0;display:flex;flex-direction:column;gap:.9rem}
+  .fmdash-msg{max-width:85%;border:1px solid var(--hair);padding:.6rem .8rem;min-width:0}
+  .fmdash-msg-captain{align-self:flex-end;border-color:var(--line);background:color-mix(in srgb,var(--blue) 12%,var(--bg))}
+  .fmdash-msg-agent{align-self:flex-start}
+  .fmdash-msg-text{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);font-size:.92rem;line-height:1.45}
+  .fmdash-msg-text a{overflow-wrap:anywhere}
+  .fmdash-msg-meta{margin-top:.35rem;font-size:.7rem;color:var(--muted)}
+  .fmdash-msg-state{font-weight:700}
+  .fmdash-msg-state-answered{color:var(--good)}
+  .fmdash-msg-unsent{border-color:var(--crit)}
+  .fmdash-chat-offline{display:none;border:1px solid var(--warn);color:var(--warn);padding:.5rem .8rem;margin-top:1rem;font-size:.8rem}
+  .fmdash-chat-offline.fmdash-on{display:block}
+  .fmdash-composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:.8rem 0 max(.8rem,env(safe-area-inset-bottom));margin-top:1rem}
+  .fmdash-composer textarea{width:100%;min-height:3.2rem;max-height:9rem;resize:vertical;padding:.6rem .7rem;background:var(--bg);color:var(--ink);border:1px solid var(--hair);font-size:1rem;font-family:inherit}
+  .fmdash-composer-row{display:flex;gap:.6rem;align-items:center;margin-top:.5rem;flex-wrap:wrap}
+  .fmdash-composer-row .fmdash-send{min-height:2.75rem;padding:.5rem 1.2rem;grid-column:auto}
+  .fmdash-composer-hint{font-size:.72rem;color:var(--muted);flex:1 1 12rem}
+  .fmdash-chat-cred{margin-top:.5rem;font-size:.72rem;color:var(--warn)}
+  .fmdash-merge-facts{list-style:none;margin:1rem 0 0;padding:0;border-top:1px solid var(--hair)}
+  .fmdash-merge-facts li{display:grid;grid-template-columns:minmax(7rem,auto) minmax(0,1fr);gap:.6rem;padding:.45rem 0;border-bottom:1px solid var(--hair);font-size:.88rem}
+  .fmdash-merge-facts .fact-label{color:var(--muted);font-size:.74rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding-top:.15rem}
+  .fmdash-merge-facts .fact-value{color:var(--ink2);overflow-wrap:anywhere;min-width:0}
+  .fmdash-merge-facts code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;overflow-wrap:anywhere}
+  .fmdash-merge-check-green{color:var(--good)}
+  .fmdash-merge-check-bad{color:var(--crit)}
+  .fmdash-merge-confirm{display:flex;gap:.6rem;align-items:flex-start;margin-top:1rem;font-size:.88rem;color:var(--ink2)}
+  .fmdash-merge-confirm input{width:1.1rem;height:1.1rem;margin-top:.15rem;flex:none}
+  .fmdash-merge-approve{margin-top:.9rem;border:1px solid var(--good);background:var(--good);color:var(--bg);font-weight:800;padding:.6rem 1.2rem;cursor:pointer;font-size:.9rem;min-height:2.75rem}
+  .fmdash-merge-approve[disabled]{opacity:.45;cursor:default}
+  .fmdash-merge-refused{border:1px solid var(--warn);color:var(--warn);padding:.6rem .8rem;margin-top:1rem;font-size:.85rem}
+  @media(max-width:760px){.fmdash-usage-grid{grid-template-columns:1fr}.fmdash-ack{grid-column:1;justify-self:start;max-width:100%}.fmdash-msg{max-width:100%}.fmdash-merge-facts li{grid-template-columns:1fr;gap:.15rem}.fmdash-composer{position:static}.fmdash-composer-row .fmdash-send{flex:1 1 auto}}
   </style>
   <script>
   (() => {
@@ -1600,6 +1901,21 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
         cell.appendChild(send);
         box.focus();
       };
+      // An approval-ready task with a recorded GitHub PR leads with the exact
+      // merge review; the generic controls remain and grant no merge
+      // authority. A live approval state renders instead of a second button.
+      if (info.merge_candidate) {
+        const state = info.merge_state;
+        const settled = state && (state.status === "pending" || (state.status === "claimed" && (!state.outcome || state.outcome === "merging" || state.outcome === "merged")));
+        if (settled) {
+          controls.appendChild(mergeStateNode(state));
+        } else {
+          const review = makeButton("Review merge…", "Open exact merge review for " + (info.title || info.ref), true);
+          review.addEventListener("click", (event) => { event.stopPropagation(); openMergeReview(info); });
+          controls.appendChild(review);
+          if (state) controls.appendChild(mergeStateNode(state));
+        }
+      }
       if (info.has_options) {
         const entry = cfg.refs[info.ref] || { t: "decision", label: info.title || info.ref };
         const choose = makeButton("Choose…", "Open options for " + (info.title || info.ref), true);
@@ -1623,6 +1939,413 @@ function interactiveLayer(dispatchable, pending, generated, readOnly, extras) {
       }
       cell.appendChild(controls);
     });
+    // Exact merge review: everything rendered here is server-read evidence;
+    // the approve click writes one typed, expiring, one-time approval record
+    // that only firstmate's guarded consumer can act on.
+    function mergeStateNode(state) {
+      const label = state.status === "pending"
+        ? "Merge approval sent - awaiting firstmate"
+        : state.outcome === "merged"
+          ? "Merged"
+          : state.outcome === "merging" || !state.outcome
+            ? "Approval received - being verified"
+            : (state.outcome || "").indexOf("invalidated") === 0
+              ? "Approval invalidated - review again"
+              : "Merge attempt failed - see chat";
+      const node = ackNode(null, "fmdash-ack-chip");
+      node.textContent = label;
+      return node;
+    }
+    function factRow(list, label, valueNode) {
+      if (!valueNode) return;
+      const li = document.createElement("li");
+      const dt = document.createElement("span");
+      dt.className = "fact-label";
+      dt.textContent = label;
+      const dd = document.createElement("span");
+      dd.className = "fact-value";
+      dd.appendChild(valueNode);
+      li.appendChild(dt);
+      li.appendChild(dd);
+      list.appendChild(li);
+    }
+    async function openMergeReview(info) {
+      const overlay = document.createElement("div");
+      overlay.className = "fmdash-overlay";
+      const panel = document.createElement("div");
+      panel.className = "fmdash-panel";
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+      panel.setAttribute("aria-label", "Exact merge review for " + (info.title || info.ref));
+      overlay.appendChild(panel);
+      const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+      const onKey = (event) => { if (event.key === "Escape") close(); };
+      overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+      document.addEventListener("keydown", onKey);
+      const kicker = document.createElement("div");
+      kicker.className = "fmdash-kicker";
+      kicker.textContent = "Exact merge review";
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "fmdash-close";
+      closeButton.textContent = "Close";
+      closeButton.addEventListener("click", close);
+      kicker.appendChild(closeButton);
+      panel.appendChild(kicker);
+      panel.appendChild(textBlock("h2", info.title || info.ref));
+      panel.appendChild(textBlock("p", "Checking the pull request…"));
+      document.body.appendChild(overlay);
+      closeButton.focus();
+      let out = null;
+      try {
+        const res = await fetch("/api/merge/preview?ref=" + encodeURIComponent(info.ref));
+        out = await res.json();
+      } catch { /* rendered below */ }
+      panel.replaceChildren(kicker);
+      panel.appendChild(textBlock("h2", info.title || info.ref));
+      if (!out || out.status !== "ok") {
+        const refused = textBlock("p", (out && out.error) || "The merge review could not be loaded; refresh the dashboard and try again.");
+        refused.className = "fmdash-merge-refused";
+        panel.appendChild(refused);
+        return;
+      }
+      const ev = out.evidence || {};
+      if (out.approval && (out.approval.status === "pending" || out.approval.status === "claimed")) {
+        panel.appendChild(mergeStateNode(out.approval));
+      }
+      if (!ev.available) {
+        const refused = textBlock("p", "No merge control is available: " + (ev.reason || "the pull request evidence could not be read") + ".");
+        refused.className = "fmdash-merge-refused";
+        panel.appendChild(refused);
+        return;
+      }
+      const facts = document.createElement("ul");
+      facts.className = "fmdash-merge-facts";
+      const link = document.createElement("a");
+      link.href = ev.url;
+      link.textContent = ev.url;
+      factRow(facts, "Pull request", link);
+      factRow(facts, "Repository", textBlock("span", ev.repo + " · PR #" + ev.number + (ev.base ? " into " + ev.base : "")));
+      factRow(facts, "Title", textBlock("span", ev.title || "(no title)"));
+      const sha = document.createElement("code");
+      sha.textContent = ev.head_sha;
+      factRow(facts, "Exact version", sha);
+      factRow(facts, "Merge method", textBlock("span", ev.merge_method));
+      factRow(facts, "Risk", textBlock("span", ev.risk || "not recorded"));
+      if (ev.delivery_mode) factRow(facts, "Validation", textBlock("span", ev.delivery_mode === "no-mistakes" ? "no-mistakes pipeline (evidence: check set below)" : ev.delivery_mode));
+      const checksWrap = document.createElement("div");
+      (ev.checks || []).forEach((check) => {
+        const row = document.createElement("div");
+        row.className = check.green ? "fmdash-merge-check-green" : "fmdash-merge-check-bad";
+        row.textContent = (check.green ? "✓ " : "✗ ") + check.name + " — " + check.result;
+        checksWrap.appendChild(row);
+      });
+      factRow(facts, "Current checks", checksWrap);
+      factRow(facts, "Approval window", textBlock("span", "an approval is valid for " + Math.round((out.ttl_seconds || cfg.mergeTtlSeconds) / 60) + " minutes and only for this exact version"));
+      panel.appendChild(facts);
+      if (!ev.eligible) {
+        const refused = textBlock("p", "No merge control is available: " + (ev.reason || "the pull request is not ready") + ".");
+        refused.className = "fmdash-merge-refused";
+        panel.appendChild(refused);
+        return;
+      }
+      const confirm = document.createElement("label");
+      confirm.className = "fmdash-merge-confirm";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      const confirmText = document.createElement("span");
+      confirmText.textContent = "I reviewed PR #" + ev.number + " at version " + ev.head_sha.slice(0, 12) + " and approve merging exactly this version by " + ev.merge_method + ". Any change to the code or its checks cancels this approval.";
+      confirm.appendChild(box);
+      confirm.appendChild(confirmText);
+      panel.appendChild(confirm);
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "fmdash-merge-approve";
+      approve.textContent = "Approve this exact merge";
+      approve.disabled = true;
+      approve.setAttribute("aria-label", "Approve merging PR #" + ev.number + " at version " + ev.head_sha.slice(0, 12));
+      box.addEventListener("change", () => { approve.disabled = !box.checked; });
+      approve.addEventListener("click", async () => {
+        approve.disabled = true;
+        approve.textContent = "Sending…";
+        try {
+          const res = await postJson2("/api/merge/approve", {
+            ref: info.ref,
+            url: ev.url,
+            head_sha: ev.head_sha,
+            checks_identity: ev.checks_identity,
+            merge_method: ev.merge_method,
+          });
+          const result = await res.json();
+          if (result.status === "queued" || result.status === "replaced" || result.status === "already-queued") {
+            panel.replaceChildren(kicker);
+            panel.appendChild(textBlock("h2", "Merge approval sent"));
+            panel.appendChild(textBlock("p", "Firstmate will independently re-verify this exact version and merge it through its guarded path. The approval expires " + (result.expires_at ? new Date(result.expires_at).toLocaleString() : "shortly") + "; if anything about the pull request changes first, it is refused and you can review again."));
+            panel.appendChild(textBlock("p", "This approved this one exact merge only. Anything else - and anything destructive or irreversible - still goes through chat."));
+            showPending(result.pending || cfg.pending);
+            return;
+          }
+          const refused = textBlock("p", (result && result.error) || "The approval was refused.");
+          refused.className = "fmdash-merge-refused";
+          panel.appendChild(refused);
+          approve.textContent = "Approve this exact merge";
+        } catch {
+          const refused = textBlock("p", "The approval could not be sent; check your connection and reopen the review.");
+          refused.className = "fmdash-merge-refused";
+          panel.appendChild(refused);
+          approve.textContent = "Approve this exact merge";
+        }
+      });
+      panel.appendChild(approve);
+      panel.appendChild(textBlock("p", "Approving asks firstmate to merge exactly this reviewed version. Every other action - and anything destructive, irreversible, or security-sensitive - still gets confirmed in chat."));
+    }
+    function postJson2(url, body) {
+      return fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    // Captain chat: a phone-ready conversation with the same firstmate agent.
+    // Everything renders through text nodes - captain and agent text can never
+    // become markup - and every send is an idempotent durable record.
+    if (cfg.chat) {
+      const nav = document.querySelector(".dashboard-nav");
+      const chatMain = document.querySelector("main");
+      if (nav && chatMain) {
+        const navLink = document.createElement("a");
+        navLink.href = "#chat";
+        navLink.textContent = "Chat";
+        navLink.setAttribute("data-dashboard-link", "chat");
+        nav.appendChild(navLink);
+        const page = document.createElement("section");
+        page.className = "dashboard-page band fmdash-chatpage";
+        page.id = "chat";
+        page.setAttribute("data-dashboard-page", "chat");
+        page.setAttribute("aria-labelledby", "chat-title");
+        page.hidden = true;
+        const wrap = document.createElement("div");
+        wrap.className = "wrap";
+        const kickerP = document.createElement("p");
+        kickerP.className = "kicker";
+        kickerP.textContent = "Direct line";
+        const title = document.createElement("h2");
+        title.id = "chat-title";
+        title.className = "qhead";
+        title.textContent = "Chat with your firstmate";
+        const note = document.createElement("details");
+        note.className = "fmdash-chat-note";
+        const noteSummary = document.createElement("summary");
+        noteSummary.textContent = "How private is this?";
+        const noteBody = document.createElement("p");
+        noteBody.textContent = "This conversation never leaves your tailnet: traffic between your device and the firstmate machine is protected by Tailscale WireGuard encryption plus HTTPS, including when it crosses a DERP relay. It is not end-to-end application encryption: content is readable at both endpoints, and history is stored on the firstmate machine protected by its disk encryption (FileVault) and endpoint security.";
+        const noteCred = document.createElement("p");
+        noteCred.textContent = "Never send passwords, API keys, tokens, or recovery codes here - firstmate will never ask for one in chat. Provide credentials at the terminal or keychain instead.";
+        note.appendChild(noteSummary);
+        note.appendChild(noteBody);
+        note.appendChild(noteCred);
+        const offline = document.createElement("div");
+        offline.className = "fmdash-chat-offline";
+        offline.setAttribute("role", "status");
+        offline.textContent = "Offline - the dashboard cannot be reached right now. Your typed message is kept; retry when you are back on the tailnet.";
+        const tools = document.createElement("div");
+        tools.className = "fmdash-chat-tools";
+        const search = document.createElement("input");
+        search.type = "search";
+        search.className = "fmdash-chat-search";
+        search.placeholder = "Search this conversation…";
+        search.setAttribute("aria-label", "Search this conversation");
+        const earlier = document.createElement("button");
+        earlier.type = "button";
+        earlier.className = "fmdash-send";
+        earlier.textContent = "Load earlier";
+        earlier.hidden = true;
+        tools.appendChild(search);
+        tools.appendChild(earlier);
+        const logList = document.createElement("ul");
+        logList.className = "fmdash-chat-log";
+        logList.setAttribute("role", "log");
+        logList.setAttribute("aria-live", "polite");
+        logList.setAttribute("aria-label", "Conversation with firstmate");
+        const composer = document.createElement("div");
+        composer.className = "fmdash-composer";
+        const input = document.createElement("textarea");
+        input.setAttribute("aria-label", "Message for firstmate");
+        input.placeholder = "Message your firstmate…";
+        input.autocomplete = "on";
+        input.setAttribute("autocapitalize", "sentences");
+        input.spellcheck = true;
+        input.maxLength = cfg.chatMaxChars;
+        const composerRow = document.createElement("div");
+        composerRow.className = "fmdash-composer-row";
+        const sendButton = document.createElement("button");
+        sendButton.type = "button";
+        sendButton.className = "fmdash-send";
+        sendButton.textContent = "Send";
+        sendButton.setAttribute("aria-label", "Send message to firstmate");
+        const hint = document.createElement("span");
+        hint.className = "fmdash-composer-hint";
+        hint.textContent = window.matchMedia("(pointer: fine)").matches
+          ? "Enter sends · Shift+Enter for a new line"
+          : "Messages are picked up within about half a minute";
+        composerRow.appendChild(sendButton);
+        composerRow.appendChild(hint);
+        const cred = document.createElement("p");
+        cred.className = "fmdash-chat-cred";
+        cred.textContent = "No secrets here: credentials go to the terminal or keychain, and long reports arrive as links.";
+        composer.appendChild(input);
+        composer.appendChild(composerRow);
+        composer.appendChild(cred);
+        wrap.appendChild(kickerP);
+        wrap.appendChild(title);
+        wrap.appendChild(note);
+        wrap.appendChild(offline);
+        wrap.appendChild(tools);
+        wrap.appendChild(logList);
+        wrap.appendChild(composer);
+        page.appendChild(wrap);
+        chatMain.appendChild(page);
+        // The producer's own hash router now knows the injected page.
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+        const loaded = new Map();
+        let oldestLoaded = null;
+        let hasMore = false;
+        const stateLabel = { sent: "Sent to firstmate", received: "Received - being worked", answered: "Answered" };
+        function linkifyInto(node, text) {
+          text.split(/(https:\\/\\/[^\\s]+)/g).forEach((part) => {
+            if (/^https:\\/\\//.test(part)) {
+              const a = document.createElement("a");
+              a.href = part;
+              a.textContent = part;
+              node.appendChild(a);
+            } else if (part) {
+              node.appendChild(document.createTextNode(part));
+            }
+          });
+        }
+        function messageNodes(message) {
+          const nodes = [];
+          const mine = document.createElement("li");
+          mine.className = "fmdash-msg fmdash-msg-captain";
+          mine.setAttribute("data-message-id", message.message_id);
+          const text = document.createElement("div");
+          text.className = "fmdash-msg-text";
+          linkifyInto(text, message.text);
+          const meta = document.createElement("div");
+          meta.className = "fmdash-msg-meta";
+          const when = message.requested_at ? new Date(message.requested_at).toLocaleString() : "";
+          const state = document.createElement("span");
+          state.className = "fmdash-msg-state" + (message.state === "answered" ? " fmdash-msg-state-answered" : "");
+          state.textContent = stateLabel[message.state] || message.state;
+          meta.appendChild(document.createTextNode(when ? when + " · " : ""));
+          meta.appendChild(state);
+          mine.appendChild(text);
+          mine.appendChild(meta);
+          nodes.push(mine);
+          if (message.reply) {
+            const theirs = document.createElement("li");
+            theirs.className = "fmdash-msg fmdash-msg-agent";
+            const replyText = document.createElement("div");
+            replyText.className = "fmdash-msg-text";
+            linkifyInto(replyText, message.reply.text);
+            const replyMeta = document.createElement("div");
+            replyMeta.className = "fmdash-msg-meta";
+            replyMeta.textContent = "Firstmate" + (message.reply.replied_at ? " · " + new Date(message.reply.replied_at).toLocaleString() : "");
+            theirs.appendChild(replyText);
+            theirs.appendChild(replyMeta);
+            nodes.push(theirs);
+          }
+          return nodes;
+        }
+        function renderLog() {
+          const atBottom = logList.scrollHeight - logList.scrollTop - logList.clientHeight < 80;
+          logList.replaceChildren();
+          const term = search.value.trim().toLowerCase();
+          [...loaded.values()]
+            .sort((a, b) => (a.message_id < b.message_id ? -1 : 1))
+            .forEach((message) => {
+              if (term) {
+                const haystack = (message.text + " " + (message.reply ? message.reply.text : "")).toLowerCase();
+                if (haystack.indexOf(term) === -1) return;
+              }
+              messageNodes(message).forEach((node) => logList.appendChild(node));
+            });
+          earlier.hidden = !hasMore;
+          if (atBottom && !term) page.scrollTop = page.scrollHeight;
+        }
+        async function refreshChat(before) {
+          try {
+            const query = before ? "?limit=100&before=" + encodeURIComponent(before) : "?limit=100";
+            const res = await fetch("/api/chat/history" + query);
+            if (!res.ok) throw new Error("history");
+            const out = await res.json();
+            (out.messages || []).forEach((message) => loaded.set(message.message_id, message));
+            if (!before) hasMore = out.has_more === true;
+            else if (out.messages && out.messages.length) hasMore = out.has_more === true;
+            const ids = [...loaded.keys()].sort();
+            oldestLoaded = ids.length ? ids[0] : null;
+            offline.classList.remove("fmdash-on");
+            renderLog();
+          } catch {
+            offline.classList.add("fmdash-on");
+          }
+        }
+        earlier.addEventListener("click", () => { if (oldestLoaded) refreshChat(oldestLoaded); });
+        search.addEventListener("input", renderLog);
+        let sending = false;
+        let pendingSend = null;
+        async function sendChat() {
+          if (sending) return;
+          const text = input.value.trim();
+          if (!text) return;
+          sending = true;
+          sendButton.disabled = true;
+          sendButton.textContent = "Sending…";
+          if (!pendingSend || pendingSend.text !== text) {
+            pendingSend = {
+              text,
+              clientKey: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2, 10)),
+            };
+          }
+          try {
+            const res = await postJson2("/api/chat/send", { text, client_key: pendingSend.clientKey });
+            const out = await res.json();
+            pendingSend = null;
+            if (out.status === "queued" || out.status === "already-received") {
+              input.value = "";
+              offline.classList.remove("fmdash-on");
+              await refreshChat();
+            } else {
+              offline.classList.remove("fmdash-on");
+              hint.textContent = out.error || "The message was refused.";
+            }
+          } catch {
+            offline.classList.add("fmdash-on");
+          }
+          sending = false;
+          sendButton.disabled = false;
+          sendButton.textContent = "Send";
+        }
+        sendButton.addEventListener("click", sendChat);
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey && window.matchMedia("(pointer: fine)").matches) {
+            event.preventDefault();
+            sendChat();
+          }
+        });
+        let chatStarted = false;
+        function chatVisible() { return !page.hidden && document.visibilityState === "visible"; }
+        function ensureChat() {
+          if (!chatVisible()) return;
+          if (!chatStarted) { chatStarted = true; refreshChat().then(() => { input.focus(); }); }
+        }
+        window.addEventListener("hashchange", ensureChat);
+        document.addEventListener("visibilitychange", ensureChat);
+        ensureChat();
+        setInterval(() => { if (chatVisible() && chatStarted) refreshChat(); }, 8000);
+      }
+    }
     if (cfg.readOnly) {
       copyButtons.forEach((copyButton) => copyButton.remove());
       return;
@@ -1740,6 +2463,7 @@ async function handle(req, res) {
     for (const info of yourGo) {
       const ack = acks.get(info.target === "decision" ? `decision:${info.identity}` : `yourgo:${info.identity}`);
       if (ack) info.ack = ack;
+      if (info.merge_candidate) info.merge_state = mergeApprovalState(info.identity.slice("main/".length));
     }
     const capAcks = {};
     for (const [key, ack] of acks) {
@@ -1776,6 +2500,138 @@ async function handle(req, res) {
   }
   if (req.method === "GET" && url.pathname === "/api/pending") {
     sendJson(res, 200, { status: "ok", pending: pendingRecords().length });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/chat/history") {
+    if (config.readOnly) {
+      sendJson(res, 403, { status: "refused", error: "this dashboard is read-only; chat is not enabled" });
+      return;
+    }
+    const limit = Number(url.searchParams.get("limit")) || 100;
+    sendJson(res, 200, { status: "ok", ...chatHistory(limit, url.searchParams.get("before")) });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/chat/send") {
+    if (config.readOnly) {
+      sendJson(res, 403, { status: "refused", error: "this dashboard is read-only; chat is not enabled" });
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(await readBody(req) || "{}");
+    } catch {
+      sendJson(res, 400, { status: "refused", error: "invalid request body" });
+      return;
+    }
+    const problem = chatTextProblem(body.text);
+    if (problem) {
+      sendJson(res, 400, { status: "refused", error: problem });
+      return;
+    }
+    if (typeof body.client_key !== "string" || !CHAT_CLIENT_KEY.test(body.client_key)) {
+      sendJson(res, 400, { status: "refused", error: "a message needs a valid idempotency key" });
+      return;
+    }
+    // Idempotency across double-taps, retries, and concurrent tabs: the same
+    // client key never creates a second record.
+    const existing = findChatByClientKey(body.client_key);
+    if (existing) {
+      sendJson(res, 200, { status: "already-received", message_id: existing.message_id });
+      return;
+    }
+    if (readChatDir(CHAT_MESSAGES, "sent").length >= CHAT_PENDING_MAX) {
+      sendJson(res, 429, { status: "refused", error: "too many messages are waiting for firstmate already; give it a moment to catch up" });
+      return;
+    }
+    const record = enqueueChatMessage(body.text, body.client_key, requesterLogin(req));
+    log(`queued chat message ${record.message_id} for ${record.requested_by}`);
+    sendJson(res, 200, { status: "queued", message_id: record.message_id, requested_at: record.requested_at });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/merge/preview") {
+    if (config.readOnly) {
+      sendJson(res, 403, { status: "refused", error: "this dashboard is read-only; merge review is not enabled" });
+      return;
+    }
+    const target = mergeReviewTarget(url.searchParams.get("ref") || "");
+    if (!target) {
+      sendJson(res, 409, { status: "refused", error: "merge review is only available for a currently listed approval-ready task with a recorded GitHub pull request; refresh first" });
+      return;
+    }
+    const evidence = await runMergeEvidence(target.task);
+    sendJson(res, 200, {
+      status: "ok",
+      evidence,
+      approval: mergeApprovalState(target.task),
+      ttl_seconds: MERGE_TTL_SECS,
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/merge/approve") {
+    if (config.readOnly) {
+      sendJson(res, 403, { status: "refused", error: "this dashboard is read-only; merge approval is not enabled" });
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(await readBody(req) || "{}");
+    } catch {
+      sendJson(res, 400, { status: "refused", error: "invalid request body" });
+      return;
+    }
+    const target = mergeReviewTarget(typeof body.ref === "string" ? body.ref : "");
+    if (!target) {
+      sendJson(res, 409, { status: "refused", error: "merge approval is only available for a currently listed approval-ready task; refresh first" });
+      return;
+    }
+    // The server's own fresh forge read is authoritative; the fields the
+    // captain reviewed are echoed back only as a cross-check, so any code,
+    // check, or method change between review and click refuses the approval.
+    const evidence = await runMergeEvidence(target.task);
+    if (evidence.available !== true || evidence.eligible !== true) {
+      sendJson(res, 409, { status: "refused", error: evidence.reason || "the pull request is not eligible for merge approval" });
+      return;
+    }
+    if (evidence.url !== target.url
+      || body.url !== evidence.url
+      || body.head_sha !== evidence.head_sha
+      || body.checks_identity !== evidence.checks_identity
+      || body.merge_method !== evidence.merge_method) {
+      sendJson(res, 409, { status: "refused", error: "the pull request changed while you were reviewing; reopen the merge review" });
+      return;
+    }
+    const pending = pendingRecords();
+    const prior = pending.find((record) => record.kind === "merge-approval" && record.task === target.task);
+    if (prior && prior.head_sha === evidence.head_sha && prior.checks_identity === evidence.checks_identity) {
+      sendJson(res, 200, { status: "already-queued", pending: pending.length, expires_at: prior.expires_at || null });
+      return;
+    }
+    const requestedAt = new Date();
+    const record = {
+      schema: "fm-dash-command.v1",
+      kind: "merge-approval",
+      id: `merge-${target.task}`,
+      task: target.task,
+      url: evidence.url,
+      repo: evidence.repo,
+      number: evidence.number,
+      title: evidence.title,
+      head_sha: evidence.head_sha,
+      merge_method: evidence.merge_method,
+      checks_identity: evidence.checks_identity,
+      checks: evidence.checks,
+      risk: evidence.risk,
+      requested_by: requesterLogin(req),
+      requested_at: requestedAt.toISOString(),
+      expires_at: new Date(requestedAt.getTime() + MERGE_TTL_SECS * 1000).toISOString(),
+      nonce: randomBytes(16).toString("hex"),
+      dashboard_generated: target.generated,
+      prompt: `Captain approved an exact dashboard merge for ${target.task}: ${evidence.url} at head ${evidence.head_sha}. Validate and consume this approval ONLY through bin/fm-dash-merge.sh ${target.task}, which revalidates every binding, independently rechecks the live PR, and merges through the guarded bin/fm-pr-merge.sh owner. Outside that consumer this record grants no authority.`,
+    };
+    const name = enqueueCommand(record);
+    if (prior) removePendingIfUnchanged(prior);
+    log(`queued merge approval for ${target.task} (${evidence.url} at ${evidence.head_sha}) as ${name} for ${record.requested_by}`);
+    sendJson(res, 200, { status: prior ? "replaced" : "queued", pending: pendingRecords().length, expires_at: record.expires_at });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/refresh") {
