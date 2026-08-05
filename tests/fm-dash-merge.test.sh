@@ -274,7 +274,10 @@ test_preview_and_approve_validation() {
   local record_file record
   record_file=$(find "$HOME_DIR/state/dash-inbox" -maxdepth 1 -name '*.json' | head -1)
   [ -n "$record_file" ] || fail "approval left no durable record"
-  [ "$(stat -f %Lp "$record_file" 2>/dev/null || stat -c %a "$record_file")" = 600 ] || fail "approval record is not mode 0600"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$record_file")" = 600 ] || fail "approval record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$record_file")" = 600 ] || fail "approval record is not mode 0600" ;;
+  esac
   record=$(cat "$record_file")
   assert_contains "$record" '"kind": "merge-approval"' "record lacks its kind"
   assert_contains "$record" '"task": "ready-safe"' "record lacks the task binding"

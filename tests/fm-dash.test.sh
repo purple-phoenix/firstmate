@@ -1614,7 +1614,10 @@ test_chat_identity_and_content_validation() {
   assert_contains "$RESP" '"status":"queued"' "valid chat send did not queue"
   file=$(find "$HOME_DIR/state/dash-chat/messages" -name '*.json' | head -1)
   [ -n "$file" ] || fail "queued chat message left no durable record"
-  [ "$(stat -f %Lp "$file" 2>/dev/null || stat -c %a "$file")" = 600 ] || fail "chat record is not mode 0600"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$file")" = 600 ] || fail "chat record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$file")" = 600 ] || fail "chat record is not mode 0600" ;;
+  esac
   stored=$(cat "$file")
   assert_contains "$stored" '"schema": "fm-dash-chat-message.v1"' "chat record lacks its schema"
   assert_contains "$stored" "\"requested_by\": \"$CAPTAIN\"" "chat record lacks the authenticated captain identity"
@@ -1659,7 +1662,10 @@ test_chat_claim_reply_states_and_replay() {
   FM_HOME="$HOME_DIR" "$CHAT_SH" reply "$id" --text-file "$TMP_ROOT/chat-reply.txt" || fail "chat reply failed"
   reply_file="$HOME_DIR/state/dash-chat/replies/$id.json"
   [ -f "$reply_file" ] || fail "chat reply left no ledger record"
-  [ "$(stat -f %Lp "$reply_file" 2>/dev/null || stat -c %a "$reply_file")" = 600 ] || fail "chat reply record is not mode 0600"
+  case "$(uname)" in
+    Darwin) [ "$(stat -f %Lp "$reply_file")" = 600 ] || fail "chat reply record is not mode 0600" ;;
+    *) [ "$(stat -c %a "$reply_file")" = 600 ] || fail "chat reply record is not mode 0600" ;;
+  esac
   local rc=0
   FM_HOME="$HOME_DIR" "$CHAT_SH" reply "$id" --text-file "$TMP_ROOT/chat-reply.txt" 2>/dev/null || rc=$?
   [ "$rc" = 3 ] || fail "a second reply for the same message was not refused with exit 3 (got $rc)"
