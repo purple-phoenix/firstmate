@@ -78,6 +78,11 @@ export MERGE_LOG
 cat > "$FAKE_BIN/fake-merge-owner" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MERGE_LOG"
+[ "${1:-}" ] && [ "${2:-}" ] && [ "${3:-}" = --expected-head ] && [ "${4:-}" ] || exit 2
+if [ -n "${MERGE_LIVE_HEAD:-}" ] && [ "$4" != "$MERGE_LIVE_HEAD" ]; then
+  printf 'error: head is %s, not the expected %s\n' "$MERGE_LIVE_HEAD" "$4" >&2
+  exit 1
+fi
 exit "${MERGE_RC:-0}"
 SH
 chmod 700 "$FAKE_BIN/fake-merge-owner"
@@ -203,6 +208,34 @@ test_evidence_probe_matrix() {
   [ "$(json_field "$out" all_checks_green)" = true ] || fail "green checks not recognized"
   CHECKS_IDENTITY=$(json_field "$out" checks_identity)
   [ "${#CHECKS_IDENTITY}" = 64 ] || fail "checks identity is not a sha256"
+
+  cat > "$GH_FIXTURE" <<EOF
+{
+  "url": "$PR_URL", "number": 12, "title": "rerun", "baseRefName": "main",
+  "state": "OPEN", "isDraft": false, "mergeable": "MERGEABLE", "headRefOid": "$HEAD_A",
+  "statusCheckRollup": [
+    {"name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-08-04T10:00:00Z"},
+    {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-04T10:01:00Z"},
+    {"name":"advisory","status":"COMPLETED","conclusion":"NEUTRAL","startedAt":"2026-08-04T10:02:00Z"}
+  ]
+}
+EOF
+  out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
+  [ "$(json_field "$out" eligible)" = true ] || fail "a successful rerun and neutral check were not eligible: $out"
+  assert_not_contains "$out" '"result": "CANCELLED"' "superseded cancelled rerun remained current evidence"
+
+  cat > "$GH_FIXTURE" <<EOF
+{
+  "url": "$PR_URL", "number": 12, "title": "rerun", "baseRefName": "main",
+  "state": "OPEN", "isDraft": false, "mergeable": "MERGEABLE", "headRefOid": "$HEAD_A",
+  "statusCheckRollup": [
+    {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-04T10:00:00Z"},
+    {"name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-04T10:01:00Z"}
+  ]
+}
+EOF
+  out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
+  [ "$(json_field "$out" eligible)" = false ] || fail "a newer failed rerun was incorrectly eligible"
 
   gh_payload OPEN false MERGEABLE "$HEAD_A" COMPLETED FAILURE SUCCESS
   out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
@@ -344,7 +377,7 @@ EOF
   [ "$rc" = 0 ] || fail "guarded consumer refused a valid approval (rc $rc): $out"
   assert_contains "$out" "merged: $PR_URL at $HEAD_A" "consumer did not report the merged outcome"
   [ "$(grep -c . "$MERGE_LOG")" = 1 ] || fail "the merge owner was not called exactly once"
-  assert_grep "ready-safe $PR_URL -- --squash --match-head-commit $HEAD_A" "$MERGE_LOG" "the merge owner call lost its exact-head binding"
+  assert_equals "ready-safe $PR_URL --expected-head $HEAD_A -- --squash" "$(cat "$MERGE_LOG")" "the guarded consumer lost its expected-head constraint"
   [ -f "$HOME_DIR/state/dash-merge/consumed/$nonce" ] || fail "consumption ledger record missing"
   assert_grep 'outcome=merged' "$HOME_DIR/state/dash-merge/consumed/$nonce" "consumption outcome not recorded"
 
@@ -380,7 +413,7 @@ EOF
 run_consumer() {
   rc=0
   out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_EVIDENCE_BIN="$FAKE_BIN/fake-evidence" FM_DASH_PR_MERGE_BIN="$FAKE_BIN/fake-merge-owner" \
-    EVIDENCE_FIXTURE="$TMP_ROOT/live-evidence.json" "$MERGE_SH" ready-safe 2>&1) || rc=$?
+    EVIDENCE_FIXTURE="$TMP_ROOT/live-evidence.json" MERGE_LIVE_HEAD="${MERGE_LIVE_HEAD:-}" "$MERGE_SH" ready-safe 2>&1) || rc=$?
 }
 
 test_consumer_refusal_matrix() {
@@ -460,6 +493,18 @@ test_consumer_refusal_matrix() {
   run_consumer
   [ "$rc" = 3 ] || fail "a failed attempt was auto-retried (rc $rc)"
   [ "$(grep -c . "$MERGE_LOG")" = 1 ] || fail "the failed merge owner was called more than once"
+  find "$HOME_DIR/state/dash-inbox/archive" -name '*.json' -delete
+
+  write_archived_approval "00000000000000000000000000000010"
+  : > "$MERGE_LOG"
+  MERGE_LIVE_HEAD="$HEAD_B" run_consumer
+  [ "$rc" = 5 ] || fail "a head move between evidence and merge-owner reads was not refused (rc $rc): $out"
+  assert_contains "$out" "head is $HEAD_B, not the expected $HEAD_A" \
+    "the merge owner did not enforce the captain-approved head"
+  assert_not_contains "$out" "merged: $PR_URL at $HEAD_A" \
+    "the consumer falsely reported the approved head merged after it moved"
+  assert_equals "ready-safe $PR_URL --expected-head $HEAD_A -- --squash" "$(cat "$MERGE_LOG")" \
+    "the moved-head attempt lost its owner constraint"
   find "$HOME_DIR/state/dash-inbox/archive" -name '*.json' -delete
   pass "every broken binding refuses, every recheck change invalidates, and no path ever merges twice"
 }

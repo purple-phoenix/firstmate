@@ -3,6 +3,7 @@ name: capacity
 description: >-
   Diagnose meaningful fleet capacity and delivery bottlenecks, then render an offline pipeline dashboard with stable captain action IDs.
   Use when the captain invokes /capacity or asks about capacity, bottlenecks, pipeline utilization, work supply, idle lanes, or maximizing fleet throughput.
+  Also load on a check: wake naming fm-dash.check.sh: it delivers captain-clicked dashboard commands, exact merge approvals, and captain chat messages.
 user-invocable: true
 metadata:
   internal: true

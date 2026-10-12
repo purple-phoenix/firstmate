@@ -1,96 +1,55 @@
 #!/usr/bin/env bash
-# Contract and synthetic event replay for the PR body compliance workflow.
-# shellcheck disable=SC2016
+# Semantic contract test for the PR body compliance workflow.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
-MARKER='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
 
-extract_signature_script() {
-  awk '
-    /^        run: \|$/ { capture=1; next }
-    capture && /^          / { sub(/^          /, ""); print; next }
-    capture { exit }
-  ' "$WORKFLOW"
-}
+ruby - "$WORKFLOW" <<'RUBY' || fail "no-mistakes required workflow contract is invalid"
+require "json"
+require "yaml"
 
-signature_result() {
-  local body=$1 script
-  script=$(extract_signature_script)
-  PR_NUMBER=418 PR_AUTHOR=synthetic-fork-contributor PR_BODY="$body" bash -c "$script" >/dev/null 2>&1
-}
+workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)
+trigger = workflow["on"] || workflow[true]
+pull_request = trigger.fetch("pull_request")
+expected_types = %w[opened edited synchronize reopened]
+raise "pull_request types" unless pull_request.fetch("types") == expected_types
+raise "main branch" unless pull_request.fetch("branches") == ["main"]
 
-render_group() {
-  local action=$1 run_id=$2
-  case "$action" in
-    opened|edited) printf 'no-mistakes-required-418-%s\n' "$run_id" ;;
-    synchronize|reopened) printf 'no-mistakes-required-418-head-change\n' ;;
-  esac
-}
+permissions = workflow.fetch("permissions")
+raise "contents permission" unless permissions.fetch("contents") == "read"
+raise "pull-request permission" unless permissions.fetch("pull-requests") == "read"
 
-render_run_name() {
-  local action=$1 run_number=$2 run_id=$3
-  printf 'PR #418 body compliance - %s - event %s (run %s)\n' "$action" "$run_number" "$run_id"
-}
+group = workflow.fetch("concurrency").fetch("group")
+expected_group = "no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}"
+raise "event concurrency identity" unless group == expected_group
+raise "head cancellation" unless workflow.fetch("concurrency").fetch("cancel-in-progress") == true
 
-test_signature_sequence_at_fixed_head() {
-  signature_result "Synthetic body\n\n## Pipeline\n\n$MARKER" || fail "signed opened event must succeed"
-  if signature_result 'Synthetic unsigned edit'; then
-    fail "unsigned edited event must fail"
-  fi
-  signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
-  pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
-}
+run_name = workflow.fetch("run-name")
+%w[github.event.action github.run_number github.run_id].each do |field|
+  raise "run name missing #{field}" unless run_name.include?(field)
+end
 
-test_event_identity_contract() {
-  local opened edited_one edited_two synchronize reopened
-  opened=$(render_group opened 9001)
-  edited_one=$(render_group edited 9002)
-  edited_two=$(render_group edited 9003)
-  synchronize=$(render_group synchronize 9004)
-  reopened=$(render_group reopened 9005)
-  [ "$opened" != "$edited_one" ] && [ "$opened" != "$edited_two" ] && [ "$edited_one" != "$edited_two" ] || \
-    fail "body events must have distinct immutable groups"
-  [ "$synchronize" = "$reopened" ] || fail "synchronize and reopened must share head-change"
-  case "$opened $edited_one $edited_two" in *head-change*) fail "body event reused head-change" ;; esac
+job = workflow.fetch("jobs").fetch("check")
+raise "stable check name" unless job.fetch("name") == "PR must be raised via no-mistakes"
+condition = job.fetch("if")
+raise "github-actions exemption" unless condition.include?("github-actions[bot]")
+raise "dependabot exemption" unless condition.include?("dependabot[bot]")
+raise "release-please exemption" if condition.include?("release-please[bot]")
 
-  assert_grep "group: no-mistakes-required-\${{ github.event.pull_request.number }}-\${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}" "$WORKFLOW" \
-    "workflow does not implement immutable body-event groups"
-  assert_grep 'cancel-in-progress: true' "$WORKFLOW" "workflow lost cancellation for coalesced head changes"
-  pass "body event groups are distinct while head changes remain coalesced"
-}
+steps = job.fetch("steps")
+raise "one delegated attestation step" unless steps.length == 1
+step = steps.fetch(0)
+expected_action = "kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970"
+raise "pinned attestation action" unless step.fetch("uses") == expected_action
+raise "maintainer exemption" unless step.fetch("with").fetch("exempt-authors") == "kunchenguid"
 
-test_run_names_are_ordered_and_unique() {
-  local first second
-  first=$(render_run_name edited 73 9002)
-  second=$(render_run_name edited 74 9003)
-  [ "$first" = 'PR #418 body compliance - edited - event 73 (run 9002)' ] || fail "first synthetic run name is incomplete"
-  [ "$second" = 'PR #418 body compliance - edited - event 74 (run 9003)' ] || fail "second synthetic run name is incomplete"
-  [ "$first" != "$second" ] || fail "distinct events must have unique run names"
-  assert_grep 'run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"' "$WORKFLOW" \
-    "workflow run name does not expose PR, action, monotonic run number, and immutable run ID"
-  pass "run names expose monotonic numbers and immutable IDs"
-}
+normalized = JSON.generate(workflow)
+raise "workflow checks out fork code" if normalized.include?("actions/checkout")
+raise "workflow reads secrets" if normalized.include?("secrets.")
+raise "workflow grants write" if permissions.values.include?("write")
+RUBY
 
-test_security_and_signature_contract_is_preserved() {
-  assert_grep '  pull_request:' "$WORKFLOW" "workflow must use pull_request"
-  assert_no_grep 'pull_request_target' "$WORKFLOW" "workflow must not use pull_request_target"
-  assert_grep '  contents: read' "$WORKFLOW" "contents permission must remain read-only"
-  assert_no_grep 'contents: write' "$WORKFLOW" "workflow must not gain contents write permission"
-  assert_no_grep 'secrets.' "$WORKFLOW" "workflow must not read secrets"
-  assert_no_grep 'actions/checkout' "$WORKFLOW" "workflow must not check out fork code"
-  assert_grep 'name: PR must be raised via no-mistakes' "$WORKFLOW" "stable required check name changed"
-  assert_grep "$MARKER" "$WORKFLOW" "signature marker changed"
-  assert_grep "github.event.pull_request.user.login != 'github-actions[bot]'" "$WORKFLOW" "github-actions bot exemption changed"
-  assert_grep "github.event.pull_request.user.login != 'dependabot[bot]'" "$WORKFLOW" "dependabot bot exemption changed"
-  assert_no_grep 'release-please[bot]' "$WORKFLOW" "Firstmate must not exempt release-please"
-  pass "fork, permission, check-name, marker, and bot-exemption contracts are preserved"
-}
-
-test_signature_sequence_at_fixed_head
-test_event_identity_contract
-test_run_names_are_ordered_and_unique
-test_security_and_signature_contract_is_preserved
+pass "no-mistakes workflow semantically preserves event identity, permissions, and pinned attestation"

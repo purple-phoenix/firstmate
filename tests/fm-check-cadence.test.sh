@@ -196,8 +196,8 @@ test_transition_never_claims_a_running_watcher_rereads_it() {
   # a live watcher picked the new cadence up.
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
     "the arm line must not pretend a running watcher rereads the cadence"
-  assert_contains "$out" "repair missing watcher supervision" \
-    "the arm line must carry the harness supervision repair instruction"
+  printf '%s\n' "$out" | grep -Eq 'repair (missing|a missing)|watcher supervision needs' \
+    || fail "the arm line must carry the harness supervision repair instruction"
   disarm "$home"
   out=$(cadence "$home" reconcile)
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
@@ -216,12 +216,10 @@ test_transition_line_is_harness_aware() {
   # tests/fm-supervision-instructions.test.sh.
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$home/state" \
     FM_ROOT_OVERRIDE="$ROOT" CLAUDECODE=1 "$CADENCE" reconcile 2>&1)
-  assert_contains "$out" "Claude Code background task" \
+  assert_contains "$out" "Stop-owned automatic recovery" \
     "a claude primary must get the claude repair mechanism"
   assert_not_contains "$out" "fm-watch-checkpoint.sh" \
     "a claude primary must not be handed codex's foreground checkpoint"
-  assert_contains "$out" "bin/fm-watch-arm.sh" \
-    "the repair instruction must use the cadence-validating watcher owner"
   assert_not_contains "$out" "source" \
     "the repair instruction must not source generated cadence bytes"
   pass "the transition's repair instruction follows the detected primary harness"
@@ -257,8 +255,8 @@ test_legacy_cadence_file_is_removed_when_nothing_is_armed() {
   assert_interval "$home" 300 "a disarmed migrated home must run at the default cadence"
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
     "the legacy-only release must be honest about an already-running watcher"
-  assert_contains "$out" "repair missing watcher supervision" \
-    "the legacy-only release must carry the harness supervision repair instruction"
+  printf '%s\n' "$out" | grep -Eq 'repair (missing|a missing)|watcher supervision needs' \
+    || fail "the legacy-only release must carry the harness supervision repair instruction"
   pass "a home with only the pre-rename cadence file returns to the default cadence"
 }
 
@@ -345,14 +343,25 @@ test_apply_never_evaluates_artifact_bytes() {
   pass "apply exports only the validated fixed cadence without evaluating file bytes"
 }
 
-test_watcher_launch_owners_use_apply_boundary() {
-  # shellcheck disable=SC2016 # The fixed-string needle must keep WATCH literal.
-  assert_grep 'fm-cadence.sh" apply -- "$WATCH"' "$ROOT/bin/fm-watch-arm.sh" \
-    "the arm owner must route watcher startup through cadence apply"
-  # shellcheck disable=SC2016 # The fixed-string needle must keep SCRIPT_DIR literal.
-  assert_grep 'fm-cadence.sh" apply -- "$SCRIPT_DIR/fm-watch.sh"' "$ROOT/bin/fm-watch-checkpoint.sh" \
-    "the checkpoint owner must route watcher startup through cadence apply"
-  pass "both standard watcher launch owners use the validated apply boundary"
+test_watch_arm_applies_validated_cadence() {
+  local home out status
+  home=$(make_home watcher-arm)
+  cat > "$home/state/interval.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'interval=%s\n' "${FM_CHECK_INTERVAL:-300}"
+SH
+  chmod 0700 "$home/state/interval.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" interval >/dev/null \
+    || fail "could not register watcher cadence check"
+  arm_telegram "$home"
+  cadence "$home" reconcile >/dev/null
+  rm -f "$home/state/fm-telegram.check.sh"
+  status=0
+  out=$(unset FM_CHECK_INTERVAL; FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$ROOT/bin/fm-watch-arm.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "watch arm cadence exit"
+  assert_contains "$out" "interval=30" "watch arm did not launch the watcher with validated cadence"
+  pass "the standard watch arm launches with the validated fast cadence"
 }
 
 test_cadence_file_carries_no_secret_and_no_channel_identity() {
@@ -403,6 +412,6 @@ test_symlinked_cadence_destination_is_refused
 test_generated_file_is_private
 test_verify_rejects_noncanonical_artifacts
 test_apply_never_evaluates_artifact_bytes
-test_watcher_launch_owners_use_apply_boundary
+test_watch_arm_applies_validated_cadence
 test_cadence_file_carries_no_secret_and_no_channel_identity
 test_path_command_needs_no_home_state

@@ -2,7 +2,8 @@
 name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from current quota-axi output, including quota-window pace signals.
+  array from quota-axi's default TOON, ranking by spendPriority after three
+  orthogonal gates.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
 metadata:
@@ -11,160 +12,123 @@ metadata:
 
 # quota-array-dispatch
 
-This skill is the single owner of the pace-aware profile-array selection procedure.
-The concise always-loaded intake boundary remains in `AGENTS.md` section 4.
-`docs/configuration.md` owns the `config/crew-dispatch.json` schema only.
-`quota-axi` remains data-only and never recommends a route.
-Firstmate owns the judgment.
+This skill is the single owner of the completion-aware profile-array selection procedure.
+`AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
+`harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
+`quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
+The [worker helper](../../../bin/fm-quota-choose.sh) and [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) own their deterministic mapping boundaries.
 
-## When to load
+## Worker-side quota helper
 
-Load this skill whenever a matched dispatch rule or the configured default resolves to a profile array (more than one candidate), before choosing the concrete `--harness`, `--model`, and `--effort` passed to `fm-spawn`.
-Keep using `harness-adapters` for harness verification, model/provider discovery, and effort fallback.
+The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.
+Pass it the intake's already-captured default TOON or permitted JSON fallback through stdin or `--snapshot`; it never takes another quota snapshot, so it selects from the same quota state as the intake.
+Pass each candidate as `harness:model`, with earlier candidates preferred.
+The helper's header owns its provider mapping and quota selection mechanics.
+An `exhausted_now` runway vetoes the candidate.
+The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
+This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
+omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
+Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.
+Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
+It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
+Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) has its own documented gates.
+It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 
-## Intake boundary this skill does not relax
+## Read the default TOON
 
-1. Explicit per-task captain overrides still win over configured profiles.
-2. Configured profile matching precedence is unchanged: best-fit rule, then configured default, then static crewmate harness.
-3. Malformed `config/crew-dispatch.json` remains an actionable error; never select around it.
-4. Every configured candidate in the matched array must be accounted for.
-5. If any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate instead of omitting it, guessing, falling back, or calling the result quota-informed.
-6. When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
-7. Genuine ties must remain free of array-order or harness bias.
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
+Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
+Sparse `attention[]` names auth, stale, and unmeasurable facts.
+`spendPriority` is THE quota-perspective ranker.
+It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
+Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
-## Collect inspectable facts for every candidate
+After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
+Ambiguous means a candidate's `spendPriority` is the literal `unknown` or unmeasurable, a real tie still needs extra evidence, or a candidate's eligibility is unclear from `quota[]` plus `attention[]`.
+The fallback therefore has an explicit TOON-then-JSON call sequence; reuse its JSON result and do not take any further quota snapshots.
+Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports `MISSING` before dispatch; if an intake somehow reaches an older build whose TOON lacks `spendPriority`, use the defensive `--json` fallback rather than treating the missing scalar as healthy.
+`--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
+Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
-For each candidate profile:
+For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
-1. Establish the harness/model/provider relationship from current authoritative discovery owned by `harness-adapters`.
-   Fail loudly on an unresolved relationship.
-2. Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-3. Require a current provider report with known quota semantics and a known applicable effective-availability record for that candidate's provider and model scope.
-   Stale raw windows remain diagnostic evidence only and are never current headroom.
-4. Read every bounding window relevant to that candidate, including windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, and `unknownWindowIds` on the effective record.
-5. Record these inspectable facts, never a hidden score:
-   - task/profile fit
-   - reasoning class required by the captain request or task ambiguity
-   - raw applicable headroom (`effectivePercentRemaining` or the tightest applicable remaining percentage)
-   - effective pace status when present
-   - signed reserve for each applicable window and the effective worst reserve when present
-   - whether any applicable window or effective summary is ahead of reset
-   - whether any applicable pace is `unknown`
-   - schema compatibility note when pace fields are absent
+## Three gates, then spendPriority
 
-## Pace signals
+Apply the three cheap orthogonal gates first.
+`spendPriority` ranks only among candidates that pass all three.
+It cannot override a hard-gate failure, and it is never hidden inside a new composite score.
 
-quota-axi `schemaVersion` 3 window pace uses:
+### 1. Eligibility
 
-- `reservePercentPoints = percentRemaining - timeRemainingPercent`
-- Negative reserve means usage is ahead of reset pace and creates conservation pressure.
-- Positive reserve means usage is behind reset pace.
-- `on_pace` is neutral.
+Outside those documented mappings, deterministic shell must not infer a provider family or credential store from a harness, model, or source name.
+You establish the remaining relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
-Effective-availability pace summaries may report `ahead`, `behind`, `on_pace`, `mixed`, or `unknown`.
+Confirm the catalog lists the candidate's model and record the provider family it reports.
+A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
+Apply quota at the granularity the vendor actually supplies.
+A provider-level or `all_models`/`all_products` scope bounds every model you established in that family within the candidate's matched account, including one with no window of its own.
+A named-model or named-product scope is an additional bound for that model alone.
+Match the candidate to its `quota[]` row by that established provider, its `accountKey` when the snapshot is schema 6 (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter, then the `default` row, else unmeasured; never a row picked by position, never rows summed across accounts), and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
 
-Treat conservation pressure as present when:
+A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it, and `harness=pi` with `model=xai/grok-*` is Pi using xAI rather than the standalone Grok CLI.
+`quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
+A provider can carry a healthy source beside a missing or expired one; the unused source's state is not the candidate's state.
+A Pi-hosted family may authenticate through the vendor's own store with no `pi:`-prefixed source at all, which is normal and never evidence against the candidate.
 
-- effective pace status is `ahead`, or
-- effective pace status is `mixed` and any `aheadWindowIds` remain, or
-- any applicable bounding window itself has pace status `ahead`.
+Uncertainty and ineligibility are different findings:
 
-An effective `mixed` result is never healthy merely because one window is behind.
-Any remaining `aheadWindowIds` keep conservation pressure.
+- No model-level window, no matching auth source, an unmeasurable or `unknown` scope, or a surface quota-axi does not model at all is disclosed uncertainty.
+  Keep the candidate eligible, state the unknown, and prefer known viable evidence when otherwise comparable.
+- An expired credential is a short-lived session token the owning vendor renews on next use, not a sign-out.
+- Only concrete contradictory evidence blocks: an authoritative catalog proving the model unsupported, or proof that the credential the candidate actually selects is unusable.
+- Reserve login wording for that proven-unusable case, and name the harness, model, surface, and evidence.
 
-Signed reserve comparison uses the worst applicable reserve, preferring the producer field `worstReservePercentPoints` when present and otherwise the minimum signed reserve across applicable bounding windows.
+When a credential's local classification is the only thing standing between a candidate and a block, get ground truth before blocking.
+`bin/fm-vendor-auth-probe.sh` is the only approved vendor-credential probe; its `--help` owns the registered probes and mechanics.
+It takes no harness, model, or provider and returns a fact, not a route: only `authenticated` and `unauthenticated` are ground truth, while `indeterminate`, `timeout`, and `unavailable` establish nothing and must never be read as either outcome.
+Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
+Grok prepaid `credits` are unrelated to paid-window headroom; never read them as exhaustion.
 
-## Selection procedure
+Malformed configuration is an actionable error, not a candidate to rank around.
 
-Apply these steps only among candidates that already satisfy required task/profile fit and the strongest reasoning class the request genuinely needs.
-Never use pace or raw headroom to silently replace that reasoning class with a weaker one.
+### 2. Reasoning-class fit
 
-1. **Unresolved relationship or quota data**
-   Stop and report the blocked candidate.
-2. **Strongest-reasoning / all-tight**
-   If every remaining candidate is tight, keep the strongest-reasoning class and either dispatch inside that class or stop and report that the tight choice cannot proceed.
-   Do not conserve quota through an unapproved downgrade.
-3. **Conservation pressure vs sustainable pace**
-   When fit and reasoning class are comparable, prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure, even when the pressured candidate has somewhat higher raw remaining percentage.
-4. **Among pressured candidates**
-   Prefer the least-negative worst applicable reserve.
-   Example: worst reserve `-4` is safer than `-18` when other inspectable facts are comparable.
-5. **Among sustainable candidates**
-   Use known behind/on-pace evidence plus raw headroom transparently.
-   Do not collapse those facts into an opaque composite score.
-   Prefer known sustainable evidence over `unknown` pace when otherwise comparable.
-   Between known sustainable candidates, prefer the clearly better inspectable pair of pace reserve and raw headroom; state both facts in the choice rationale.
-6. **Unknown pace**
-   `unknown` is valid explicit uncertainty from quota-axi, not a parser failure and not permission to assume the window is healthy or exhausted.
-   Inspect `unknownWindowIds` and each window's pace `reason` so the rationale preserves the producer's stated uncertainty.
-   Prefer known sustainable evidence when otherwise comparable.
-   If the dispatch choice materially hinges on unresolved pace, report the uncertainty rather than inventing a conclusion.
-7. **Absent pace / older schema**
-   `schemaVersion` 2 payloads or missing pace fields must degrade explicitly and safely.
-   Do not crash, fabricate pace, or silently reinterpret absence as healthy/`on_pace`.
-   Compare raw applicable headroom only, using known effective availability rather than stale or isolated window percentages, state that pace is unavailable, and keep every other safety rule above.
-8. **Genuine ties**
-   If every inspectable selection fact is equal, stop and report every tied candidate for captain choice.
-   Do not select by array order, harness name, or another arbitrary identity ordering.
-   Report duplicate concrete profiles as a configuration error.
+Keep only candidates that meet the required reasoning class for this task (a simple bug fix versus very-difficult design).
+Never use `spendPriority` or remaining quota to silently replace that class.
+When every remaining candidate is tight, dispatch inside the strongest-reasoning class if one of those candidates can proceed, or stop and report that the strongest-class choice cannot proceed rather than downgrading it to spend or conserve quota.
 
-The intake rationale must name the inspectable facts used for every candidate.
+### 3. Runway feasibility floor
+
+Known runway that will not last until the inspectable likely-completion horizon fails this gate, even when that candidate has the highest `spendPriority`.
+Read `runway` from the `quota[]` row: `through_reset` passes this generic feasibility floor because the window reaches its refill without exhausting; never compare its `resetsAt` with the completion horizon as though reset were an exhaustion deadline.
+`exhausted_now` is zero, and `projected_exhaustion` uses the matching `exhaustion[]` row's `usableRunwaySeconds`.
+A high `spendPriority` on a nearly empty window that will exhaust soon must not route into a mid-task stall.
+Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
+Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
+
+## Rank by spendPriority
+
+Among candidates that pass all three gates, pick the highest known `spendPriority`.
+A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
+Rank only from comparable known scalars.
+Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
+An unknown `spendPriority` keeps the candidate eligible with disclosed uncertainty.
+Prefer known viable evidence when otherwise comparable.
+After the permitted TOON-to-JSON fallback, escalate to Firstmate instead of routing if no candidate can be ranked or runway uncertainty prevents proving the feasibility floor for any candidate that could be selected.
+Never resolve that terminal uncertainty by treating unknown as healthy or by choosing arbitrarily.
+Show the scalar or the literal `unknown` in the rationale; do not hide it in a score.
+
+Do not compare headroom against runway by hand.
+Do not use pace or signed reserve as a later tie-break layer.
+Do not read `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `limitingWindowIds`, or other window-id lists to reconstruct what `spendPriority` already computed.
+
+Genuine ties: stop and report every tied candidate for captain choice.
+Do not select by array order, harness name, or another arbitrary identity ordering.
+Report duplicate concrete profiles as a configuration error.
+
+Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
+A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.
-
-## Acceptance scenarios
-
-These scenarios are normative examples of the procedure above.
-
-### Higher raw quota but materially ahead vs lower raw quota on/behind pace
-
-Candidate A has higher `effectivePercentRemaining` but conservation pressure from an ahead bounding window.
-Candidate B has lower raw headroom, no conservation pressure, and known behind or on-pace evidence.
-Choose B when fit and reasoning class are comparable.
-
-### Mixed effective pace with an ahead bound
-
-Effective pace status is `mixed` and `aheadWindowIds` is non-empty.
-Treat the candidate as conservation-pressured even if another window is behind or on pace.
-
-### Both candidates ahead with different worst reserves
-
-Both candidates have conservation pressure.
-Choose the least-negative worst applicable reserve when fit and reasoning class are comparable.
-
-### Known sustainable versus unknown
-
-Candidate A has known behind or on-pace evidence.
-Candidate B has comparable fit, reasoning class, and raw headroom but `unknown` pace.
-Prefer A.
-If the only way to prefer one side depends on unresolved pace and no known sustainable candidate remains, report the uncertainty.
-
-### Every candidate tight while strongest-reasoning applies
-
-All candidates are tight on real headroom.
-Keep the strongest reasoning class required by the request.
-Do not pick a weaker class only to save quota.
-Dispatch inside that class or stop and report that the tight strongest-class choice cannot proceed.
-
-### Genuine tie without array-order or harness bias
-
-Two candidates match on fit, reasoning class, conservation pressure, worst reserve, pace class, raw headroom, and unknown flags.
-Choosing either array order or a standing harness preference is forbidden.
-Stop and report both tied candidates for captain choice.
-
-### schemaVersion 2 or absent-pace compatibility
-
-Older quota-axi output or missing pace fields still allow array resolution.
-Compare raw headroom only, state that pace is unavailable, and do not invent ahead/behind/on_pace.
-
-## Sanitized producer shape
-
-Validate consumers against a sanitized `schemaVersion` 3 shape derived from quota-axi 0.1.15:
-
-- top level: `schemaVersion`, `generatedAt`, `providers[]`
-- each provider: `provider`, `state`, `windows[]`, and optional `quotaSemantics` with `status` and `effectiveAvailability[]`
-- each window: `id`, `label`, `kind`, and optional `percentRemaining` and `pace`; pace has `status` plus optional `reason`, `timeRemainingPercent`, and `reservePercentPoints`
-- each effective-availability entry: `scope`, `status`, `boundedBy`, optional `effectivePercentRemaining`, optional `limitingWindowIds`, and optional pace summary
-- each effective pace summary: `status` plus optional `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `unknownWindowIds`, `worstReservePercentPoints`, and `worstReserveWindowId`
-
-Never persist live provider balances, reset timestamps, account identifiers, or other private account details in tracked fixtures.

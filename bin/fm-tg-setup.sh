@@ -349,7 +349,9 @@ cmd_uninstall() {
   # Before the token-removal steps below, which can abort: the channel is already
   # disarmed at this point, so the cadence must not be left fast on that path.
   reconcile_cadence
-  fm_tg_token_remove keychain || cleanup_failed=1
+  if [ "$(uname)" = Darwin ]; then
+    fm_tg_token_remove keychain || cleanup_failed=1
+  fi
   fm_tg_token_remove file || cleanup_failed=1
   if [ "$cleanup_failed" = 1 ]; then
     config_merge '.enabled = false'

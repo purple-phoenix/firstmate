@@ -15,12 +15,13 @@
  *
  * Eligibility is deliberately strict: eligible=true only for an open,
  * non-draft, mergeable pull request whose current checks are ALL terminal
- * green (CheckRun status COMPLETED with conclusion SUCCESS or SKIPPED;
- * StatusContext state SUCCESS). That is a superset of GitHub's required-check
- * set, so a PR the dashboard offers for merge is never weaker than the
- * branch-protection requirement. checks_identity is the sha256 of the sorted
- * "name<TAB>result" lines and binds an approval to the exact check set and
- * results it was granted against.
+ * green (CheckRun status COMPLETED with conclusion SUCCESS, NEUTRAL, or
+ * SKIPPED; StatusContext state SUCCESS). Superseded completed CheckRuns follow
+ * the guarded merge owner's current-run rules. That is a superset of GitHub's
+ * required-check set, so a PR the dashboard offers for merge is never weaker
+ * than the branch-protection requirement. checks_identity is the sha256 of the
+ * sorted "name<TAB>result" lines and binds an approval to the exact check set
+ * and results it was granted against.
  *
  * Usage: fm-dash-pr-evidence.mjs <task-id>
  * Environment: FM_HOME / FM_STATE_OVERRIDE select the home;
@@ -72,23 +73,52 @@ function parseGithubPrUrl(raw) {
 function checkResults(rollup) {
   if (!Array.isArray(rollup)) return null;
   const checks = [];
-  for (const entry of rollup) {
+  const checkRunGroups = new Map();
+  for (const [index, entry] of rollup.entries()) {
     if (!entry || typeof entry !== "object") return null;
     if (typeof entry.context === "string") {
-      // Legacy commit status context: terminal green is exactly SUCCESS.
       const state = typeof entry.state === "string" ? entry.state : "UNKNOWN";
       checks.push({ name: entry.context.slice(0, 200), result: state, green: state === "SUCCESS" });
       continue;
     }
-    const name = typeof entry.name === "string" ? entry.name.slice(0, 200) : null;
-    if (!name) return null;
+    const fullName = typeof entry.name === "string" ? entry.name : null;
+    if (!fullName) return null;
     const status = typeof entry.status === "string" ? entry.status : "UNKNOWN";
     const conclusion = typeof entry.conclusion === "string" ? entry.conclusion : "";
-    const terminal = status === "COMPLETED";
-    const green = terminal && (conclusion === "SUCCESS" || conclusion === "SKIPPED");
-    checks.push({ name, result: terminal ? conclusion || "UNKNOWN" : status, green });
+    const completed = status === "COMPLETED";
+    const green = completed && ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion);
+    const startedAt = typeof entry.startedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(entry.startedAt)
+      ? entry.startedAt
+      : null;
+    const group = checkRunGroups.get(fullName) || [];
+    group.push({
+      index,
+      name: fullName.slice(0, 200),
+      result: completed ? conclusion || "UNKNOWN" : status,
+      green,
+      completed,
+      startedAt,
+    });
+    checkRunGroups.set(fullName, group);
   }
-  return checks;
+  const currentRuns = [];
+  for (const group of checkRunGroups.values()) {
+    const newestGreen = group
+      .filter((check) => check.green && check.startedAt !== null)
+      .map((check) => check.startedAt)
+      .sort()
+      .at(-1) || null;
+    for (const check of group) {
+      const superseded = !check.green
+        && check.completed
+        && check.startedAt !== null
+        && newestGreen !== null
+        && check.startedAt < newestGreen;
+      if (!superseded) currentRuns.push(check);
+    }
+  }
+  currentRuns.sort((left, right) => left.index - right.index);
+  return checks.concat(currentRuns.map(({ name, result, green }) => ({ name, result, green })));
 }
 
 function checksIdentity(checks) {

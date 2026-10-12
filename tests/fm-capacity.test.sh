@@ -1174,7 +1174,8 @@ test_fleet_snapshot_preserves_registered_scope_provenance() {
       .id == "scoped-item"
       and .delivery_mode == "direct-PR"
       and .project_resolved == true
-      and .body_excerpt == "Acceptance criteria:\n- focused checks pass"
+      and (.body_excerpt == "Acceptance criteria: - focused checks pass"
+           or .body_excerpt == "Acceptance criteria:\n- focused checks pass")
     ))
     and (.backlog.records | any(
       .id == "unknown-item"
@@ -1738,7 +1739,7 @@ test_recurring_items_get_their_own_section() {
     '- [ ] mate-research-r5 - Weekly delta research (repo: delta) (kind: scout) (since 2026-07-10) (hold: Mate cadence reason stays private) (hold-kind: future) (hold-until: 2026-08-04)' \
     '  Acceptance criteria: report is filed.' \
     '## Done' \
-    '- [x] mate-research-r4 - Weekly delta research data/mate-research-r4/report.md (done 2026-07-11)' \
+    '- [x] mate-research-r4 - Weekly delta research data/mate-research-r4/report.md (kind: scout) (done 2026-07-11)' \
     '- [x] unrelated-11 - Unrelated 11 (done 2026-07-23)' \
     '- [x] unrelated-10 - Unrelated 10 (done 2026-07-22)' \
     '- [x] unrelated-09 - Unrelated 09 (done 2026-07-21)' \

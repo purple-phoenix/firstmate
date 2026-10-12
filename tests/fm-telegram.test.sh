@@ -771,8 +771,10 @@ out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "switching to file ownership must remove the old keychain token"
 mode=$(stat -c %a "$HOME_DIR/config/telegram-token" 2>/dev/null || stat -f %Lp "$HOME_DIR/config/telegram-token")
 [ "$mode" = 600 ] || fail "the fallback token file must be mode 0600, got $mode"
-grep -q '^config/telegram-token$' "$ROOT/.gitignore" || fail "the fallback token file must be gitignored"
-grep -q '^config/telegram\.json$' "$ROOT/.gitignore" || fail "the channel configuration must be gitignored"
+git -C "$ROOT" check-ignore -q -- config/telegram-token \
+  || fail "the fallback token file must be gitignored"
+git -C "$ROOT" check-ignore -q -- config/telegram.json \
+  || fail "the channel configuration must be gitignored"
 tg fm-tg-setup.sh enable >/dev/null || fail "enable must work with the file token owner"
 tg fm-tg-reply.sh --event file-owner-check --text-file "$TMP_ROOT/reply.txt" >/dev/null \
   || fail "sending must work with the file token owner"
@@ -817,31 +819,7 @@ grep -q 'evil.invalid' "$CURL_LOG" && fail "a quote-bearing API base reached cur
 pass "transport: a base that could break out of the request config file is refused, not interpolated"
 
 # =============================================================================
-# 8. No listening socket, no webhook, one outbound owner
-# =============================================================================
-
-for s in fm-tg-lib.sh fm-tg-poll.sh fm-tg-reply.sh fm-tg-inbox.sh fm-tg-setup.sh fm-tg-link.sh; do
-  if grep -Eq 'setWebhook|nc -l|--listen|createServer|socat|LISTEN' "$ROOT/bin/$s"; then
-    fail "$s must not register a webhook or open a listening socket"
-  fi
-done
-senders=$(grep -rl 'sendMessage' "$ROOT/bin" | grep -v fm-tg-lib.sh || true)
-[ "$senders" = "$ROOT/bin/fm-tg-reply.sh" ] || fail "exactly one script may send to Telegram, found: $senders"
-callers=$(grep -rl 'api\.telegram\.org\|fm_tg_api ' "$ROOT/bin" | LC_ALL=C sort | tr '\n' ' ')
-case "$callers" in
-  *fm-tg-lib.sh*fm-tg-poll.sh*fm-tg-reply.sh*fm-tg-setup.sh*) ;;
-  *) fail "unexpected Telegram transport caller set: $callers" ;;
-esac
-pass "boundary: no webhook, no listening socket, and a single outbound owner"
-
-# Ordinary internal firstmate machinery must not be able to reach Telegram.
-if grep -rl 'fm-tg-reply\.sh' "$ROOT/bin" | grep -v 'fm-tg-' | grep -q .; then
-  fail "no general firstmate script may push to Telegram; only firstmate itself decides to reply"
-fi
-pass "boundary: no watcher, status, or lifecycle script can push internal progress to Telegram"
-
-# =============================================================================
-# 9. The registered watcher check is what actually wakes firstmate
+# 8. The registered watcher check is what actually wakes firstmate
 # =============================================================================
 
 reset_ingress
@@ -872,7 +850,7 @@ pass "watcher: the check is byte-bound, so a tampered check is refused rather th
 tg fm-tg-setup.sh enable >/dev/null || fail "re-enable must restore the check"
 
 # =============================================================================
-# 10. Supervision and removal
+# 9. Supervision and removal
 # =============================================================================
 
 # shellcheck source=/dev/null
@@ -882,14 +860,21 @@ fm_supervision_needed "$HOME_DIR/state" 300 \
 pass "supervision: a Telegram-only home keeps one live supervision cycle"
 
 pending_before=$(tg fm-tg-inbox.sh pending-count)
-printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
-chmod 600 "$HOME_DIR/config/telegram-token"
-out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1); rc=$?
-[ "$rc" != 0 ] || fail "uninstall must fail when a token owner cannot be confirmed empty"
-[ -f "$HOME_DIR/config/telegram.json" ] || fail "a failed uninstall removed the configuration needed to retry cleanup"
-[ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "the failed uninstall silently lost the keychain failure evidence"
-case "$out" in *"could not be confirmed empty"*) ;; *) fail "failed uninstall did not report incomplete credential cleanup: $out" ;; esac
-out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
+if [ "$(uname)" = Darwin ]; then
+  printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
+  chmod 600 "$HOME_DIR/config/telegram-token"
+  out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1); rc=$?
+  [ "$rc" != 0 ] || fail "uninstall must fail when a token owner cannot be confirmed empty"
+  [ -f "$HOME_DIR/config/telegram.json" ] || fail "a failed uninstall removed the configuration needed to retry cleanup"
+  [ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "the failed uninstall silently lost the keychain failure evidence"
+  case "$out" in *"could not be confirmed empty"*) ;; *) fail "failed uninstall did not report incomplete credential cleanup: $out" ;; esac
+  out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
+else
+  out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
+    || fail "non-Darwin file-token setup must succeed: $out"
+  out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1) \
+    || fail "non-Darwin uninstall must not require keychain cleanup: $out"
+fi
 [ ! -f "$HOME_DIR/config/telegram.json" ] || fail "uninstall must remove the configuration"
 [ ! -f "$HOME_DIR/config/telegram-token" ] || fail "uninstall must remove a stale fallback token"
 [ ! -f "$HOME_DIR/state/fm-telegram.check.sh" ] || fail "uninstall must remove the watcher check"

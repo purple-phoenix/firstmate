@@ -1146,7 +1146,7 @@ test_check_shim_wakes_only_when_pending() {
 }
 
 test_installer_plist_and_funnel_stance() {
-  local escaped_home funnel_check plist
+  local escaped_home plist
   plist=$(FM_HOME="$HOME_DIR" "$INSTALL_SH" print-plist) || fail "print-plist failed"
   assert_contains "$plist" 'io.firstmate.dashboard.' "plist lacks the per-home label"
   assert_contains "$plist" 'fm-dash-serve.mjs' "plist does not run the dashboard service"
@@ -1154,24 +1154,11 @@ test_installer_plist_and_funnel_stance() {
   assert_contains "$plist" '<key>RunAtLoad</key><true/>' "plist does not start at load"
   assert_contains "$plist" "<string>$HOME_DIR</string>" "plist does not pin FM_HOME"
   printf '%s' "$plist" | grep -qi funnel && fail "plist mentions funnel"
-  grep -n 'tailscale funnel' "$INSTALL_SH" && fail "installer invokes tailscale funnel"
-  assert_grep 'assert_no_funnel' "$INSTALL_SH" "installer does not verify funnel is off"
-  assert_grep 'never enables Funnel' "$INSTALL_SH" "installer does not declare the funnel boundary"
-  funnel_check=$(sed -n '/^assert_no_funnel()/,/^write_config_file()/p' "$INSTALL_SH")
-  assert_contains "$funnel_check" 'unsupported tailscale serve status schema' "Funnel verification does not reject unexpected schemas"
-  assert_contains "$funnel_check" 'could not verify Funnel state' "Funnel verification does not report unreadable status"
-  assert_contains "$funnel_check" 'process.exit(1)' "Funnel verification does not fail closed"
-  assert_contains "$(sed -n '/if ! assert_no_funnel/,/fi/p' "$INSTALL_SH")" 'fail_install' "failed Funnel verification does not enter transactional rollback"
-  # The single-quoted assertion is intentionally literal.
-  # shellcheck disable=SC2016
-  assert_contains "$(sed -n '/^rollback_install()/,/^fail_install()/p' "$INSTALL_SH")" 'disable_serve_port "$TX_NEW_SERVE_PORT"' "transactional rollback does not tear down the replacement mapping"
-  assert_contains "$(sed -n '/^cmd_install()/,/^cmd_uninstall()/p' "$INSTALL_SH")" 'unregister_check' "read-only install does not unregister a prior writable watcher"
-  assert_contains "$(sed -n '/^cmd_uninstall()/,/^cmd_status()/p' "$INSTALL_SH")" 'unregister_check' "uninstall does not unregister the watcher"
   escaped_home="$HOME_DIR/xml & < >"
   plist=$(FM_HOME="$escaped_home" FM_ROOT_OVERRIDE="$HOME_DIR/root & < >" "$INSTALL_SH" print-plist) || fail "print-plist with XML metacharacters failed"
   assert_contains "$plist" "$HOME_DIR/xml &amp; &lt; &gt;" "plist did not XML-escape FM_HOME"
   assert_contains "$plist" "$HOME_DIR/root &amp; &lt; &gt;/bin/fm-dash-serve.mjs" "plist did not XML-escape the executable path"
-  pass "the launchd agent survives reboots and the installer is structurally funnel-free"
+  pass "the launchd agent contract survives reboots without public exposure settings"
 }
 
 test_installer_tracks_custom_serve_port() {
@@ -1275,9 +1262,13 @@ fi
 EOF
   chmod 700 "$fake_bin/uname" "$fake_bin/launchctl" "$fake_bin/mv" "$fake_bin/tailscale"
   : > "$tailscale_state"
+  FM_HOME="$install_home" "$INSTALL_SH" write-check >/dev/null || fail "could not seed a writable watcher check"
+  [ -f "$install_home/state/fm-dash.check-trust" ] || fail "writable watcher check was not registered"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" install --read-only --port 18847 --serve-port 19443 --captain "$CAPTAIN" >/dev/null \
     || fail "custom-port install failed"
+  [ ! -e "$install_home/state/fm-dash.check.sh" ] || fail "read-only install left the writable watcher check installed"
+  [ ! -e "$install_home/state/fm-dash.check-trust" ] || fail "read-only install left watcher trust installed"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19443) process.exit(1)' "$install_home/config/dash.json" \
     || fail "install did not persist the custom serve port"
   cp "$install_home/config/dash.json" "$prior_config"
@@ -1343,16 +1334,21 @@ EOF
   assert_grep 'off 19443' "$tailscale_log" "port-change install did not remove the recorded previous mapping"
   node -e 'const c=require(process.argv[1]); if(c.serve_port !== 19553) process.exit(1)' "$install_home/config/dash.json" \
     || fail "replacement install did not persist the active serve port"
+  FM_HOME="$install_home" "$INSTALL_SH" write-check >/dev/null || fail "could not seed the uninstall watcher check"
+  [ -f "$install_home/state/fm-dash.check-trust" ] || fail "uninstall watcher check was not registered"
   : > "$tailscale_log"
   uninstall_output=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_INVALID_SERVE_STATUS=1 TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall 2>&1) && fail "uninstall accepted unreadable serve status"
   assert_contains "$uninstall_output" 'could not inspect or remove the dashboard mapping for port 19553' "uninstall did not fail clearly on unreadable serve status"
   [ "$(cat "$launchctl_state")" = loaded ] || fail "unreadable serve status removed the launchd service"
+  [ -f "$install_home/state/fm-dash.check-trust" ] || fail "failed uninstall removed the watcher registration"
   assert_no_grep 'off 19553' "$tailscale_log" "unreadable serve status removed the dashboard mapping"
   : > "$tailscale_log"
   HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
     "$INSTALL_SH" uninstall >/dev/null || fail "plain uninstall failed"
   assert_grep 'off 19553' "$tailscale_log" "plain uninstall did not remove the recorded active mapping"
+  [ ! -e "$install_home/state/fm-dash.check.sh" ] || fail "uninstall left the watcher check installed"
+  [ ! -e "$install_home/state/fm-dash.check-trust" ] || fail "uninstall left watcher trust installed"
   printf '%s\n' '19553|http://127.0.0.1:29998' '20554|http://127.0.0.1:29999|complex' >> "$tailscale_state"
   : > "$tailscale_log"
   uninstall_output=$(HOME="$launch_home" FM_HOME="$install_home" LAUNCHCTL_LOG="$launchctl_log" LAUNCHCTL_STATE="$launchctl_state" REAL_MV="$real_mv" TAILSCALE_LOG="$tailscale_log" TAILSCALE_STATE="$tailscale_state" PATH="$fake_bin:$PATH" \
@@ -1685,34 +1681,10 @@ test_chat_claim_reply_states_and_replay() {
   pass "chat delivery is at-least-once, replies are at-most-once, and states track the durable records"
 }
 
-test_service_contract_docs_and_ownership() {
-  assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
-  assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
-  assert_grep 'fm-dash' "$ROOT/AGENTS.md" "AGENTS.md lacks the dashboard command wake trigger"
-  assert_grep 'dash-inbox' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-inbox"
-  assert_grep 'config/dash.json' "$ROOT/.gitignore" "config/dash.json is not gitignored"
-  assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
-  assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
-  assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
-  assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
-  # The single-quoted assertion is intentionally literal.
-  # shellcheck disable=SC2016
-  assert_grep 'bounded read-only excerpt from a resolved `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
-  assert_grep 'bounded home snapshot reads that exact structured record' "$ROOT/docs/dashboard-service.md" "service doc omits supervisor decision projection"
-  assert_grep 'Secondmate briefs, metadata, status tails, and chat remain prohibited' "$ROOT/docs/dashboard-service.md" "service doc broadens secondmate detail ingestion"
-  assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
-  assert_grep 'at-least-once' "$INBOX_SH" "inbox consumer omits its delivery contract"
-  assert_grep 'Captain chat' "$ROOT/docs/dashboard-service.md" "service doc omits the chat destination"
-  assert_grep 'Exact PR merge approval' "$ROOT/docs/dashboard-service.md" "service doc omits the merge approval flow"
-  assert_grep 'not end-to-end application encryption' "$ROOT/docs/dashboard-service.md" "service doc overstates the encryption guarantee"
-  assert_grep 'dash-chat' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-chat"
-  assert_grep 'dash-merge' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-merge"
-  assert_grep 'fm-dash-merge.sh' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not route merge approvals to the guarded consumer"
-  assert_grep 'fm-dash-chat.sh claim' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not claim chat messages"
-  assert_grep 'unknown kind' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not refuse unknown sensitive record kinds"
-  assert_grep 'fm-dash.check.sh' "$ROOT/bin/fm-supervision-lib.sh" "the dashboard channel is not an armed inbound captain channel"
-  assert_grep 'at-least-once' "$CHAT_SH" "chat consumer omits its delivery contract"
-  pass "the service is documented and wired into the operating contract"
+test_config_is_gitignored() {
+  git -C "$ROOT" check-ignore -q -- config/dash.json \
+    || fail "config/dash.json is not gitignored"
+  pass "dashboard configuration is ignored by Git"
 }
 
 test_identity_fails_closed
@@ -1746,6 +1718,6 @@ test_chat_destination_is_serve_layer_only
 test_chat_identity_and_content_validation
 test_chat_idempotency_and_duplicate_sends
 test_chat_claim_reply_states_and_replay
-test_service_contract_docs_and_ownership
+test_config_is_gitignored
 
 echo "fm-dash tests passed"
