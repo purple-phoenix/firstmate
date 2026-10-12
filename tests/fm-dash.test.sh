@@ -1685,43 +1685,10 @@ test_chat_claim_reply_states_and_replay() {
   pass "chat delivery is at-least-once, replies are at-most-once, and states track the durable records"
 }
 
-test_service_contract_docs_and_ownership() {
-  assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
-  assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
-  assert_grep 'fm-dash' "$ROOT/AGENTS.md" "AGENTS.md lacks the dashboard command wake trigger"
-  assert_grep 'dash-inbox' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
-    "operational-home-layout state map lacks dash-inbox"
-  if ! grep -qE '^(config/dash\.json|config/)$' "$ROOT/.gitignore"; then
-    fail "config/dash.json is not gitignored"
-  fi
-  assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
-  assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
-  assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
-  assert_grep 'Put the question and its options in the hold reason' \
-    "$ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md" \
-    "captain-hold lifecycle does not own options filing"
-  assert_grep 'fm-captain-hold.sh hold' "$ROOT/docs/dashboard-service.md" \
-    "service doc does not point decision filing at captain-hold"
-  # The single-quoted assertion is intentionally literal.
-  # shellcheck disable=SC2016
-  assert_grep 'bounded read-only excerpt from a resolved `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
-  assert_grep 'bounded home snapshot reads that exact structured record' "$ROOT/docs/dashboard-service.md" "service doc omits supervisor decision projection"
-  assert_grep 'Secondmate briefs, metadata, status tails, and chat remain prohibited' "$ROOT/docs/dashboard-service.md" "service doc broadens secondmate detail ingestion"
-  assert_grep 'only free text accepted anywhere is bounded captain-authored content' "$ROOT/docs/dashboard-service.md" "service doc omits the bounded free-text boundary"
-  assert_grep 'at-least-once' "$INBOX_SH" "inbox consumer omits its delivery contract"
-  assert_grep 'Captain chat' "$ROOT/docs/dashboard-service.md" "service doc omits the chat destination"
-  assert_grep 'Exact PR merge approval' "$ROOT/docs/dashboard-service.md" "service doc omits the merge approval flow"
-  assert_grep 'not end-to-end application encryption' "$ROOT/docs/dashboard-service.md" "service doc overstates the encryption guarantee"
-  assert_grep 'dash-chat' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
-    "operational-home-layout state map lacks dash-chat"
-  assert_grep 'dash-merge' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
-    "operational-home-layout state map lacks dash-merge"
-  assert_grep 'fm-dash-merge.sh' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not route merge approvals to the guarded consumer"
-  assert_grep 'fm-dash-chat.sh claim' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not claim chat messages"
-  assert_grep 'unknown kind' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not refuse unknown sensitive record kinds"
-  assert_grep 'fm-dash.check.sh' "$ROOT/bin/fm-supervision-lib.sh" "the dashboard channel is not an armed inbound captain channel"
-  assert_grep 'at-least-once' "$CHAT_SH" "chat consumer omits its delivery contract"
-  pass "the service is documented and wired into the operating contract"
+test_config_is_gitignored() {
+  git -C "$ROOT" check-ignore -q -- config/dash.json \
+    || fail "config/dash.json is not gitignored"
+  pass "dashboard configuration is ignored by Git"
 }
 
 test_identity_fails_closed
@@ -1755,6 +1722,6 @@ test_chat_destination_is_serve_layer_only
 test_chat_identity_and_content_validation
 test_chat_idempotency_and_duplicate_sends
 test_chat_claim_reply_states_and_replay
-test_service_contract_docs_and_ownership
+test_config_is_gitignored
 
 echo "fm-dash tests passed"

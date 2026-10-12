@@ -771,13 +771,10 @@ out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
 [ -z "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "switching to file ownership must remove the old keychain token"
 mode=$(stat -c %a "$HOME_DIR/config/telegram-token" 2>/dev/null || stat -f %Lp "$HOME_DIR/config/telegram-token")
 [ "$mode" = 600 ] || fail "the fallback token file must be mode 0600, got $mode"
-# Upstream owns a blanket config/ ignore; older forks listed each file.
-if ! grep -qE '^(config/telegram-token|config/)$' "$ROOT/.gitignore"; then
-  fail "the fallback token file must be gitignored"
-fi
-if ! grep -qE '^(config/telegram\.json|config/)$' "$ROOT/.gitignore"; then
-  fail "the channel configuration must be gitignored"
-fi
+git -C "$ROOT" check-ignore -q -- config/telegram-token \
+  || fail "the fallback token file must be gitignored"
+git -C "$ROOT" check-ignore -q -- config/telegram.json \
+  || fail "the channel configuration must be gitignored"
 tg fm-tg-setup.sh enable >/dev/null || fail "enable must work with the file token owner"
 tg fm-tg-reply.sh --event file-owner-check --text-file "$TMP_ROOT/reply.txt" >/dev/null \
   || fail "sending must work with the file token owner"

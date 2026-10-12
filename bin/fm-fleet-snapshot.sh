@@ -1292,8 +1292,8 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
-        | ([capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>[^;)]*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
-        | ([capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>[^;)]*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
+        | ([capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>.*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
+        | ([capture("^- [^[:space:]]+[[:space:]]+-[[:space:]]+(?<summary>.*)[[:space:]]+\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>.*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
         | ($local // $remote) as $route
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),

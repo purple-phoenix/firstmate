@@ -1024,6 +1024,45 @@ test_registry_unavailability_and_bounds_are_explicit() {
   pass "registry unavailability and bounded truncation remain explicit"
 }
 
+test_registry_projection_preserves_semicolons_in_scope() {
+  local home local_home remote_home fakebin json
+  home=$(make_home registry-scope-semicolons)
+  local_home="$TMP_ROOT/registry-scope-local"
+  remote_home="$TMP_ROOT/registry-scope-remote"
+  make_valid_secondmate_home local-scope "$local_home"
+  make_valid_secondmate_home remote-scope "$remote_home"
+  write_remote_home_summary "$remote_home" 1783792700
+  cat > "$home/data/secondmates.md" <<EOF
+- local-scope - local fixture (home: $local_home; scope: models; regulation; projects: alpha; added 2026-07-11)
+- remote-scope - remote fixture (host: remote-scope; root: /remote/root; home: $remote_home; scope: models; regulation; projects: beta; added 2026-07-11)
+EOF
+  fakebin=$(make_remote_ledger_ssh "$home/remote-ssh")
+  mkdir -p "$home/ledger-active"
+  : > "$home/ledger-calls.log"
+  : > "$home/ledger-pids.log"
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_LEDGER_CALL_LOG="$home/ledger-calls.log" \
+    FM_TEST_LEDGER_PID_LOG="$home/ledger-pids.log" \
+    FM_TEST_LEDGER_ACTIVE_DIR="$home/ledger-active" \
+    FM_SNAPSHOT_CACHE_DIR="$home/state/summary-cache" FM_SNAPSHOT_BUDGET=5 \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot rejected a supported semicolon-bearing scope"
+  printf '%s' "$json" | jq -e --arg local_home "$local_home" --arg remote_home "$remote_home" '
+    (.secondmate_current.registry.records | length) == 2
+      and all(.secondmate_current.registry.records[];
+        .scope == "models; regulation" and .registry_error == null)
+      and (.secondmate_current.registry.records[] | select(.id == "local-scope")
+        | .remote == false and .home == $local_home and .projects == ["alpha"])
+      and (.secondmate_current.registry.records[] | select(.id == "remote-scope")
+        | .remote == true and .host == "remote-scope" and .home == $remote_home
+          and .projects == ["beta"])
+  ' >/dev/null \
+    || fail "registry projection lost a semicolon-bearing scope or route: $json"
+  pass "local and remote registry projections preserve semicolons in scope"
+}
+
 test_current_landed_baseline_is_repeatable_and_prior_report_independent() {
   local home fakebin one two
   home=$(make_home standalone-baseline); write_fixture "$home"
@@ -3372,6 +3411,7 @@ test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
+test_registry_projection_preserves_semicolons_in_scope
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
