@@ -123,7 +123,10 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha or --match-head-commit because the head comes only from the
-# live read. An existing task-meta pr= must equal the requested canonical URL,
+# live read. A GitHub caller may pass one --expected-head <sha> before the
+# optional -- separator; the merge refuses unless every live preflight reads
+# that exact head, while the owner still passes its own verified head to gh.
+# An existing task-meta pr= must equal the requested canonical URL,
 # unless that bound PR has already merged - proven by its recorded merge
 # notification - in which case the task's next PR is accepted so several PRs
 # from one task can each merge in turn; while the bound PR is still unmerged a
@@ -135,7 +138,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--expected-head <sha>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -196,6 +199,7 @@ shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
+EXPECTED_HEAD=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -226,6 +230,17 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-missing requires a separate check name argument" >&2
       exit 2
       ;;
+    --expected-head)
+      [ -n "${2:-}" ] || { echo "error: --expected-head requires a commit SHA" >&2; exit 2; }
+      [ -z "$EXPECTED_HEAD" ] || { echo "error: --expected-head may be specified only once" >&2; exit 2; }
+      fm_pr_head_valid "$2" || { echo "error: --expected-head requires a full commit SHA" >&2; exit 2; }
+      EXPECTED_HEAD=$2
+      shift 2
+      ;;
+    --expected-head=*)
+      echo "error: --expected-head requires a separate commit SHA argument" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -236,6 +251,10 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
 fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ -n "$EXPECTED_HEAD" ] && [ "$PROVIDER" != github ]; then
+  echo "error: --expected-head applies only to GitHub pull requests" >&2
   exit 2
 fi
 
@@ -785,6 +804,9 @@ FIELDS
 "
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+"
+  [ -z "$EXPECTED_HEAD" ] || [ "$live_head" = "$EXPECTED_HEAD" ] \
+    || refusals="$refusals  - head is $live_head, not the expected $EXPECTED_HEAD
 "
 
   uncovered=''

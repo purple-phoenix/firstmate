@@ -775,6 +775,38 @@ test_github_mergeable_conflicting_is_not_retried() {
   pass "fm-pr-merge refuses a genuine mergeable conflict immediately, without retrying"
 }
 
+test_github_expected_head_binds_caller_approval() {
+  local case_dir rc expected live
+  expected=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  live=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case github-expected-head-moved)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$live"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+    --expected-head "$expected" -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-expected-head-moved: a different live head must refuse"
+  assert_grep "head is $live, not the expected $expected" "$case_dir/stderr" \
+    "github-expected-head-moved: the refusal did not name both heads"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-expected-head-moved: gh pr merge ran for an unapproved head"
+
+  case_dir=$(make_case github-expected-head-matches)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$expected"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+    --expected-head "$expected" -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-expected-head-matches: the approved live head should merge"
+  assert_logged_gh_merge "$case_dir" 87 example/repo --squash
+  pass "fm-pr-merge refuses a moved expected head and internally binds a matching head"
+}
+
 test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   local case_dir rc
   case_dir=$(make_case github-outcome-read-fails)
@@ -2370,6 +2402,7 @@ test_github_mergeable_unknown_retries_then_succeeds
 test_github_mergeable_unknown_exhausts_bound_and_reports_pending
 test_github_mergeable_unknown_retry_rechecks_checks
 test_github_mergeable_conflicting_is_not_retried
+test_github_expected_head_binds_caller_approval
 test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_refusal_quotes_the_forge_output
 test_github_unreadable_outcome_refusal_quotes_the_forge_output
