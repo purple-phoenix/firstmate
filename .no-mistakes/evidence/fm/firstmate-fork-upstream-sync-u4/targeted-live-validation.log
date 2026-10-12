@@ -1,0 +1,25 @@
+$ bash tests/fm-telegram.test.sh
+ok - enable: arms the 30s check cadence idempotently and is honest about the restart it needs
+ok - uninstall: token, pairing, config, and polling are removed, and received messages are accounted for
+ok - fm-telegram: all checks passed
+$ bash tests/fm-check-cadence.test.sh
+ok - a Telegram-only home runs its check on the 30s cadence
+ok - an installed writable dashboard is an armed captain channel on the 30s cadence
+ok - the standard watch arm launches with the validated fast cadence
+$ bash tests/fm-dash-merge.test.sh
+ok - the evidence probe grants eligibility only to an open, non-draft, mergeable, all-green GitHub PR
+ok - one approval merges exactly once through the guarded owner and can never merge again
+ok - every broken binding refuses, every recheck change invalidates, and no path ever merges twice
+ok - a real browser sends chat safely at 390px and click-approves one exact merge through the fake guarded owner
+fm-dash-merge tests passed
+$ bash tests/fm-dispatch-resolve.test.sh
+ok - clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate
+ok - native Codex binds to codex-home before default, independently of Pi accounts and row order
+ok - schema 6: each candidate binds to its account row; schema 5 is unchanged
+# all fm-dispatch-resolve tests passed
+$ gh-axi pr view 30
+  number: 30
+  state: open
+  draft: no
+  merged: no
+  checks: "19 passed, 0 failed, 19 total"
