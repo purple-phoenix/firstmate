@@ -1611,7 +1611,7 @@ SH
 
 test_opencode_arm_plugin_decides_with_the_shared_predicate() {
   command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
-  local driver case_name dir state config out status
+  local driver case_name dir state out status
   driver="$TMP_ROOT/arm-decision-driver.mjs"
   cat > "$driver" <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
