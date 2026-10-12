@@ -152,22 +152,13 @@ SH
 chmod +x "$FAKEBIN/security"
 
 REAL_CURL=$(command -v curl)
-REAL_UNAME=$(command -v uname)
 cat > "$FAKEBIN/curl" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CURL_LOG"
 [ -z "\${FM_TG_TEST_CURL_RC:-}" ] || exit "\$FM_TG_TEST_CURL_RC"
 exec "$REAL_CURL" "\$@"
 SH
-cat > "$FAKEBIN/uname" <<SH
-#!/usr/bin/env bash
-if [ -n "\${FM_TG_TEST_UNAME:-}" ]; then
-  printf '%s\n' "\$FM_TG_TEST_UNAME"
-  exit 0
-fi
-exec "$REAL_UNAME" "\$@"
-SH
-chmod +x "$FAKEBIN/curl" "$FAKEBIN/uname"
+chmod +x "$FAKEBIN/curl"
 : > "$CURL_LOG"
 
 HOME_DIR="$TMP_ROOT/home"
@@ -893,14 +884,21 @@ fm_supervision_needed "$HOME_DIR/state" 300 \
 pass "supervision: a Telegram-only home keeps one live supervision cycle"
 
 pending_before=$(tg fm-tg-inbox.sh pending-count)
-printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
-chmod 600 "$HOME_DIR/config/telegram-token"
-out=$(FM_TG_TEST_UNAME=Darwin FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1); rc=$?
-[ "$rc" != 0 ] || fail "uninstall must fail when a token owner cannot be confirmed empty"
-[ -f "$HOME_DIR/config/telegram.json" ] || fail "a failed uninstall removed the configuration needed to retry cleanup"
-[ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "the failed uninstall silently lost the keychain failure evidence"
-case "$out" in *"could not be confirmed empty"*) ;; *) fail "failed uninstall did not report incomplete credential cleanup: $out" ;; esac
-out=$(FM_TG_TEST_UNAME=Darwin tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
+if [ "$(uname)" = Darwin ]; then
+  printf '%s\n' "$TOKEN" > "$HOME_DIR/config/telegram-token"
+  chmod 600 "$HOME_DIR/config/telegram-token"
+  out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1); rc=$?
+  [ "$rc" != 0 ] || fail "uninstall must fail when a token owner cannot be confirmed empty"
+  [ -f "$HOME_DIR/config/telegram.json" ] || fail "a failed uninstall removed the configuration needed to retry cleanup"
+  [ -n "$(ls -A "$KEYSTORE" 2>/dev/null)" ] || fail "the failed uninstall silently lost the keychain failure evidence"
+  case "$out" in *"could not be confirmed empty"*) ;; *) fail "failed uninstall did not report incomplete credential cleanup: $out" ;; esac
+  out=$(tg fm-tg-setup.sh uninstall 2>&1) || fail "uninstall must succeed: $out"
+else
+  out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
+    || fail "non-Darwin file-token setup must succeed: $out"
+  out=$(FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1) \
+    || fail "non-Darwin uninstall must not require keychain cleanup: $out"
+fi
 [ ! -f "$HOME_DIR/config/telegram.json" ] || fail "uninstall must remove the configuration"
 [ ! -f "$HOME_DIR/config/telegram-token" ] || fail "uninstall must remove a stale fallback token"
 [ ! -f "$HOME_DIR/state/fm-telegram.check.sh" ] || fail "uninstall must remove the watcher check"
@@ -912,13 +910,5 @@ fi
 out=$(tg fm-tg-poll.sh 2>&1)
 [ -z "$out" ] || fail "an uninstalled channel must be inert again, got: $out"
 pass "uninstall: token, pairing, config, and polling are removed, and received messages are accounted for"
-
-out=$(printf '%s\n' "$TOKEN" | tg fm-tg-setup.sh token --owner file 2>&1) \
-  || fail "non-Darwin file-token setup must succeed: $out"
-out=$(FM_TG_TEST_UNAME=Linux FM_TG_TEST_SECURITY_DELETE_FAIL=1 tg fm-tg-setup.sh uninstall 2>&1) \
-  || fail "non-Darwin uninstall must not require keychain cleanup: $out"
-[ ! -f "$HOME_DIR/config/telegram.json" ] || fail "non-Darwin uninstall must remove the configuration"
-[ ! -f "$HOME_DIR/config/telegram-token" ] || fail "non-Darwin uninstall must remove the file token"
-pass "uninstall: non-Darwin file-token cleanup does not require a keychain"
 
 echo "ok - fm-telegram: all checks passed"
