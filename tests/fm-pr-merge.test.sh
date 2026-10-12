@@ -562,8 +562,21 @@ write_forgejo_status_json() {
   if [ "$total" = 0 ]; then
     printf '{"state":"","total_count":0,"statuses":[]}\n' > "$file"
   else
-    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" \
-      "$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)" \
+    # Build each status object with printf rather than nested sed \" escapes:
+    # bash 3.2 (stock macOS) splits `sed "s/.*/{\"k\":\"v\"}/"` into two
+    # commands, so the fixture JSON becomes unreadable and every Forgejo
+    # happy-path merge refuses with combined status "unreadable".
+    local statuses='' i=1 obj
+    while [ "$i" -le "$total" ]; do
+      obj=$(printf '{"context":"ci-%s","status":"%s"}' "$i" "$state")
+      if [ -n "$statuses" ]; then
+        statuses="$statuses,$obj"
+      else
+        statuses=$obj
+      fi
+      i=$((i + 1))
+    done
+    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" "$statuses" \
       > "$file"
   fi
 }
