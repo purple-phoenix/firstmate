@@ -343,14 +343,25 @@ test_apply_never_evaluates_artifact_bytes() {
   pass "apply exports only the validated fixed cadence without evaluating file bytes"
 }
 
-test_watcher_launch_owners_use_apply_boundary() {
-  # shellcheck disable=SC2016 # The fixed-string needle must keep WATCH literal.
-  assert_grep 'fm-cadence.sh" apply -- "$WATCH"' "$ROOT/bin/fm-watch-arm.sh" \
-    "the arm owner must route watcher startup through cadence apply"
-  # shellcheck disable=SC2016 # The fixed-string needle must keep SCRIPT_DIR literal.
-  assert_grep 'fm-cadence.sh" apply -- "$SCRIPT_DIR/fm-watch.sh"' "$ROOT/bin/fm-watch-checkpoint.sh" \
-    "the checkpoint owner must route watcher startup through cadence apply"
-  pass "both standard watcher launch owners use the validated apply boundary"
+test_watch_arm_applies_validated_cadence() {
+  local home out status
+  home=$(make_home watcher-arm)
+  cat > "$home/state/interval.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'interval=%s\n' "${FM_CHECK_INTERVAL:-300}"
+SH
+  chmod 0700 "$home/state/interval.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" interval >/dev/null \
+    || fail "could not register watcher cadence check"
+  arm_telegram "$home"
+  cadence "$home" reconcile >/dev/null
+  rm -f "$home/state/fm-telegram.check.sh"
+  status=0
+  out=$(unset FM_CHECK_INTERVAL; FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$ROOT/bin/fm-watch-arm.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "watch arm cadence exit"
+  assert_contains "$out" "interval=30" "watch arm did not launch the watcher with validated cadence"
+  pass "the standard watch arm launches with the validated fast cadence"
 }
 
 test_cadence_file_carries_no_secret_and_no_channel_identity() {
@@ -401,6 +412,6 @@ test_symlinked_cadence_destination_is_refused
 test_generated_file_is_private
 test_verify_rejects_noncanonical_artifacts
 test_apply_never_evaluates_artifact_bytes
-test_watcher_launch_owners_use_apply_boundary
+test_watch_arm_applies_validated_cadence
 test_cadence_file_carries_no_secret_and_no_channel_identity
 test_path_command_needs_no_home_state
