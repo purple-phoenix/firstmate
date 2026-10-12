@@ -2087,7 +2087,7 @@ function classify(snapshot, environment, waitHistory = { schema: "fm-capacity-wa
     "CAP-01", "captain-held decisions", 30,
     `${decisions.length} structured captain decision or hold${decisions.length === 1 ? "" : "s"} ${decisions.length === 1 ? "is" : "are"} open: ${decisions.slice(0, 4).map((item) => `${item.owner}/${item.key}`).join(", ")}.`,
     "Resolving the highest-dependency decision may release blocked work without adding execution load.",
-    "Approval in chat re-enters decision-hold-lifecycle; the dashboard neither records nor applies an answer.",
+    "Approval in chat re-enters captain-hold-lifecycle; the dashboard neither records nor applies an answer.",
     "Discuss or decide the listed holds, starting with the one that releases the most downstream work.",
     "Approve CAP-01: walk me through the open captain decisions in dependency order and route each answer through the normal decision lifecycle."
   );

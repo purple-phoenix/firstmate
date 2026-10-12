@@ -1,65 +1,17 @@
 #!/usr/bin/env bash
-# Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR.
-# For an open, ready GitHub PR, the same single gh read also returns the body so
-# up to eight tailnet preview links can be probed with one-second connect and
-# two-second total timeouts.
-# Only a canonical labeled declaration is monitored: a case-insensitive
-# "Preview URL", "Visual evidence report", or "Feature testing report" label,
-# plain or bold, immediately followed by a tailnet link. Unlabeled links in
-# transcripts, command output, and worked examples are ignored, so a PR that
-# documents this poll cannot make the watcher monitor its own fixture host.
-# This is a deliberate compatibility boundary: a bare tailnet URL with no label
-# is no longer monitored, and a PR that wants monitoring must declare it.
-# Recognizing declarations rather than excluding examples is what keeps this one
-# grep instead of a Markdown block parser; the residual is that a body quoting a
-# canonical declaration line verbatim inside a transcript is still monitored, so
-# published transcripts defang the scheme of any example preview URL.
-# A link that fails that first budget is retried once at two-second connect and
-# five-second total timeouts, because a loaded host can push an otherwise healthy
-# tailnet round trip past the first budget while the service answers in
-# milliseconds. Both budgets are fixed, and preview probing stops without a
-# verdict once it passes PREVIEW_DEADLINE_SECS, which keeps the work inside the
-# watcher's per-check ceiling instead of trading one wrong alert for an
-# unbounded wait.
-# A link still failing after the retry is corroborated once against local
-# evidence bound to that exact captain-facing authority: the loopback proxy
-# target Tailscale currently serves for it must answer 200 with a body on the
-# same path. Corroboration only defers - it records the failure and stays silent
-# for one check interval - so the next failing poll wakes firstmate anyway. A
-# missing or non-loopback serve mapping, an unreadable mapping, or a loopback
-# target that does not answer alerts on the first failing poll instead.
-# A newly detected failed preview emits one line naming the task and PR; the
-# committed failed-link identity suppresses repeats until recovery or link change.
-# Every other error is silent, so a failed forge lookup can never be read as a
-# merge or dead preview.
-# Preview probes resolve the link host directly to this machine's Tailscale IPv4
-# address and never follow redirects, so they cannot escape to public services.
-# The corroborating probe is accepted only against a http://127.0.0.1:<port>
-# target read fresh from tailscale serve on every poll, so local evidence can
-# never be borrowed from another preview or a stale mapping.
-# The provider-tagged identity is data in the sidecar and is never interpolated
-# into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Static watcher program for a validated pull request, merge request, or Gerrit
+# change poll sidecar.
+# It emits exactly one merged line for a merged change and stays silent
+# otherwise, including on every error, so a failed lookup can never be read as
+# a merge. The provider-tagged identity is data in the sidecar and is never
+# interpolated into this source: these bytes are identical for every task.
+# Each provider is read through its own standard CLI, gh for GitHub, glab for
+# GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
+# tooling to follow the first two. The Gerrit branch additionally needs jq,
+# which bin/fm-pr-check.sh refuses to arm a Gerrit watch without.
 set -u
 LC_ALL=C
 export LC_ALL
-
-# Probe budgets. The first pair is the captain-facing fast path; the second is
-# the single bounded retry that absorbs a loaded tailnet round trip. The
-# deadline covers preview probing only, measured from a baseline this script
-# sets itself. It is checked before the retry and before corroboration, so the
-# longest probing run is the deadline plus one of those steps, which leaves the
-# forge read headroom under the default 30-second FM_CHECK_TIMEOUT.
-PREVIEW_CONNECT_SECS=1
-PREVIEW_MAX_SECS=2
-PREVIEW_RETRY_CONNECT_SECS=2
-PREVIEW_RETRY_MAX_SECS=5
-PREVIEW_LOCAL_CONNECT_SECS=1
-PREVIEW_LOCAL_MAX_SECS=2
-PREVIEW_TAILSCALE_SECS=3
-PREVIEW_DEADLINE_SECS=18
 
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
@@ -67,8 +19,6 @@ if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   host=$4
   path=$5
   number=$6
-  task=${FM_PR_POLL_TASK_ID:-}
-  preview_state=${FM_PR_POLL_STATE:-}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -86,9 +36,6 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
-  task=${0##*/}
-  task=${task%.check.sh}
-  preview_state=${data%/*}
 else
   exit 0
 fi
@@ -100,310 +47,6 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
-
-task_valid() {
-  case "$1" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-}
-
-preview_marker=
-preview_pending=
-preview_suspect=
-if task_valid "$task" && [ -d "$preview_state" ] && [ ! -L "$preview_state" ]; then
-  preview_marker=$preview_state/$task.preview-outage
-  preview_pending=$preview_state/$task.preview-outage-pending
-  preview_suspect=$preview_state/$task.preview-suspect
-fi
-
-tailnet_ipv4_valid() {
-  local ip=$1 a b c d
-  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-  a=${BASH_REMATCH[1]}
-  b=${BASH_REMATCH[2]}
-  c=${BASH_REMATCH[3]}
-  d=${BASH_REMATCH[4]}
-  [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] \
-    && [ "$c" -le 255 ] && [ "$d" -le 255 ]
-}
-
-# Recovery, a link change, and every non-open-ready PR state retire the whole
-# preview record for this task, including the unconfirmed-failure record, so a
-# later failure starts from a clean slate rather than inheriting an old verdict.
-preview_outage_clear() {
-  [ -n "$preview_marker" ] || return 0
-  if [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ]; then
-    rm -f -- "$preview_marker" 2>/dev/null || true
-  fi
-  if [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ]; then
-    rm -f -- "$preview_pending" 2>/dev/null || true
-  fi
-  if [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ]; then
-    rm -f -- "$preview_suspect" 2>/dev/null || true
-  fi
-}
-
-# True when this exact PR and preview link already failed a previous poll while
-# local evidence still corroborated them. That is the second consecutive
-# captain-facing failure, so the deferral is spent and the wake is due.
-preview_record_matches() {
-  local record=$1 failed_link=$2 recorded_url recorded_link
-  [ -n "$record" ] || return 1
-  [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  {
-    IFS= read -r recorded_url || return 1
-    IFS= read -r recorded_link || [ -n "$recorded_link" ] || return 1
-  } < "$record" 2>/dev/null
-  [ "$recorded_url" = "$url" ] && [ "$recorded_link" = "$failed_link" ]
-}
-
-preview_suspect_matches() {
-  preview_record_matches "$preview_suspect" "$1"
-}
-
-preview_pending_matches() {
-  preview_record_matches "$preview_pending" "$1"
-}
-
-preview_outage_clear_changed() {
-  local failed_link=$1
-  if { [ -f "$preview_marker" ] && [ ! -L "$preview_marker" ] \
-      && ! preview_record_matches "$preview_marker" "$failed_link"; } \
-    || { [ -f "$preview_pending" ] && [ ! -L "$preview_pending" ] \
-      && ! preview_record_matches "$preview_pending" "$failed_link"; } \
-    || { [ -f "$preview_suspect" ] && [ ! -L "$preview_suspect" ] \
-      && ! preview_record_matches "$preview_suspect" "$failed_link"; }; then
-    preview_outage_clear
-  fi
-}
-
-preview_suspect_record() {
-  local failed_link=$1 tmp
-  [ -n "$preview_suspect" ] || return 1
-  if { [ -e "$preview_suspect" ] || [ -L "$preview_suspect" ]; } \
-    && { [ ! -f "$preview_suspect" ] || [ -L "$preview_suspect" ]; }; then
-    return 1
-  fi
-  umask 077
-  tmp=$(mktemp "$preview_state/.fm-preview-suspect.XXXXXX") || return 1
-  if ! printf '%s\n%s\n' "$url" "$failed_link" > "$tmp" || ! chmod 0600 "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! mv -f -- "$tmp" "$preview_suspect"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-# Run a read-only local command under a wall clock when a timeout tool is
-# installed. Without one the watcher's FM_CHECK_TIMEOUT ceiling stays the only
-# bound, which is why no probe budget below depends on this helper alone.
-preview_bounded() {
-  local secs=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-  else
-    "$@"
-  fi
-}
-
-# One bounded HTTP probe: success is exactly a 200 carrying a body, matching the
-# captain's own definition of a usable preview. Extra curl arguments, such as
-# the tailnet --resolve pin, are passed through ahead of the fixed budget.
-preview_http_ok() {
-  local connect=$1 max=$2 target=$3 result code bytes
-  shift 3
-  result=$(curl -q --noproxy '*' "$@" \
-    --connect-timeout "$connect" --max-time "$max" -sS -o /dev/null \
-    -w '%{http_code} %{size_download}' "$target" 2>/dev/null) || result='000 0'
-  case "$result" in
-    *' '*) code=${result%% *}; bytes=${result#* } ;;
-    *) code=000; bytes=0 ;;
-  esac
-  case "$code" in
-    [0-9][0-9][0-9]) ;;
-    *) code=000 ;;
-  esac
-  case "$bytes" in
-    ''|*[!0-9]*) bytes=0 ;;
-  esac
-  [ "$code" = 200 ] && [ "$bytes" -gt 0 ]
-}
-
-# Echo the loopback proxy target Tailscale currently serves for exactly this
-# preview authority. The mapping is read fresh on every poll and matched on the
-# full host:port with a whole-authority "/" handler, so evidence can never be
-# borrowed from another preview, a sub-path mount, or a remembered mapping.
-preview_serve_target() {
-  local want=$1 serve line authority current='' handler rest target
-  serve=$(preview_bounded "$PREVIEW_TAILSCALE_SECS" tailscale serve status 2>/dev/null) \
-    || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      https://*)
-        authority=${line#https://}
-        authority=${authority%%[[:space:]]*}
-        authority=${authority%%/*}
-        case "$authority" in
-          *:*) ;;
-          *) authority=$authority:443 ;;
-        esac
-        current=$authority
-        ;;
-      '|--'*)
-        [ "$current" = "$want" ] || continue
-        rest=${line#'|--'}
-        rest=${rest#"${rest%%[![:space:]]*}"}
-        handler=${rest%%[[:space:]]*}
-        [ "$handler" = / ] || continue
-        rest=${rest#"$handler"}
-        rest=${rest#"${rest%%[![:space:]]*}"}
-        case "$rest" in
-          proxy[[:space:]]*) ;;
-          *) continue ;;
-        esac
-        target=${rest#proxy}
-        target=${target#"${target%%[![:space:]]*}"}
-        target=${target%%[[:space:]]*}
-        printf '%s\n' "$target"
-        return 0
-        ;;
-    esac
-  done <<EOF
-$serve
-EOF
-  return 1
-}
-
-# Evidence against alerting on one slow captain-facing probe, never evidence
-# that an unreachable preview URL is healthy: it buys a single check interval.
-# A missing, non-loopback, or unreadable mapping and a loopback target that does
-# not answer all count as no corroboration, so the alert stays prompt whenever
-# the local side is genuinely gone, replaced, or unmapped.
-preview_local_evidence() {
-  local preview_host=$1 port=$2 link_path=$3 target local_port
-  target=$(preview_serve_target "$preview_host:$port") || return 1
-  case "$target" in
-    http://127.0.0.1:*) ;;
-    *) return 1 ;;
-  esac
-  local_port=${target##*:}
-  case "$local_port" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$local_port" -ge 1 ] && [ "$local_port" -le 65535 ] || return 1
-  preview_http_ok "$PREVIEW_LOCAL_CONNECT_SECS" "$PREVIEW_LOCAL_MAX_SECS" \
-    "$target$link_path"
-}
-
-preview_outage_stage_new() {
-  local failed_link=$1 tmp
-  [ -n "$preview_marker" ] && [ -n "$preview_pending" ] || return 1
-  if { [ -e "$preview_marker" ] || [ -L "$preview_marker" ]; } \
-    && { [ ! -f "$preview_marker" ] || [ -L "$preview_marker" ]; }; then
-    return 1
-  fi
-  if { [ -e "$preview_pending" ] || [ -L "$preview_pending" ]; } \
-    && { [ ! -f "$preview_pending" ] || [ -L "$preview_pending" ]; }; then
-    return 1
-  fi
-  umask 077
-  tmp=$(mktemp "$preview_state/.fm-preview-outage.XXXXXX") || return 1
-  if ! printf '%s\n%s' "$url" "$failed_link" > "$tmp" || ! chmod 0600 "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if [ -f "$preview_marker" ] && cmp -s "$tmp" "$preview_marker"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! mv -f -- "$tmp" "$preview_pending"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-probe_previews() {
-  local body=$1 links link authority preview_host port local_tailnet_ip tailnet_ip
-  local link_path count
-  task_valid "$task" || return 0
-  # The header owns which declarations are monitored.
-  links=$(printf '%s\n' "$body" \
-    | grep -Eio '(^|[^*])((Preview URL|Visual evidence report|Feature testing report):|\*\*(Preview URL|Visual evidence report|Feature testing report):\*\*)[[:space:]]+https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
-    | grep -Eio 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.ts\.net(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?' \
-    | awk '!seen[$0]++' \
-    | head -n 8) || true
-  if [ -z "$links" ]; then
-    preview_outage_clear
-    return 0
-  fi
-  command -v curl >/dev/null 2>&1 || return 0
-  command -v tailscale >/dev/null 2>&1 || return 0
-  local_tailnet_ip=$(preview_bounded "$PREVIEW_TAILSCALE_SECS" tailscale ip -4 2>/dev/null) \
-    || return 0
-  tailnet_ipv4_valid "$local_tailnet_ip" || return 0
-  tailnet_ip=$local_tailnet_ip
-  if [ -n "${FM_PREVIEW_TAILNET_IP:-}" ]; then
-    [ "$FM_PREVIEW_TAILNET_IP" = "$local_tailnet_ip" ] || return 0
-    tailnet_ip=$FM_PREVIEW_TAILNET_IP
-  fi
-
-  # Own the probe deadline's baseline rather than inheriting one: bash adopts an
-  # environment SECONDS, and an inherited value would silently skip every probe
-  # below instead of bounding it.
-  SECONDS=0
-  count=0
-  while IFS= read -r link; do
-    [ -n "$link" ] || continue
-    count=$((count + 1))
-    [ "$count" -le 8 ] || break
-    authority=${link#https://}
-    link_path=${authority#*/}
-    case "$authority" in
-      */*) link_path=/$link_path ;;
-      *) link_path=/ ;;
-    esac
-    authority=${authority%%/*}
-    case "$authority" in
-      *:*) preview_host=${authority%:*}; port=${authority##*:} ;;
-      *) preview_host=$authority; port=443 ;;
-    esac
-    case "$port" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
-    preview_http_ok "$PREVIEW_CONNECT_SECS" "$PREVIEW_MAX_SECS" "$link" \
-      --resolve "$preview_host:$port:$tailnet_ip" && continue
-    # The captain-facing path missed the fast budget. Everything below stops
-    # once the poll runs out of its deadline, leaving state and silence intact
-    # so the next poll decides rather than this one guessing.
-    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
-    preview_http_ok "$PREVIEW_RETRY_CONNECT_SECS" "$PREVIEW_RETRY_MAX_SECS" "$link" \
-      --resolve "$preview_host:$port:$tailnet_ip" && continue
-    if preview_pending_matches "$link"; then
-      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
-      return 0
-    fi
-    preview_outage_clear_changed "$link"
-    [ "$SECONDS" -lt "$PREVIEW_DEADLINE_SECS" ] || return 0
-    if preview_local_evidence "$preview_host" "$port" "$link_path" \
-      && ! preview_suspect_matches "$link" \
-      && preview_suspect_record "$link"; then
-      return 0
-    fi
-    if preview_outage_stage_new "$link"; then
-      printf 'preview-dead: task=%s pr=%s\n' "$task" "$url"
-    fi
-    return 0
-  done <<EOF
-$links
-EOF
-  preview_outage_clear
-}
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
@@ -422,31 +65,8 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    record=$(gh pr view "$url" --json state,isDraft,body \
-      --jq '[.state, .isDraft, .body] | @tsv' 2>/dev/null) || exit 0
-    case "$record" in
-      *$'\t'*$'\t'*) ;;
-      *) exit 0 ;;
-    esac
-    state=${record%%$'\t'*}
-    rest=${record#*$'\t'}
-    draft=${rest%%$'\t'*}
-    body=${rest#*$'\t'}
-    case "$state" in
-      MERGED)
-        preview_outage_clear
-        printf '%s\n' merged
-        ;;
-      CLOSED) preview_outage_clear ;;
-      OPEN)
-        if [ "$draft" != false ]; then
-          preview_outage_clear
-          exit 0
-        fi
-        probe_previews "$body"
-        ;;
-      *) exit 0 ;;
-    esac
+    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -487,6 +107,69 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  gerrit)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    [ "${#path}" -ge 1 ] && [ "${#path}" -le 1024 ] || exit 0
+    case "$path" in
+      /*|*/|*//*) exit 0 ;;
+    esac
+    # A Gerrit project name is a path at no fixed depth that needs no enclosing
+    # group, so one segment is canonical here where GitLab needs two, and Gerrit
+    # reserves no route segment inside it.
+    rest=$path
+    segments=0
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        */*) segment=${rest%%/*}; rest=${rest#*/} ;;
+        *) segment=$rest; rest= ;;
+      esac
+      segments=$((segments + 1))
+      [ "$segments" -le 20 ] || exit 0
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
+      case "$segment" in
+        .|..|-*|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+      esac
+    done
+    [ "$segments" -ge 1 ] || exit 0
+    [ "$url" = "https://$host/c/$path/+/$number" ] || exit 0
+    # gerrit-axi resolves its server from the current directory's origin remote
+    # first, and the watcher runs in no repository, so the host must be passed
+    # explicitly from the validated record. Without it the tool has no host to
+    # reach and fails before reading anything, and this poll is silent on every
+    # failure, so the watch would wait forever on a change it never looked at.
+    #
+    # The status is read explicitly and is the only thing that can wake this
+    # poll. Gerrit's submittability is a different question: a merged change
+    # still reports its submit state as OK with nothing blocking it, so reading
+    # submittability, a blocked_on list, or vote values would report a merge for
+    # an open change that is merely ready to submit.
+    #
+    # jq selects the one record whose change number matches. A change number is
+    # server-global and --host already pins the server, so the number alone
+    # names the change. The record's own url field is deliberately not compared
+    # against the stored URL: Gerrit composes that field from
+    # gerrit.canonicalWebUrl and omits it when that setting is unset, so an
+    # equality test would leave a correctly armed watch silent forever on such
+    # a server, and this poll has no channel to report that it never matched.
+    json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit 0
+    [ -n "$json" ] || exit 0
+    status=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+      if type == "object" and .ok == true and (.changes | type) == "array" then
+        [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+        | if ($match | length) == 1
+             and ($match[0].status | type) == "string"
+          then $match[0].status
+          else error("no exact change record")
+          end
+      else
+        error("invalid gerrit record")
+      end' 2>/dev/null) || exit 0
+    [ "$status" = MERGED ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

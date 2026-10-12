@@ -1689,12 +1689,19 @@ test_service_contract_docs_and_ownership() {
   assert_present "$ROOT/docs/dashboard-service.md" "dashboard service doc is missing"
   assert_grep 'dash-inbox' "$ROOT/docs/dashboard-service.md" "service doc omits the inbound channel"
   assert_grep 'fm-dash' "$ROOT/AGENTS.md" "AGENTS.md lacks the dashboard command wake trigger"
-  assert_grep 'dash-inbox' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-inbox"
-  assert_grep 'config/dash.json' "$ROOT/.gitignore" "config/dash.json is not gitignored"
+  assert_grep 'dash-inbox' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
+    "operational-home-layout state map lacks dash-inbox"
+  if ! grep -qE '^(config/dash\.json|config/)$' "$ROOT/.gitignore"; then
+    fail "config/dash.json is not gitignored"
+  fi
   assert_grep 'dashboard service' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not own dashboard command handling"
   assert_grep 'never Funnel' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not carry the funnel boundary"
   assert_grep 'data/<origin>/decisions/<key>.md' "$ROOT/docs/dashboard-service.md" "service doc does not own the origin-qualified decision-options format"
-  assert_grep 'hold --options-file' "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "decision lifecycle does not own options-document filing"
+  assert_grep 'Put the question and its options in the hold reason' \
+    "$ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md" \
+    "captain-hold lifecycle does not own options filing"
+  assert_grep 'fm-captain-hold.sh hold' "$ROOT/docs/dashboard-service.md" \
+    "service doc does not point decision filing at captain-hold"
   # The single-quoted assertion is intentionally literal.
   # shellcheck disable=SC2016
   assert_grep 'bounded read-only excerpt from a resolved `data/<id>/report.md`' "$ROOT/docs/dashboard-service.md" "service doc omits the sanctioned secondmate report exception"
@@ -1705,8 +1712,10 @@ test_service_contract_docs_and_ownership() {
   assert_grep 'Captain chat' "$ROOT/docs/dashboard-service.md" "service doc omits the chat destination"
   assert_grep 'Exact PR merge approval' "$ROOT/docs/dashboard-service.md" "service doc omits the merge approval flow"
   assert_grep 'not end-to-end application encryption' "$ROOT/docs/dashboard-service.md" "service doc overstates the encryption guarantee"
-  assert_grep 'dash-chat' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-chat"
-  assert_grep 'dash-merge' "$ROOT/AGENTS.md" "AGENTS.md state map lacks dash-merge"
+  assert_grep 'dash-chat' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
+    "operational-home-layout state map lacks dash-chat"
+  assert_grep 'dash-merge' "$ROOT/.agents/skills/operational-home-layout/SKILL.md" \
+    "operational-home-layout state map lacks dash-merge"
   assert_grep 'fm-dash-merge.sh' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not route merge approvals to the guarded consumer"
   assert_grep 'fm-dash-chat.sh claim' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not claim chat messages"
   assert_grep 'unknown kind' "$ROOT/.agents/skills/capacity/SKILL.md" "capacity skill does not refuse unknown sensitive record kinds"

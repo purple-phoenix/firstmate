@@ -167,7 +167,7 @@ Explain the decision context and constraints here.
 The first level-one heading is the title, prose before `## Options` is context, and each option is one bullet with an optional `[recommended]` marker followed by ` - ` and its impact.
 Indented continuation lines extend the preceding impact.
 The service accepts at most 20 options and applies bounded text limits while rendering.
-Firstmate and workers author this document when filing a new decision, and `bin/fm-decision-hold.sh hold --options-file` publishes it under the originating work in the deciding home through the decision-hold lifecycle.
+Firstmate and workers author this document at `data/<origin>/decisions/<key>.md` when filing a new decision for dashboard option controls, and register the captain-held task through `bin/fm-captain-hold.sh hold` under the `captain-hold-lifecycle` skill, which keeps the question and options in the hold reason.
 Legacy decisions without the document keep the generic your-go controls on their needs-you row (option-validated answers still require the document), and their detail view routes the captain to chat for anything beyond those controls.
 In v1, the other sanctioned secondmate content read is a bounded read-only excerpt from a resolved `data/<id>/report.md` document return channel.
 Secondmate briefs, metadata, status tails, and chat remain prohibited, and everything outside structured decision records and resolved report excerpts shows only the limited ownership note.

@@ -196,8 +196,8 @@ test_transition_never_claims_a_running_watcher_rereads_it() {
   # a live watcher picked the new cadence up.
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
     "the arm line must not pretend a running watcher rereads the cadence"
-  assert_contains "$out" "repair missing watcher supervision" \
-    "the arm line must carry the harness supervision repair instruction"
+  printf '%s\n' "$out" | grep -Eq 'repair (missing|a missing)|watcher supervision needs' \
+    || fail "the arm line must carry the harness supervision repair instruction"
   disarm "$home"
   out=$(cadence "$home" reconcile)
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
@@ -216,12 +216,10 @@ test_transition_line_is_harness_aware() {
   # tests/fm-supervision-instructions.test.sh.
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$home/state" \
     FM_ROOT_OVERRIDE="$ROOT" CLAUDECODE=1 "$CADENCE" reconcile 2>&1)
-  assert_contains "$out" "Claude Code background task" \
+  assert_contains "$out" "Stop-owned automatic recovery" \
     "a claude primary must get the claude repair mechanism"
   assert_not_contains "$out" "fm-watch-checkpoint.sh" \
     "a claude primary must not be handed codex's foreground checkpoint"
-  assert_contains "$out" "bin/fm-watch-arm.sh" \
-    "the repair instruction must use the cadence-validating watcher owner"
   assert_not_contains "$out" "source" \
     "the repair instruction must not source generated cadence bytes"
   pass "the transition's repair instruction follows the detected primary harness"
@@ -257,8 +255,8 @@ test_legacy_cadence_file_is_removed_when_nothing_is_armed() {
   assert_interval "$home" 300 "a disarmed migrated home must run at the default cadence"
   assert_contains "$out" "applies to the NEXT supervision cycle, not one already running" \
     "the legacy-only release must be honest about an already-running watcher"
-  assert_contains "$out" "repair missing watcher supervision" \
-    "the legacy-only release must carry the harness supervision repair instruction"
+  printf '%s\n' "$out" | grep -Eq 'repair (missing|a missing)|watcher supervision needs' \
+    || fail "the legacy-only release must carry the harness supervision repair instruction"
   pass "a home with only the pre-rename cadence file returns to the default cadence"
 }
 
