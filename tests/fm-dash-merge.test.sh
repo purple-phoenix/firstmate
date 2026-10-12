@@ -204,6 +204,34 @@ test_evidence_probe_matrix() {
   CHECKS_IDENTITY=$(json_field "$out" checks_identity)
   [ "${#CHECKS_IDENTITY}" = 64 ] || fail "checks identity is not a sha256"
 
+  cat > "$GH_FIXTURE" <<EOF
+{
+  "url": "$PR_URL", "number": 12, "title": "rerun", "baseRefName": "main",
+  "state": "OPEN", "isDraft": false, "mergeable": "MERGEABLE", "headRefOid": "$HEAD_A",
+  "statusCheckRollup": [
+    {"name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-08-04T10:00:00Z"},
+    {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-04T10:01:00Z"},
+    {"name":"advisory","status":"COMPLETED","conclusion":"NEUTRAL","startedAt":"2026-08-04T10:02:00Z"}
+  ]
+}
+EOF
+  out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
+  [ "$(json_field "$out" eligible)" = true ] || fail "a successful rerun and neutral check were not eligible: $out"
+  assert_not_contains "$out" '"result": "CANCELLED"' "superseded cancelled rerun remained current evidence"
+
+  cat > "$GH_FIXTURE" <<EOF
+{
+  "url": "$PR_URL", "number": 12, "title": "rerun", "baseRefName": "main",
+  "state": "OPEN", "isDraft": false, "mergeable": "MERGEABLE", "headRefOid": "$HEAD_A",
+  "statusCheckRollup": [
+    {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-04T10:00:00Z"},
+    {"name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-04T10:01:00Z"}
+  ]
+}
+EOF
+  out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
+  [ "$(json_field "$out" eligible)" = false ] || fail "a newer failed rerun was incorrectly eligible"
+
   gh_payload OPEN false MERGEABLE "$HEAD_A" COMPLETED FAILURE SUCCESS
   out=$(FM_HOME="$HOME_DIR" FM_DASH_PR_GH_BIN="$FAKE_BIN/fake-gh" node "$EVIDENCE" ready-safe)
   [ "$(json_field "$out" eligible)" = false ] || fail "red check still eligible"
@@ -344,7 +372,7 @@ EOF
   [ "$rc" = 0 ] || fail "guarded consumer refused a valid approval (rc $rc): $out"
   assert_contains "$out" "merged: $PR_URL at $HEAD_A" "consumer did not report the merged outcome"
   [ "$(grep -c . "$MERGE_LOG")" = 1 ] || fail "the merge owner was not called exactly once"
-  assert_grep "ready-safe $PR_URL -- --squash --match-head-commit $HEAD_A" "$MERGE_LOG" "the merge owner call lost its exact-head binding"
+  assert_equals "ready-safe $PR_URL -- --squash" "$(cat "$MERGE_LOG")" "the guarded consumer passed unsupported merge-owner arguments"
   [ -f "$HOME_DIR/state/dash-merge/consumed/$nonce" ] || fail "consumption ledger record missing"
   assert_grep 'outcome=merged' "$HOME_DIR/state/dash-merge/consumed/$nonce" "consumption outcome not recorded"
 
