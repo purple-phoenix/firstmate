@@ -1,0 +1,19 @@
+ok - a home with neither channel keeps the default 300s cadence and writes nothing
+ok - a Telegram-only home runs its check on the 30s cadence
+ok - an X-only home is unchanged: still the 30s cadence
+ok - an installed writable dashboard is an armed captain channel on the 30s cadence
+ok - both channels enabled resolve to one cadence file, one cadence, no duplicate owner
+ok - releasing one channel while another stays armed keeps the 30s cadence
+ok - reconcile is idempotent and never rewrites an already-correct cadence file
+ok - releasing the last channel restores the default cadence, then stays silent
+ok - every transition states plainly that a running watcher keeps its old cadence
+ok - the transition's repair instruction follows the detected primary harness
+ok - an older home's config/x-mode.env is migrated to the single current owner
+ok - a home with only the pre-rename cadence file returns to the default cadence
+ok - a symlinked cadence destination is refused without touching its target
+ok - the generated cadence file is owner-only
+ok - verify accepts only the exact private single-link generated artifact
+ok - apply exports only the validated fixed cadence without evaluating file bytes
+ok - the standard watch arm launches with the validated fast cadence
+ok - the generated cadence file exports only the interval - no secret, no identity
+ok - the path lookup answers from constants, with no home state required

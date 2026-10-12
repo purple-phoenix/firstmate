@@ -1,0 +1,6 @@
+ok - the evidence probe grants eligibility only to an open, non-draft, mergeable, all-green GitHub PR
+ok - merge preview and approval validate identity, currency, echo, and eligibility, and bind one typed record
+ok - one approval merges exactly once through the guarded owner and can never merge again
+ok - every broken binding refuses, every recheck change invalidates, and no path ever merges twice
+ok - a real browser sends chat safely at 390px and click-approves one exact merge through the fake guarded owner
+fm-dash-merge tests passed
