@@ -1,0 +1,34 @@
+ok - every route except healthz requires the configured captain identity
+ok - authenticated browser posts require a matching same origin
+ok - served page is the producer dashboard wearing the injected interactive layer
+ok - subscription usage is bounded to Claude, Codex, and Grok
+ok - operational data cannot break out of the inline configuration script
+ok - clickable work items serve rich detail from briefs, metadata, and previews
+ok - decision documents validate option picks and bounded custom answers
+ok - supervisor decisions use bounded full detail, unavailable records stay actionable, and main-home detail is unchanged
+ok - equal decision keys remain distinct across origins and homes
+ok - refs are usable only for their matching dashboard generation
+ok - ideas render their pitches and verdicts flow through the durable inbox
+ok - the parking lot is enriched for the captain and unpark clicks become one durable lifted-through-firstmate command
+ok - the recurring section is enriched for the captain and run-now clicks become one durable through-firstmate command
+ok - every item awaiting the captain carries validated interaction controls through the durable inbox
+ok - a click becomes exactly one durable captain command record
+ok - dispatch refuses free text, non-allowlisted actions, and stale actions
+ok - refresh reruns the capacity producer server-side and replaces the dashboard
+ok - inbox claim delivers before archive and safely permits replay
+ok - clicks acknowledge instantly, survive reloads and claims, and re-emitted recent actions stay acknowledged
+ok - read-only mode serves the page and refuses every mutation
+ok - watcher registration follows writable mode without deleting pending commands
+ok - the launchd agent contract survives reboots without public exposure settings
+ok - custom serve ports persist and old mappings are removed
+ok - launchd env is pinned and a mostly-unknown render is loudly marked degraded
+ok - every copy-prompt affordance on the served page is replaced by direct dispatch
+ok - acknowledged prompts stack in one explicit column at narrow viewports
+ok - served Recommended next and its existing action path fit a 390px browser viewport
+ok - chat exists only on the authenticated served page, with an honest privacy statement
+ok - chat fails closed on identity and refuses oversized, malformed, control-character, and keyless content
+ok - the same client key from a retry or concurrent tab never creates a second message
+replied: 1791780659-f709c4dc
+ok - chat delivery is at-least-once, replies are at-most-once, and states track the durable records
+ok - dashboard configuration is ignored by Git
+fm-dash tests passed

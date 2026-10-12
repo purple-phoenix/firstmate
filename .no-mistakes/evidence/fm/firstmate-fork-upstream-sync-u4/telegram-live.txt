@@ -1,0 +1,54 @@
+ok - inert: no configuration means no output, no state, and no API call
+ok - inert: status reports an unconfigured channel without touching Telegram
+ok - setup: the token is stored through stdin in the keychain owner and never printed
+ok - setup: a malformed token is refused without echoing what was pasted
+ok - setup: a token alone never enables the channel
+ok - pairing: only the one-time private challenge binds the sender and chat
+ok - pairing: the challenge that paired the channel is consumed, not delivered as a request
+ok - enable: registers a token-free watcher check and clears any webhook
+ok - enable: arms the 30s check cadence idempotently and is honest about the restart it needs
+ok - enable reports fast pickup only after a validated cadence reconcile
+ok - pairing: pages past old updates and preserves later messages from the challenge batch
+ok - ingress: wrong sender, wrong chat, group, bot, forward, via_bot, sender_chat, edit, channel post, and callback are all refused silently
+ok - ingress: shell-metacharacter text is stored as data, never executed, in a mode-0600 record
+ok - replay: re-delivering the same update id leaves exactly one durable request
+ok - crash safety: commit-then-advance ordering converges on exactly one request
+ok - ingress: an out-of-order batch with media, oversize, blank, id-less, and non-object entries is handled in order and bounded
+ok - inbox: claim delivers before archiving, so an interruption re-surfaces instead of losing a message
+ok - state: claimed requests retain the newest 50 records by received time
+ok - state: pending ingress applies backpressure at 100 without advancing the cursor
+ok - state: ingress reserves reply capacity before accepting captain messages
+ok - failure: an auth failure surfaces exactly once and is deduplicated until it clears
+ok - failure: a competing consumer or leftover webhook is reported in plain terms
+ok - failure: an unreadable API response is refused without creating records
+ok - failure: an unreachable API reports a plain cause and leaks no URL or token
+ok - transport: Bot API calls clamp zero and oversized HTTP timeouts
+ok - outbound: a short reply is one plain-text message to the paired chat with no parse_mode
+ok - outbound: at most one reply per request id, however many times it is retried
+ok - outbound: markup characters are delivered literally, so no chunk boundary can break markup
+ok - outbound: a long reply splits within the per-message limit, caps its thread, and marks truncation
+ok - outbound: emoji-heavy replies are split by Telegram UTF-16 units
+ok - outbound: long multiline replies preserve their single line breaks
+ok - outbound: a definite refusal sends nothing and leaves the message retryable
+ok - outbound: an ambiguous delivery is never silently retried and never falls back to another channel
+ok - outbound: post-request network loss stops while pre-connect failure remains retryable
+ok - disable: polling stops, the check is unregistered, the cadence is released, and nothing can be sent
+ok - disable: the shared cadence survives while another captain channel is still armed
+ok - linked work: updates are counted, keyed distinctly, and bounded by their budget
+ok - linked work: the terminal outcome always lands and then closes the conversation
+ok - linked work: update limits clamp within the final ledger key space
+ok - state: sent claims and final reservations stay bounded without pruning at-most-once records
+DRY RUN: 1 message(s) recorded for event-dry-check, nothing sent
+ok - outbound: a dry run records the would-be message and sends nothing
+DRY RUN: 1 message(s) recorded for event-anew, nothing sent
+ok - state: dry-run previews retain the newest 50 records by recorded time
+ok - secret: the documented weaker file owner works end to end at mode 0600 and is gitignored
+ok - secret: across every API call this suite made, the token never entered a process argument
+ok - secret: the token reaches only the Bot API, never a check script, state record, or config file
+ok - secret: status confirms the token without revealing it or the full paired identity
+ok - transport: a base that could break out of the request config file is refused, not interpolated
+ok - watcher: the registered check produces exactly one bounded wake line
+ok - watcher: the check is byte-bound, so a tampered check is refused rather than executed
+ok - supervision: a Telegram-only home keeps one live supervision cycle
+ok - uninstall: token, pairing, config, and polling are removed, and received messages are accounted for
+ok - fm-telegram: all checks passed
