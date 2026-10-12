@@ -660,8 +660,10 @@ fm_composer_idle_matches() {
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled]
-  local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph=''
+  local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph='' agent_glyph=0
+  local direct_content_call=0
   local placeholder_position=${6:-0} styled=${7:-1} idle_collision=0
+  [ "$#" -ge 5 ] || direct_content_call=1
   content=$2
   fm_composer_normalize_trim_var content
   plain_content=${5:-$2}
@@ -681,12 +683,18 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
-  if fm_composer_leading_prompt_glyph_var glyph "$content"; then
+  if fm_composer_leading_agent_glyph_var glyph "$content"; then
+    agent_glyph=1
+    content=${content#*"$glyph"}
+  elif fm_composer_leading_prompt_glyph_var glyph "$content"; then
     content=${content#*"$glyph"}
   fi
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
+  if [ "$direct_content_call" = 1 ] && [ "$agent_glyph" = 1 ] && [ "$idle_collision" = 1 ]; then
+    printf 'empty'; return 0
+  fi
   # Ghost stripping can leave a REMNANT of an idle placeholder rather than
   # emptying it, because a terminal draws the cell under its cursor in reverse
   # video (SGR 7) - neither dim/faint nor a dark foreground, so that one

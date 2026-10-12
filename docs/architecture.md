@@ -306,6 +306,8 @@ The refusal library's header owns the gate detection, lab-home exception, test-h
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
+The captain-invocable `user-journey-audit` skill composes that scout lifecycle with in-place promotion for its first authorized ordinary bug-fix group, separate ship tasks for additional groups, and evidence-linked queued feature work.
+The skill owns the persona, evidence, selection, and authority rules rather than duplicating them here.
 
 ## Dispatch profiles
 

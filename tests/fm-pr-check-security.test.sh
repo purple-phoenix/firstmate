@@ -150,6 +150,14 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *" --json state,isDraft,body "*)
+        [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+        [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
+        [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+        printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
+          "${FM_TEST_GH_DRAFT:-false}" "${FM_TEST_GH_BODY:-}"
+        exit 0
+        ;;
       *statusCheckRollup*)
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0

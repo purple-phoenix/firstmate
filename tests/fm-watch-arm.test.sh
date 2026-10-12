@@ -1683,7 +1683,6 @@ EOF
   for case_name in source registered-check empty afk-with-source task-meta x-watch; do
     dir=$(make_arm_decision_fixture "opencode-arm-$case_name")
     state="$dir/home/state"
-    config="$dir/home/config"
     case "$case_name" in
       source) mkdir -p "$state/procevent"; : > "$state/procevent/fixture.source" ;;
       registered-check) : > "$state/fixture.check.sh"; : > "$state/fixture.check-trust" ;;

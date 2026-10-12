@@ -2899,8 +2899,9 @@ while :; do
           run_due_inbound_checks
           continue
         fi
-        run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-          "$provider" "$url" "$host" "$path" "$number" || exit 1
+        FM_PR_POLL_TASK_ID=$id FM_PR_POLL_STATE=$STATE \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+            "$provider" "$url" "$host" "$path" "$number" || exit 1
         out=$FM_CHECK_RESULT
       elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
         custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -2935,6 +2936,11 @@ EOF
           fi
         fi
         reason="check: $c: $out"
+        if [ "$is_pr_poll" -eq 1 ] \
+          && [ "$out" = "preview-dead: task=$id pr=$url" ]; then
+          fm_pr_preview_outage_commit "$STATE" "$id" "$url" \
+            || triage_log "dead preview outage commit deferred for $id"
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
             # A merge poll armed on a secondmate is residue: the mate is a

@@ -95,6 +95,8 @@ FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
+# Single owner for every newly created dispatchable task ID.
+FM_TASK_ID_MAX_LENGTH=64
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -109,10 +111,34 @@ fm_pr_task_id_valid() {
   fm_task_id_path_safe "$id"
 }
 
-fm_task_id_creation_valid() {
-  local id=${1-}
+fm_pr_preview_outage_commit() {
+  local state=$1 id=$2 url=$3 pending marker state_device pending_url
   fm_pr_task_id_valid "$id" || return 1
-  [ "${#id}" -le 64 ]
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  pending="$state/$id.preview-outage-pending"
+  marker="$state/$id.preview-outage"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$pending" 600 "$state_device" || return 1
+  IFS= read -r pending_url < "$pending" || return 1
+  [ "$pending_url" = "$url" ] || return 1
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  mv -f -- "$pending" "$marker"
+}
+
+fm_task_id_creation_check() {
+  local id=${1-}
+  if ! fm_pr_task_id_valid "$id"; then
+    echo "error: task id must be path-safe and contain only letters, digits, '.', '_', or '-'" >&2
+    return 1
+  fi
+  if [ "${#id}" -gt "$FM_TASK_ID_MAX_LENGTH" ]; then
+    echo "error: task id is ${#id} characters; maximum is $FM_TASK_ID_MAX_LENGTH" >&2
+    return 1
+  fi
+}
+
+fm_task_id_creation_valid() {
+  fm_task_id_creation_check "${1-}" 2>/dev/null
 }
 
 # GitLab and Gerrit both serve self-hosted instances, so the host is part of the

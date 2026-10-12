@@ -252,6 +252,9 @@ Load `ship-landing` when a ship reports a PR or ready branch, when deciding or m
 
 Load `scout-completion` when a scout reports completion, presents a visual artifact for iteration, or is being considered for promotion to implementation.
 
+When the captain invokes `/user-journey-audit` or explicitly asks for a user-journey audit, load `user-journey-audit`.
+That invocation narrowly authorizes confirmed ordinary reversible bug implementation, never feature implementation or merge, and the skill owns the conditional procedure.
+
 When the captain invokes `/capacity` or asks about capacity, bottlenecks, pipeline utilization, work supply, idle lanes, or maximizing fleet throughput, load `capacity`.
 Also load `capacity` on a `check:` wake naming `fm-dash.check.sh`: it delivers captain-clicked dashboard commands, exact merge approvals, and captain chat messages, and the skill owns their claim and handling.
 That read-mostly skill owns the conditional procedure and must never invent work, dispatch for utilization, or weaken lifecycle safety.
