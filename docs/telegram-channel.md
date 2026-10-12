@@ -152,10 +152,11 @@ bin/fm-tg-setup.sh uninstall   # also remove the token, pairing, and configurati
 ```
 
 `disable` stops the poll, removes the watcher check, and reports how many already-received messages are still queued locally; re-enable with `enable` and they are still there.
-It also returns this home to the default 300-second check cadence unless X mode still needs the fast one, and prints the restart instruction for that too.
+It also returns this home to the default 300-second check cadence unless X mode or a writable dashboard still needs the fast one, and prints the restart instruction for that too.
 
 `uninstall` additionally deletes the stored token and `config/telegram.json`.
-It reports failure and keeps the disabled configuration when either token owner cannot be confirmed empty, so you can unlock or repair that owner and retry cleanup.
+On macOS it confirms both the login-keychain and fallback-file owners are empty; on other platforms it removes the supported file owner without requiring the unavailable macOS keychain.
+It reports failure and keeps the disabled configuration when a supported token owner cannot be confirmed empty, so you can unlock or repair that owner and retry cleanup.
 Messages already received stay on disk under your home's state directory and are reported so you can delete them deliberately.
 To remove the bot itself, send `/deletebot` to BotFather.
 
@@ -178,7 +179,7 @@ Either way there was never anything listening, so nothing stays reachable from o
 - `config/telegram-token` - the fallback token file, only when you chose `--owner file` (gitignored, mode 0600).
 - `state/tg/` - the durable message queue, update cursor, and reply ledger (mode 0700).
 - `state/fm-telegram.check.sh` - the registered watcher check; it holds no secret.
-- `config/check-cadence.env` - the generated 30-second check cadence, shared with X mode and removed when no channel is armed (gitignored, mode 0600).
+- `config/check-cadence.env` - the generated 30-second check cadence, shared with X mode and the writable dashboard and removed when no channel is armed (gitignored, mode 0600).
 
 ## Verification evidence
 

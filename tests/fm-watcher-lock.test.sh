@@ -254,7 +254,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is repair-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line pid identity blind
+  local dir state err instructions first banner_line queue_line pid identity blind
   dir=$(make_case guard)
   # The repair line the cases below assert is the CLAUDE one, so detect_own has to
   # answer claude. A marker alone no longer pins that: a structural ancestor of a
@@ -304,7 +304,12 @@ test_guard_warnings() {
     "$ROOT/bin/fm-cadence.sh" reconcile >/dev/null || fail "cadence reconcile failed"
   PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_GUARD_GRACE=1 \
     "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F "Fast check cadence: active" "$err" >/dev/null || fail "guard repair line missing fast-cadence status"
+  instructions="$dir/supervision-instructions.out"
+  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-supervision-instructions.sh" > "$instructions" \
+    || fail "supervision instructions failed"
+  grep -F "Fast check cadence: active" "$instructions" >/dev/null \
+    || fail "supervision instructions missing active fast-cadence status"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)
@@ -607,7 +612,12 @@ test_lock_stale_steal_single_winner_under_concurrency() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
+  # A burst of contender exits can interrupt the FIFO open/read on macOS.
+  # Retry that observable synchronization point instead of stranding the winner
+  # on its write and hanging the suite.
+  while ! IFS= read -r winner < "$gate"; do
+    sleep 0.01
+  done
   [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
     [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true

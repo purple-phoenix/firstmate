@@ -1905,7 +1905,7 @@ Everything that fails the identity or envelope checks is dropped without a reply
 The token is never a process argument, never printed, never written to a log or a durable record, never exposed to task workers, and never embedded in the generated watcher check; every Bot API request passes its token-bearing URL to `curl` through a mode-0600 config file.
 
 Enabling writes `state/fm-telegram.check.sh`, a byte-static shim pinning this home and `bin/fm-tg-poll.sh`, and registers it through `bin/fm-check-register.sh`, so the watcher runs it on the `FM_CHECK_INTERVAL` cadence and rejects it if its bytes change.
-An enabled channel is an armed inbound captain channel, so enabling also arms the 30-second cadence owned by the "Watcher check cadence" section above, and disabling or uninstalling releases it unless X mode still needs it.
+An enabled channel is an armed inbound captain channel, so enabling also arms the 30-second cadence owned by the "Watcher check cadence" section above, and disabling or uninstalling releases it unless X mode or a writable dashboard still needs it.
 Enabling also calls the Bot API's `deleteWebhook`, so `getUpdates` long polling is structurally the only transport: no port is opened, no webhook exists, and nothing sits between the home and Telegram.
 An armed channel counts as a supervision need in `bin/fm-supervision-lib.sh`, exactly like an X-mode relay poll, so a Telegram-only home keeps one live supervision cycle with an empty fleet.
 

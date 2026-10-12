@@ -32,7 +32,7 @@ Its checks establish, in order:
 - **Outbound.** A short reply was one plain-text message with no `parse_mode` addressed to the paired chat; a second reply for the same request id was refused; markup characters were delivered literally; and long replies preserved single line breaks, split by UTF-16 units, capped their thread, and marked truncation with an ellipsis.
 - **Delivery honesty.** A definite refusal sent nothing and left the key retryable; a server error was recorded as ambiguous, refused a silent retry, and required an explicit `--resend`; no path fell back to another channel.
 - **State bounds.** Pending ingress stopped before either the 100-record inbox bound or the reply ledger's unanswered-request reservations were exhausted, sent claims plus linked-task final reservations stopped at 200 without pruning at-most-once evidence, claimed requests and dry-run previews retained their newest records by validated record time, and the task update maximum clamped so `.u999` remained available for the final.
-- **Removal.** Owner switching rolled back when the prior credential could not be removed; `disable` stopped polling and refused to send; and `uninstall` retained a disabled retryable configuration until both token locations were confirmed empty.
+- **Removal.** Owner switching rolled back when the prior credential could not be removed; `disable` stopped polling and refused to send; on macOS, `uninstall` retained a disabled retryable configuration until both token locations were confirmed empty; and on non-macOS hosts, it removed the supported file token and configuration without requiring keychain cleanup.
 
 ## No process-argument leak
 
@@ -41,10 +41,11 @@ After the full run the log was non-empty, contained `-K` (the mode-0600 config f
 The same assertion sweeps the generated watcher check, every durable state record, the configuration file, `status` output, and every diagnostic.
 The fake API's own request log was asserted to contain the token, so the proof is not vacuous: the token demonstrably reached the loopback Bot API endpoint and no forbidden destination.
 
-## No listening socket, no webhook, one sender
+## Pull-only transport
 
-Asserted structurally over `bin/fm-tg-*.sh`: no `setWebhook`, `nc -l`, `--listen`, `createServer`, `socat`, or `LISTEN`; `bin/fm-tg-reply.sh` is the only script that calls `sendMessage`; and no script outside the `fm-tg-` family references `bin/fm-tg-reply.sh`, so no watcher, hook, or lifecycle path can push internal progress to the captain's phone.
-`enable` was observed calling `deleteWebhook`, so the pull transport is the only transport.
+The loopback Bot API observed `enable` calling `deleteWebhook` before the registered check drove bounded `getUpdates` polls.
+Outbound behavior was exercised only through the reply interface, which addressed the paired chat and enforced the reply ledger's one-send claims.
+The operator-facing no-listener and single-sender boundaries remain owned by [`telegram-channel.md`](../telegram-channel.md#transport-and-exposure), while the regression suite verifies behavior through executable interfaces rather than inspecting implementation source bytes.
 
 ## Watcher integration
 
@@ -66,7 +67,7 @@ bin/fm-test-run.sh tests/fm-check-cadence.test.sh tests/fm-telegram.test.sh \
 An enabled channel raises this home from the 300s default sweep to 30s through the single generated `config/check-cadence.env` owned by `bin/fm-cadence.sh` ([`configuration.md`](../configuration.md#watcher-check-cadence-configcheck-cadenceenv)).
 The suites establish, in order:
 
-- **The matrix.** A home with neither channel wrote no cadence file and a watcher would start at 300s; a Telegram-only home and an X-only home each started at 30s; a home with both produced exactly one file in `config/`, so two armed channels never yield two config owners.
+- **The matrix.** A home with no armed channel wrote no cadence file and a watcher would start at 300s; Telegram-only, X-only, and dashboard-only homes each started at 30s; and combined channels produced exactly one file in `config/`, so multiple armed channels never yield multiple config owners.
 - **Bounded load.** The cadence changes only how often the existing watcher sweeps; `bin/fm-tg-poll.sh` keeps its own bounded long poll (`FM_TG_POLL_TIMEOUT`, default 10s, within `FM_CHECK_TIMEOUT`), its 100-record ingress bound, its ledger reservations, and its once-per-cause error dedupe, all still asserted by `tests/fm-telegram.test.sh`.
 - **Transitions.** `enable` armed the cadence and re-running it left the file byte-identical without re-announcing a transition; `disable` and `uninstall` released it; `disable` with X mode still armed deliberately kept it; and repeated `reconcile` runs were byte-stable.
 - **No false claim of a live re-read.** `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` once at process start, and every transition line was asserted to say the new cadence applies to the next supervision cycle and to carry the emitted harness repair instruction rather than restarting anything.
