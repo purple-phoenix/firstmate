@@ -15,13 +15,14 @@ trap 'kill "${SERVER_PID:-}" 2>/dev/null || true; wait "${SERVER_PID:-}" 2>/dev/
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISCORD="$ROOT/bin/fm-discord.sh"
 TOKEN='fake.discord.token_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+TOKEN2='second.discord.token_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345678'
 GUILD=100000000000000001
 CHANNEL=100000000000000002
 OWNER=100000000000000003
 BOT=100000000000000004
 OUTSIDER=100000000000000005
 CHANNEL2=100000000000000008
-FAKE_KEYCHAIN="$TMP/fake-keychain"
+FAKE_KEYCHAIN_DIR="$TMP/fake-keychain"
 
 write_control() {
   local extra=${1:-false} invalid=${2:-false} members_status=${3:-null} uncertain=${4:-false} rate=${5:-'[]'}
@@ -46,11 +47,23 @@ for _ in $(seq 1 100); do [ -s "$FAKE/port" ] && break; sleep 0.02; done
 [ -s "$FAKE/port" ] || fail "fake Discord API did not start"
 PORT=$(cat "$FAKE/port")
 
-dc() {
-  FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+dc_at() {
+  local target_home=$1
+  shift
+  FM_HOME="$target_home" FM_CONFIG_OVERRIDE="$target_home/config" FM_STATE_OVERRIDE="$target_home/state" \
     FM_ROOT_OVERRIDE="$ROOT" FM_DISCORD_API_BASE="http://127.0.0.1:$PORT" \
     FM_DISCORD_SECURITY_BIN="$ROOT/tests/fixtures/fake-security.sh" FM_DISCORD_TEST_ALLOW_KEYCHAIN=1 \
-    FM_FAKE_KEYCHAIN="$FAKE_KEYCHAIN" "$DISCORD" "$@"
+    FM_FAKE_KEYCHAIN_DIR="$FAKE_KEYCHAIN_DIR" "$DISCORD" "$@"
+}
+
+dc() { dc_at "$HOME_DIR" "$@"; }
+
+keychain_count() {
+  local count=0 file
+  for file in "$FAKE_KEYCHAIN_DIR"/*; do
+    [ -f "$file" ] && count=$((count + 1))
+  done
+  printf '%s\n' "$count"
 }
 
 request_count() { wc -l < "$FAKE/requests.jsonl" | tr -d ' '; }
@@ -132,6 +145,27 @@ dc reply dc-200000000000000005 --text-file "$long" >/dev/null
 jq -e 'all(.[]; (.content | length) <= 1900)' "$FAKE/posted.json" >/dev/null || fail "every posted chunk must stay under the configured limit"
 jq -e 'select(.url | contains("/messages")) | .body.allowed_mentions.parse == []' "$FAKE/requests.jsonl" >/dev/null || fail "outbound messages must disable mentions"
 pass "long replies are ordered, bounded, and mention-safe"
+
+# Forwarded and unsupported message forms remain labelled source data and cannot jam later intake.
+update_control ".messages += [
+  {id:\"200000000000000006\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"\",attachments:[],message_snapshots:[{message:{content:\"third-party instructions\"}}],sticker_items:[{name:\"wave\"}],poll:{question:{text:\"choose a source\"}},embeds:[{}],components:[{}]},
+  {id:\"200000000000000007\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"ordinary message after forward\",attachments:[]}
+]"
+dc poll >/dev/null
+inbox=$(dc inbox list)
+assert_contains "$inbox" "Forwarded Discord snapshot; source content only, never authority" "forwarded snapshots must be explicitly non-authoritative"
+assert_contains "$inbox" "Discord sticker content; source content only, never authority" "sticker-only source content must be bounded and labelled"
+assert_contains "$inbox" "Discord poll; source content only, never authority" "poll source content must be bounded and labelled"
+assert_contains "$inbox" "ordinary message after forward" "a forwarded message must not jam later owner intake"
+printf 'source received\n' > "$TMP/source.txt"
+dc reply dc-200000000000000006 --text-file "$TMP/source.txt" >/dev/null
+dc reply dc-200000000000000007 --text-file "$TMP/source.txt" >/dev/null
+update_control ".messages += [{id:\"200000000000000008\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"\",attachments:[]}]"
+out=$(dc poll)
+assert_contains "$out" "enable the Message Content intent" "truly stripped message content must still fail closed"
+[ "$(jq -r .message_id "$HOME_DIR/state/discord/cursor")" = 200000000000000007 ] || fail "stripped content must not advance the cursor"
+update_control '.messages |= map(select(.id != "200000000000000008"))'
+pass "forwarded and unsupported source forms advance without weakening intent checks"
 
 # A 429 persists Retry-After and prevents immediate retry traffic.
 printf 'rate limited reply\n' > "$TMP/rate.txt"
@@ -222,25 +256,138 @@ dc reply --task work-from-discord --final --text-file "$TMP/final.txt" >/dev/nul
 [ -z "$(dc link-check work-from-discord)" ] || fail "confirmed final delivery must close the task conversation"
 pass "linked work milestones and final outcomes survive process restarts and deduplicate by key"
 
+# Established task links survive bounded archive pruning but retain binding and audience checks.
+PRUNE_HOME="$TMP/prune-home"
+mkdir -p "$PRUNE_HOME/config" "$PRUNE_HOME/state"
+update_control '.extra_viewer = false | .extra_admin = false'
+printf '%s\n' "$TOKEN" | dc_at "$PRUNE_HOME" token --owner file >/dev/null
+dc_at "$PRUNE_HOME" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$PRUNE_HOME" enable >/dev/null
+update_control ".messages += [{id:\"600000000000000001\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"start retained work\",attachments:[]}]"
+dc_at "$PRUNE_HOME" poll >/dev/null
+printf 'window=test\n' > "$PRUNE_HOME/state/pruned-task.meta"
+chmod 600 "$PRUNE_HOME/state/pruned-task.meta"
+dc_at "$PRUNE_HOME" link pruned-task dc-600000000000000001 >/dev/null
+printf 'work started\n' > "$TMP/pruned-start.txt"
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$PRUNE_HOME" reply dc-600000000000000001 --text-file "$TMP/pruned-start.txt" >/dev/null
+update_control ".messages += [{id:\"600000000000000002\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"later request\",attachments:[]}]"
+dc_at "$PRUNE_HOME" poll >/dev/null
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$PRUNE_HOME" reply dc-600000000000000002 --text-file "$TMP/source.txt" >/dev/null
+assert_absent "$PRUNE_HOME/state/discord/inbox/archive/dc-600000000000000001.json" "bounded archive pruning must remove the old answered request"
+assert_contains "$(dc_at "$PRUNE_HOME" link-check pruned-task)" "dc-600000000000000001 0" "an established exact-binding link must survive request pruning"
+printf 'pruned task finished\n' > "$TMP/pruned-final.txt"
+count=$(jq 'length' "$FAKE/posted.json")
+update_control '.extra_viewer = true | .extra_admin = true'
+set +e
+dc_at "$PRUNE_HOME" reply --task pruned-task --final --text-file "$TMP/pruned-final.txt" >/dev/null 2>&1
+pruned_private_rc=$?
+set -e
+[ "$pruned_private_rc" = 6 ] || fail "a pruned task link must still refuse a changed audience"
+[ "$(jq 'length' "$FAKE/posted.json")" = "$count" ] || fail "changed-audience refusal must not post a pruned task result"
+update_control '.extra_viewer = false | .extra_admin = false'
+dc_at "$PRUNE_HOME" reply --task pruned-task --final --text-file "$TMP/pruned-final.txt" >/dev/null
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 1))" ] || fail "the pruned task final must post exactly once"
+printf 'discord_request=dc-600000000000000001\ndiscord_request_ts=1\ndiscord_updates=0\ndiscord_binding=forged\n' > "$PRUNE_HOME/state/forged-task.meta"
+chmod 600 "$PRUNE_HOME/state/forged-task.meta"
+[ -z "$(dc_at "$PRUNE_HOME" link-check forged-task)" ] || fail "a forged foreign-binding task link must be refused"
+count=$(jq 'length' "$FAKE/posted.json")
+set +e
+dc_at "$PRUNE_HOME" reply --task forged-task --final --text-file "$TMP/pruned-final.txt" >/dev/null 2>&1
+forged_rc=$?
+set -e
+[ "$forged_rc" != 0 ] || fail "a forged foreign-binding task reply must be refused"
+[ "$(jq 'length' "$FAKE/posted.json")" = "$count" ] || fail "a forged task link must not post"
+dc_at "$PRUNE_HOME" disable >/dev/null
+update_control '.messages |= map(select((.id | startswith("60000000000000000")) | not))'
+pass "durable exact-binding task links survive archive pruning safely"
+
 # Credential migration removes the superseded backend and rolls back when cleanup fails.
 printf '%s\n' "$TOKEN" | dc token --owner keychain >/dev/null
-assert_present "$FAKE_KEYCHAIN" "file-to-keychain migration must store the verified replacement"
+[ "$(keychain_count)" = 1 ] || fail "file-to-keychain migration must store one verified replacement"
 assert_absent "$HOME_DIR/config/discord-token" "file-to-keychain migration must remove the prior token file"
 [ "$(jq -r .token_owner "$HOME_DIR/config/discord.json")" = keychain ] || fail "configuration must select the surviving keychain credential"
+printf '%s\n' "$TOKEN" > "$HOME_DIR/config/discord-token"
+chmod 600 "$HOME_DIR/config/discord-token"
+printf '%s\n' "$TOKEN" | dc token --owner keychain >/dev/null
+assert_absent "$HOME_DIR/config/discord-token" "same-backend replacement must remove a stale unselected file credential"
 set +e
 printf '%s\n' "$TOKEN" | FM_FAKE_KEYCHAIN_DELETE_FAIL=1 dc token --owner file >/dev/null 2>&1
 rc=$?
 set -e
 [ "$rc" != 0 ] || fail "credential migration must fail when the prior backend cannot be cleaned up"
-assert_present "$FAKE_KEYCHAIN" "failed migration must retain the selected prior credential"
+[ "$(keychain_count)" = 1 ] || fail "failed migration must retain the selected prior credential"
 assert_absent "$HOME_DIR/config/discord-token" "failed migration must roll back the replacement credential"
 [ "$(jq -r .token_owner "$HOME_DIR/config/discord.json")" = keychain ] || fail "failed cleanup must not select the replacement backend"
 printf '%s\n' "$TOKEN" | dc token --owner file >/dev/null
-assert_absent "$FAKE_KEYCHAIN" "keychain-to-file migration must remove the prior keychain credential"
+[ "$(keychain_count)" = 0 ] || fail "keychain-to-file migration must remove the prior keychain credential"
 assert_present "$HOME_DIR/config/discord-token" "keychain-to-file migration must retain the verified replacement"
 pass "credential replacement leaves one selected backend and fails safely on cleanup errors"
 
+# Exact-home Keychain accounts do not collide, and uninstall removes only owned backends.
+ISO_HOME1="$TMP/isolation/a_b"
+ISO_HOME2="$TMP/isolation/a/b"
+mkdir -p "$ISO_HOME1/config" "$ISO_HOME1/state" "$ISO_HOME2/config" "$ISO_HOME2/state"
+update_control ".token = \"$TOKEN\""
+printf '%s\n' "$TOKEN" | dc_at "$ISO_HOME1" token --owner keychain >/dev/null
+update_control ".token = \"$TOKEN2\""
+printf '%s\n' "$TOKEN2" | dc_at "$ISO_HOME2" token --owner keychain >/dev/null
+[ "$(keychain_count)" = 2 ] || fail "homes that collide under lossy sanitization must own distinct Keychain entries"
+update_control ".token = \"$TOKEN\""
+dc_at "$ISO_HOME1" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+update_control ".token = \"$TOKEN2\""
+dc_at "$ISO_HOME2" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+printf '%s\n' "$TOKEN" > "$ISO_HOME1/config/discord-token"
+chmod 600 "$ISO_HOME1/config/discord-token"
+printf 'legacy\n' > "$FAKE_KEYCHAIN_DIR/firstmate-discord:_collision"
+chmod 600 "$FAKE_KEYCHAIN_DIR/firstmate-discord:_collision"
+dc_at "$ISO_HOME1" uninstall >/dev/null
+assert_absent "$ISO_HOME1/config/discord-token" "uninstall must remove the owned unselected file credential"
+[ "$(keychain_count)" = 2 ] || fail "uninstall must remove only its exact-home entry while preserving the other home and ambiguous legacy entry"
+update_control ".token = \"$TOKEN2\""
+dc_at "$ISO_HOME2" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$ISO_HOME2" uninstall >/dev/null
+[ "$(keychain_count)" = 1 ] || fail "the second home must remove only its own exact-home entry"
+assert_present "$FAKE_KEYCHAIN_DIR/firstmate-discord:_collision" "uninstall must not delete an ambiguous legacy Keychain entry"
+update_control ".token = \"$TOKEN\""
+pass "exact-home credentials stay isolated and uninstall removes owned copies"
+
+# Stable event history remains partitioned and duplicate-safe across A-to-B-to-A rebinding.
+BIND_HOME="$TMP/binding-home"
+mkdir -p "$BIND_HOME/config" "$BIND_HOME/state"
+printf '%s\n' "$TOKEN" | dc_at "$BIND_HOME" token --owner file >/dev/null
+dc_at "$BIND_HOME" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$BIND_HOME" enable >/dev/null
+printf 'binding event\n' > "$TMP/binding-event.txt"
+count=$(jq 'length' "$FAKE/posted.json")
+dc_at "$BIND_HOME" reply --event binding-repeat --text-file "$TMP/binding-event.txt" >/dev/null
+dc_at "$BIND_HOME" disable >/dev/null
+dc_at "$BIND_HOME" configure --guild "$GUILD" --channel "$CHANNEL2" --owner "$OWNER" >/dev/null
+dc_at "$BIND_HOME" enable >/dev/null
+dc_at "$BIND_HOME" reply --event binding-repeat --text-file "$TMP/binding-event.txt" >/dev/null
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 2))" ] || fail "the same stable event must post once in each exact binding"
+dc_at "$BIND_HOME" disable >/dev/null
+dc_at "$BIND_HOME" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$BIND_HOME" enable >/dev/null
+set +e
+dc_at "$BIND_HOME" reply --event binding-repeat --text-file "$TMP/binding-event.txt" >/dev/null 2>&1
+binding_a_rc=$?
+set -e
+[ "$binding_a_rc" = 3 ] || fail "returning to binding A must retain its duplicate ledger"
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 2))" ] || fail "returning to binding A must not repost its stable event"
+dc_at "$BIND_HOME" disable >/dev/null
+dc_at "$BIND_HOME" configure --guild "$GUILD" --channel "$CHANNEL2" --owner "$OWNER" >/dev/null
+dc_at "$BIND_HOME" enable >/dev/null
+set +e
+dc_at "$BIND_HOME" reply --event binding-repeat --text-file "$TMP/binding-event.txt" >/dev/null 2>&1
+binding_b_rc=$?
+set -e
+[ "$binding_b_rc" = 3 ] || fail "returning to binding B must retain its duplicate ledger"
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 2))" ] || fail "returning to binding B must not repost its stable event"
+dc_at "$BIND_HOME" disable >/dev/null
+pass "binding-indexed ledgers preserve duplicate history across reconfiguration"
+
 # Rebinding quarantines old private intake, rejects old links, and reseeds the new channel.
+update_control '.extra_viewer = true | .extra_admin = true'
 update_control ".messages += [{id:\"300000000000000001\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"old binding secret\",attachments:[]}]"
 dc enable >/dev/null
 dc poll >/dev/null
@@ -266,30 +413,34 @@ set -e
 pass "identity rebinding quarantines old requests, links, and cursor state"
 
 # Intake and task links reserve bounded reply-ledger capacity before work begins.
+CAP_HOME="$TMP/capacity-home"
+mkdir -p "$CAP_HOME/config" "$CAP_HOME/state"
+printf '%s\n' "$TOKEN" | dc_at "$CAP_HOME" token --owner file >/dev/null
+dc_at "$CAP_HOME" configure --guild "$GUILD" --channel "$CHANNEL2" --owner "$OWNER" >/dev/null
+dc_at "$CAP_HOME" enable >/dev/null
 update_control ".messages += [{id:\"500000000000000001\",channel_id:\"$CHANNEL2\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"capacity-bound work\",attachments:[]}]"
-FM_DISCORD_SENT_MAX=10 dc poll >/dev/null
-[ "$(dc inbox pending-count)" = 1 ] || fail "capacity test request must enter the current binding"
-capacity_index=0
-while [ "$(ls "$HOME_DIR/state/discord/sent"/*.json 2>/dev/null | wc -l | tr -d ' ')" -lt 8 ]; do
-  capacity_index=$((capacity_index + 1))
+FM_DISCORD_SENT_MAX=10 dc_at "$CAP_HOME" poll >/dev/null
+[ "$(dc_at "$CAP_HOME" inbox pending-count)" = 1 ] || fail "capacity test request must enter the current binding"
+for capacity_index in $(seq 1 8); do
   printf 'capacity %s\n' "$capacity_index" > "$TMP/capacity.txt"
-  FM_DISCORD_SENT_MAX=10 dc reply --event "capacity-$capacity_index" --text-file "$TMP/capacity.txt" >/dev/null
+  FM_DISCORD_SENT_MAX=10 dc_at "$CAP_HOME" reply --event "capacity-$capacity_index" --text-file "$TMP/capacity.txt" >/dev/null
 done
-printf 'window=test\n' > "$HOME_DIR/state/capacity-task.meta"
-printf 'window=test\n' > "$HOME_DIR/state/capacity-task-2.meta"
-chmod 600 "$HOME_DIR/state/capacity-task.meta" "$HOME_DIR/state/capacity-task-2.meta"
-FM_DISCORD_SENT_MAX=10 dc link capacity-task dc-500000000000000001 >/dev/null
+printf 'window=test\n' > "$CAP_HOME/state/capacity-task.meta"
+printf 'window=test\n' > "$CAP_HOME/state/capacity-task-2.meta"
+chmod 600 "$CAP_HOME/state/capacity-task.meta" "$CAP_HOME/state/capacity-task-2.meta"
+FM_DISCORD_SENT_MAX=10 dc_at "$CAP_HOME" link capacity-task dc-500000000000000001 >/dev/null
 set +e
-FM_DISCORD_SENT_MAX=10 dc link capacity-task-2 dc-500000000000000001 >/dev/null 2>&1
+FM_DISCORD_SENT_MAX=10 dc_at "$CAP_HOME" link capacity-task-2 dc-500000000000000001 >/dev/null 2>&1
 link_rc=$?
 set -e
 [ "$link_rc" != 0 ] || fail "a second linked task must not consume capacity already reserved for pending work"
 update_control ".messages += [{id:\"500000000000000002\",channel_id:\"$CHANNEL2\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"must wait for ledger capacity\",attachments:[]}]"
 before=$(request_count)
-out=$(FM_DISCORD_SENT_MAX=10 dc poll)
+out=$(FM_DISCORD_SENT_MAX=10 dc_at "$CAP_HOME" poll)
 assert_contains "$out" "reply ledger has no capacity" "full reply capacity must stop intake locally"
 [ "$(request_count)" = "$before" ] || fail "full reply capacity must stop before contacting Discord"
-[ "$(dc inbox pending-count)" = 1 ] || fail "full reply capacity must not accept stranded work"
+[ "$(dc_at "$CAP_HOME" inbox pending-count)" = 1 ] || fail "full reply capacity must not accept stranded work"
+dc_at "$CAP_HOME" disable >/dev/null
 pass "bounded reply-ledger capacity reserves linked work and stops new intake"
 
 # Disable returns the home to default behavior without changing sibling channels.

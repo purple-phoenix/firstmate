@@ -1953,7 +1953,7 @@ Snowflakes stay decimal strings so JavaScript number precision cannot alter an i
 The owner remains the sole inbound authority even when the locally confirmed audience list later includes read-only viewers.
 
 `token_owner` is `keychain` or `file`.
-The macOS keychain service is `firstmate-discord-bot`, with an account derived from the exact home path so homes do not share credentials.
+The macOS keychain service is `firstmate-discord-bot`, with an account derived from a collision-resistant hash of the exact home path so homes do not share credentials.
 The cross-platform file fallback is `config/discord-token`, a gitignored mode-0600 file.
 The token is read from standard input for storage and is never accepted in arguments, config, state, generated checks, logs, or status output.
 
@@ -1963,9 +1963,9 @@ Unlike Telegram's bounded long poll, Discord is an ordinary registered check on 
 
 All connector-owned runtime records live below mode-0700 `state/discord/`:
 
-- `cursor` is the highest classified Discord message snowflake.
+- `cursor` is an `fm-discord-cursor.v2` record binding the highest classified Discord message snowflake to the exact bot, guild, channel, and owner tuple.
 - `inbox/dc-<message_id>.json` and `inbox/archive/` contain private `fm-discord-request.v1` records; intake stops at 100 pending records, and the archive keeps at most 100 records by pruning only the oldest answered request.
-- `sent/<key>.json` contains create-only `fm-discord-sent.v1` reply claims, exact confirmed-chunk counts, and verified Discord message IDs, capped at 500 records so duplicate memory cannot grow without bound.
+- `sent/<binding-hash>--<key>.json` contains create-only `fm-discord-sent.v1` reply claims, exact confirmed-chunk counts, and verified Discord message IDs, capped at 500 binding-indexed records so duplicate history survives safe rebinding without collisions.
 - `rate-limit.json` persists Discord's bounded `Retry-After` deadline.
 - `poll-error.json` deduplicates an unchanged configuration, credential, permission, privacy, backlog, or availability failure.
 
@@ -1979,7 +1979,8 @@ Every poll and every outbound chunk recomputes the effective audience from the e
 The list is bounded by `FM_DISCORD_MAX_PAGES` pages of 1,000 members; a larger or incomplete guild is unverifiable and private delivery stops.
 Audience verification includes Discord's guild-owner and Administrator bypass behavior and requires a guild text channel rather than a thread.
 
-When a Discord message starts longer work, `bin/fm-discord.sh link` stores `discord_request=`, `discord_request_ts=`, and `discord_updates=` in the existing private task metadata.
+When a Discord message starts longer work, `bin/fm-discord.sh link` validates the original request and stores `discord_request=`, `discord_request_ts=`, `discord_updates=`, and the exact `discord_binding=` in the existing private task metadata.
+The durable binding, rather than indefinite retention of the answered request, remains the authority for later task outcomes.
 `reply --task` derives a fresh `.u<n>` ledger key, and `--final` clears the link only after a confirmed complete post.
 
 The poll wakes firstmate with `discord-message <n> pending` or one deduplicated `discord-mode-error ...` line.

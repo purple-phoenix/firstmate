@@ -17,7 +17,7 @@ Firstmate answers questions, accepts work through the normal lifecycle, asks for
 Only the configured owner's messages carry authority.
 Other viewers, roles, users, bots, webhooks, applications, channels, guilds, edits, and replays are rejected even when they can see the channel.
 
-Plain text, reply text, and attachment metadata are accepted as source content.
+Plain text, reply text, forwarded snapshots, sticker and poll metadata, unsupported embed or component markers, and attachment metadata are accepted as bounded source content.
 The bridge does not download attachments.
 Quoted messages, forwarded material, and attachments never gain instruction or approval authority from the configured owner's act of including them.
 
@@ -111,7 +111,7 @@ bin/fm-discord.sh enable
 ```
 
 Enable seeds its cursor from the newest existing Discord message, so it does not import channel history.
-Changing the bot, guild, channel, or owner creates a new identity binding: enable reseeds that binding from its newest message, pending requests from the former binding move to private quarantine, and former request or task links cannot post into the new channel.
+Changing the bot, guild, channel, or owner creates a new identity binding: enable reseeds that binding from its newest message, pending requests from the former binding move to private quarantine, former request or task links cannot post into the new channel, and each binding retains its own duplicate ledger.
 It registers one credential-free Firstmate check and joins the shared 30-second inbound-channel cadence.
 No webhook, public ingress, paid host, new LLM provider, or messaging subscription is added.
 Existing AI inference and local hardware or hosting costs still apply, and Discord may change its own product limits or pricing.
@@ -128,7 +128,8 @@ Discord's `nonce` plus `enforce_nonce` is also set for each chunk.
 A confirmed receipt records the returned message identity; a rejected request is retryable; a network or server failure after a send begins is recorded as uncertain and requires explicit inspection plus `--resend`.
 Rate-limit responses persist Discord's `Retry-After` before returning, so later checks wait without busy-looping.
 Authentication, permission, privacy, and unavailable-API failures are deduplicated instead of waking Firstmate unchanged on every cycle.
-Replacing a verified token across file and keychain storage removes the superseded copy before selecting the new backend; if cleanup fails, the command rolls back the replacement and reports the manual cleanup required.
+Every verified replacement removes the provably owned unselected file or exact-home Keychain copy before selecting the backend, and a cross-backend cleanup failure rolls back the replacement and reports the manual cleanup required.
+Uninstall checks both owned backends but never deletes ambiguous entries created by the former lossy Keychain account convention.
 
 ## Rollback
 
