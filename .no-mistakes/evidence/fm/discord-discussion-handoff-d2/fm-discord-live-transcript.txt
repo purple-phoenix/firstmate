@@ -1,0 +1,23 @@
+ok - Discord is disabled by default and makes no API call
+ok - setup verifies and enables one exact owner-private context without posting
+ok - owner no-mention intake succeeds while other authors, bots, and channels are rejected
+ok - cursor replay and a fresh CLI process preserve one request until post-handling acknowledgement
+ok - quoted messages and attachments remain bounded source content without authority
+ok - long replies are ordered, bounded, and mention-safe
+ok - forwarded and unsupported source forms advance without weakening intent checks
+ok - Discord 429 Retry-After is durable and prevents busy-loop retries
+ok - invalid credentials are reported once without automatic credential changes
+ok - uncertain sends are honest, explicit, and nonce-deduplicated
+ok - audience changes require exact local confirmation and unavailable verification stops safely
+ok - linked work milestones and final outcomes survive process restarts and deduplicate by key
+ok - terminal replies acknowledge shared requests with distinct task claims
+ok - idempotent task relinking preserves monotonic delivery keys
+ok - terminal acknowledgement failure preserves explicit no-resend recovery
+ok - durable exact-binding task links survive archive pruning safely
+ok - credential replacement leaves one selected backend and fails safely on cleanup errors
+ok - exact-home credentials stay isolated and uninstall removes owned copies
+ok - binding-indexed ledgers preserve duplicate history across reconfiguration
+ok - identity rebinding quarantines old requests, links, and cursor state
+ok - bounded reply-ledger capacity reserves linked work and stops new intake
+ok - disable restores Discord's inert behavior without a second service
+# fm-discord.test.sh: all assertions passed
