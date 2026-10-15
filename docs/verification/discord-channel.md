@@ -26,8 +26,8 @@ Command:
 bash tests/fm-discord.test.sh
 ```
 
-Result on 2026-10-15: all 12 behavioral assertions passed.
-The public `bin/fm-discord.sh` interface proved default-off no-network behavior; token and identity setup without posting; allowed-owner no-mention intake; rejection of other authors, bot self-echo, and wrong channels; replay suppression; cursor-before-ack restart behavior; quoted and attachment source labelling; ordered long-message chunks; mention suppression; durable 429 backoff; deduplicated invalid-credential reporting; explicit uncertain-send recovery with Discord nonce convergence; changed-audience refusal and exact local confirmation; unavailable-permission refusal; task-linked milestone and final outcomes; and clean disable.
+Result on 2026-10-15: all 15 behavioral assertions passed.
+The public `bin/fm-discord.sh` interface proved default-off no-network behavior; token and identity setup without posting; allowed-owner no-mention intake; rejection of other authors, bot self-echo, and wrong channels; replay suppression; identity-bound cursor reseeding, request quarantine, and stale-link refusal; cursor-before-ack restart behavior; quoted and attachment source labelling; ordered long-message chunks; mention suppression; bounded reply-capacity reservation; credential-backend migration and cleanup rollback; durable 429 backoff; deduplicated invalid-credential reporting; explicit uncertain-send recovery with Discord nonce convergence; changed-audience refusal and exact local confirmation; unavailable and inconsistent audience-context refusal; task-linked milestone and final outcomes; and clean disable.
 
 The fake exercised HTTP responses and transport disconnects through the public connector rather than inspecting implementation source text.
 Its fixtures do not prove a live Discord account, credential, Developer Portal intent, server permission, or production rate-limit bucket.

@@ -111,6 +111,7 @@ bin/fm-discord.sh enable
 ```
 
 Enable seeds its cursor from the newest existing Discord message, so it does not import channel history.
+Changing the bot, guild, channel, or owner creates a new identity binding: enable reseeds that binding from its newest message, pending requests from the former binding move to private quarantine, and former request or task links cannot post into the new channel.
 It registers one credential-free Firstmate check and joins the shared 30-second inbound-channel cadence.
 No webhook, public ingress, paid host, new LLM provider, or messaging subscription is added.
 Existing AI inference and local hardware or hosting costs still apply, and Discord may change its own product limits or pricing.
@@ -122,10 +123,12 @@ The cursor advances only after each accepted message is durably created or each 
 If the bounded history cannot reach the prior cursor, the bridge advances nothing and reports the backlog rather than silently skipping messages.
 
 The local reply ledger claims a stable request, task-update, or event key before sending.
+New intake stops before contacting Discord when the bounded ledger cannot reserve a reply, and linking longer work reserves capacity for its next outcome.
 Discord's `nonce` plus `enforce_nonce` is also set for each chunk.
 A confirmed receipt records the returned message identity; a rejected request is retryable; a network or server failure after a send begins is recorded as uncertain and requires explicit inspection plus `--resend`.
 Rate-limit responses persist Discord's `Retry-After` before returning, so later checks wait without busy-looping.
 Authentication, permission, privacy, and unavailable-API failures are deduplicated instead of waking Firstmate unchanged on every cycle.
+Replacing a verified token across file and keychain storage removes the superseded copy before selecting the new backend; if cleanup fails, the command rolls back the replacement and reports the manual cleanup required.
 
 ## Rollback
 
@@ -153,7 +156,7 @@ Deterministic behavioral coverage uses an owned loopback fake through the real C
 bash tests/fm-discord.test.sh
 ```
 
-The test proves default-off behavior, owner/no-mention intake, identity rejection, replay suppression, cursor ordering, restart recovery, chunked output, 429 persistence, invalid credentials, uncertain sends, and audience-change refusal.
+The test proves default-off behavior, owner/no-mention intake, identity rejection, replay suppression, identity-bound cursor reseeding and quarantine, restart recovery, chunked output, bounded reply-capacity reservation, credential-backend cleanup, 429 persistence, invalid credentials, uncertain sends, audience-change refusal, and fail-closed role and overwrite validation.
 [`verification/discord-channel.md`](verification/discord-channel.md) records the maintained evidence.
 
 No offline test proves Discord credentials, portal intent settings, live server permissions, or Discord's current production behavior for a particular account.

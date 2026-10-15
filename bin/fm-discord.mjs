@@ -37,7 +37,9 @@ const tokenFile = process.env.FM_DISCORD_TOKEN_FILE || path.join(configDir, 'dis
 const stateDir = path.join(stateRoot, 'discord');
 const inboxDir = path.join(stateDir, 'inbox');
 const archiveDir = path.join(inboxDir, 'archive');
+const quarantineDir = path.join(inboxDir, 'quarantine');
 const sentDir = path.join(stateDir, 'sent');
+const sentQuarantineDir = path.join(sentDir, 'quarantine');
 const cursorFile = path.join(stateDir, 'cursor');
 const errorFile = path.join(stateDir, 'poll-error.json');
 const rateFile = path.join(stateDir, 'rate-limit.json');
@@ -220,6 +222,10 @@ function removeToken(owner) {
   }
 }
 
+function bindingKey(cfg) {
+  return [cfg.bot_id, cfg.guild_id, cfg.channel_id, cfg.owner_id].join(':');
+}
+
 class ApiError extends Error {
   constructor(kind, message, status = 0) { super(message); this.kind = kind; this.status = status; }
 }
@@ -269,37 +275,51 @@ async function api(token, method, route, body = undefined) {
   return parsed;
 }
 
+function permissionValue(value) {
+  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) throw new ApiError('context', 'Discord returned an unverifiable permission value');
+  return BigInt(value);
+}
+
 function computePermissions(member, guild, channel) {
   if (member.user.id === guild.owner_id) return ~0n;
   const roles = new Map(guild.roles.map((role) => [role.id, role]));
-  let permissions = BigInt(roles.get(guild.id)?.permissions || '0');
-  for (const id of member.roles || []) permissions |= BigInt(roles.get(id)?.permissions || '0');
+  let permissions = permissionValue(roles.get(guild.id).permissions);
+  for (const id of member.roles) permissions |= permissionValue(roles.get(id).permissions);
   if ((permissions & ADMINISTRATOR) === ADMINISTRATOR) return ~0n;
-  const overwrites = channel.permission_overwrites || [];
+  const overwrites = channel.permission_overwrites;
   const everyone = overwrites.find((item) => item.type === 0 && item.id === guild.id);
-  if (everyone) { permissions &= ~BigInt(everyone.deny || '0'); permissions |= BigInt(everyone.allow || '0'); }
+  if (everyone) { permissions &= ~permissionValue(everyone.deny); permissions |= permissionValue(everyone.allow); }
   let allow = 0n;
   let deny = 0n;
   for (const id of member.roles || []) {
     const overwrite = overwrites.find((item) => item.type === 0 && item.id === id);
-    if (overwrite) { allow |= BigInt(overwrite.allow || '0'); deny |= BigInt(overwrite.deny || '0'); }
+    if (overwrite) { allow |= permissionValue(overwrite.allow); deny |= permissionValue(overwrite.deny); }
   }
   permissions &= ~deny;
   permissions |= allow;
   const direct = overwrites.find((item) => item.type === 1 && item.id === member.user.id);
-  if (direct) { permissions &= ~BigInt(direct.deny || '0'); permissions |= BigInt(direct.allow || '0'); }
+  if (direct) { permissions &= ~permissionValue(direct.deny); permissions |= permissionValue(direct.allow); }
   return permissions;
 }
 
 async function verifyAudience(cfg, token) {
   const channel = await api(token, 'GET', `/channels/${cfg.channel_id}`);
-  if (!channel || channel.id !== cfg.channel_id || channel.guild_id !== cfg.guild_id || channel.type !== 0) {
+  if (!channel || channel.id !== cfg.channel_id || channel.guild_id !== cfg.guild_id || channel.type !== 0
+    || !Array.isArray(channel.permission_overwrites)) {
     throw new ApiError('context', 'the configured destination is not the exact guild text channel');
   }
   const guild = await api(token, 'GET', `/guilds/${cfg.guild_id}?with_counts=true`);
   if (!guild || guild.id !== cfg.guild_id || !Array.isArray(guild.roles) || !snowflakeRe.test(guild.owner_id || '')) {
     throw new ApiError('context', 'Discord returned an unverifiable guild context');
   }
+  const roles = new Map();
+  for (const role of guild.roles) {
+    if (!snowflakeRe.test(role?.id || '') || typeof role.permissions !== 'string' || !/^[0-9]+$/.test(role.permissions) || roles.has(role.id)) {
+      throw new ApiError('context', 'Discord returned an unverifiable guild-role context');
+    }
+    roles.set(role.id, role);
+  }
+  if (!roles.has(guild.id)) throw new ApiError('context', 'Discord omitted the @everyone role from audience verification');
   const members = [];
   let after = '0';
   let complete = false;
@@ -307,7 +327,11 @@ async function verifyAudience(cfg, token) {
     const batch = await api(token, 'GET', `/guilds/${cfg.guild_id}/members?limit=1000&after=${after}`);
     if (!Array.isArray(batch)) throw new ApiError('context', 'Discord returned an unreadable guild-member list');
     for (const member of batch) {
-      if (!snowflakeRe.test(member?.user?.id || '') || !Array.isArray(member.roles)) throw new ApiError('context', 'Discord returned an unreadable guild member');
+      if (!snowflakeRe.test(member?.user?.id || '') || !Array.isArray(member.roles)
+        || member.roles.some((id) => !snowflakeRe.test(id) || !roles.has(id))
+        || new Set(member.roles).size !== member.roles.length) {
+        throw new ApiError('context', 'Discord returned an unreadable or role-inconsistent guild member');
+      }
       members.push(member);
     }
     if (batch.length < 1000) { complete = true; break; }
@@ -316,8 +340,20 @@ async function verifyAudience(cfg, token) {
   if (!complete) throw new ApiError('context', `the guild member list exceeds the bounded ${maxPages * 1000}-member verification limit`);
   const unique = new Map(members.map((member) => [member.user.id, member]));
   if (unique.size !== members.length) throw new ApiError('context', 'Discord returned duplicate guild members during audience verification');
+  if (!unique.has(guild.owner_id)) throw new ApiError('context', 'Discord omitted the guild owner from audience verification');
   if (Number.isSafeInteger(guild.approximate_member_count) && guild.approximate_member_count !== unique.size) {
     throw new ApiError('context', 'the complete guild audience could not be verified consistently');
+  }
+  const overwriteKeys = new Set();
+  for (const overwrite of channel.permission_overwrites) {
+    const targetExists = overwrite?.type === 0 ? roles.has(overwrite.id) : overwrite?.type === 1 && unique.has(overwrite.id);
+    const key = `${overwrite?.type}:${overwrite?.id}`;
+    if (!snowflakeRe.test(overwrite?.id || '') || !targetExists || typeof overwrite.allow !== 'string'
+      || !/^[0-9]+$/.test(overwrite.allow) || typeof overwrite.deny !== 'string'
+      || !/^[0-9]+$/.test(overwrite.deny) || overwriteKeys.has(key)) {
+      throw new ApiError('context', 'Discord returned an unverifiable channel-overwrite context');
+    }
+    overwriteKeys.add(key);
   }
   const owner = unique.get(cfg.owner_id);
   const bot = unique.get(cfg.bot_id);
@@ -366,22 +402,31 @@ async function cmdToken(args) {
   if (opts._.length) usage(2);
   const owner = opts.owner || (process.platform === 'darwin' ? 'keychain' : 'file');
   const token = readStdin();
-  storeToken(owner, token);
+  if (!tokenRe.test(token)) throw new Error('the bot token has an invalid shape');
   let user;
-  try { user = await api(token, 'GET', '/users/@me'); }
-  catch (error) { try { removeToken(owner); } catch {} throw error; }
+  user = await api(token, 'GET', '/users/@me');
   if (!snowflakeRe.test(user?.id || '') || user.bot !== true) {
-    try { removeToken(owner); } catch {}
     throw new Error('the credential is not a Discord bot token');
   }
   const prior = loadConfig();
-  writeConfig({
+  storeToken(owner, token);
+  if (prior && prior.token_owner !== owner) {
+    try { removeToken(prior.token_owner); }
+    catch (error) {
+      let rollback = '';
+      try { removeToken(owner); } catch (rollbackError) { rollback = `; the replacement also needs manual cleanup: ${rollbackError.message}`; }
+      throw new Error(`the replacement was verified, but the prior ${prior.token_owner} credential could not be removed: ${error.message}; clean it up and retry${rollback}`);
+    }
+  }
+  const next = {
     schema: 'fm-discord.v1', enabled: false, token_owner: owner,
     bot_id: user.id, bot_username: String(user.username || '').slice(0, 64),
     guild_id: prior?.guild_id || null, channel_id: prior?.channel_id || null,
     owner_id: prior?.owner_id || null, approved_audience_ids: prior?.approved_audience_ids || [],
     configured_at: prior?.configured_at || null, audience_confirmed_at: prior?.audience_confirmed_at || null
-  });
+  };
+  writeConfig(next);
+  quarantineMismatchedState(next);
   process.stdout.write(`token stored for bot ${String(user.username || 'unknown')} (${idEnd(user.id)}); channel remains disabled\n`);
 }
 
@@ -397,6 +442,7 @@ async function cmdConfigure(args) {
   next.configured_at = Math.floor(Date.now() / 1000);
   next.audience_confirmed_at = next.configured_at;
   writeConfig(next);
+  quarantineMismatchedState(next);
   process.stdout.write(`configured owner ${idEnd(next.owner_id)} in guild ${idEnd(next.guild_id)}, channel ${idEnd(next.channel_id)}; channel remains disabled\n`);
 }
 
@@ -429,12 +475,13 @@ async function cmdEnable() {
   const token = loadToken(cfg.token_owner);
   await verifyAudience(cfg, token);
   ensurePrivateDir(stateDir);
-  if (!privateFile(cursorFile)) {
+  quarantineMismatchedState(cfg);
+  if (!cursorMatches(cfg)) {
     const messages = await api(token, 'GET', `/channels/${cfg.channel_id}/messages?limit=1`);
     if (!Array.isArray(messages)) throw new Error('Discord returned an unreadable message cursor');
     const latest = messages[0]?.id || '0';
     if (!snowflakeRe.test(latest)) throw new Error('Discord returned an invalid message cursor');
-    atomicWrite(cursorFile, `${latest}\n`, 0o600, true);
+    cursorWrite(latest, cfg);
   }
   fs.mkdirSync(stateRoot, { recursive: true });
   const check = `#!/usr/bin/env bash\n# Generated by bin/fm-discord.sh; contains no credential.\nexport FM_HOME=${shellQuote(home)}\nexec ${shellQuote(path.join(root, 'bin/fm-discord.sh'))} poll\n`;
@@ -477,16 +524,97 @@ function cmdStatus() {
   process.stdout.write(`Discord channel\n  enabled: ${cfg.enabled ? 'yes' : 'no'}\n  bot: ${idEnd(cfg.bot_id)}\n  guild: ${idEnd(cfg.guild_id)}\n  channel: ${idEnd(cfg.channel_id)}\n  owner: ${idEnd(cfg.owner_id)}\n  approved human audience: ${cfg.approved_audience_ids.length}\n  pending: ${pendingCount()}\n  monitored: ${checkRegistered() ? 'yes' : 'no'}\n`);
 }
 
-function cursorRead() {
-  if (!privateFile(cursorFile)) throw new Error('the Discord cursor is unavailable; disable and enable to seed it without importing history');
-  const value = fs.readFileSync(cursorFile, 'utf8').trim();
-  if (!snowflakeRe.test(value)) throw new Error('the Discord cursor is unreadable');
-  return value;
+function cursorRecord() {
+  if (!privateFile(cursorFile)) return null;
+  try {
+    const record = JSON.parse(fs.readFileSync(cursorFile, 'utf8'));
+    if (record?.schema === 'fm-discord-cursor.v2' && snowflakeRe.test(record.message_id || '') && typeof record.binding === 'string') return record;
+  } catch {}
+  return null;
 }
 
-function cursorWrite(value) { atomicWrite(cursorFile, `${value}\n`, 0o600, true); }
+function cursorMatches(cfg) { return cursorRecord()?.binding === bindingKey(cfg); }
+
+function cursorRead(cfg) {
+  if (!privateFile(cursorFile)) throw new Error('the Discord cursor is unavailable; disable and enable to seed it without importing history');
+  const record = cursorRecord();
+  if (!record || record.binding !== bindingKey(cfg)) throw new Error('the Discord cursor does not belong to the configured identity binding; disable and enable to reseed it');
+  return record.message_id;
+}
+
+function cursorWrite(value, cfg) {
+  writeJson(cursorFile, { schema: 'fm-discord-cursor.v2', binding: bindingKey(cfg), message_id: value }, true);
+}
 function jsonFiles(dir) { try { return fs.readdirSync(dir).filter((name) => name.endsWith('.json')).sort(); } catch { return []; } }
 function pendingCount() { return jsonFiles(inboxDir).length; }
+
+function requestRecord(key) {
+  for (const dir of [inboxDir, archiveDir]) {
+    try {
+      const record = readJson(path.join(dir, `${key}.json`));
+      if (record?.schema === 'fm-discord-request.v1') return record;
+    } catch {}
+  }
+  return null;
+}
+
+function requestMatches(key, cfg) { return requestRecord(key)?.binding === bindingKey(cfg); }
+
+function pendingRequestMatches(key, cfg) {
+  try { return readJson(path.join(inboxDir, `${key}.json`))?.binding === bindingKey(cfg); }
+  catch { return false; }
+}
+
+function quarantineMismatchedState(cfg) {
+  if (!configReady(cfg)) return;
+  for (const name of jsonFiles(inboxDir)) {
+    const source = path.join(inboxDir, name);
+    let record = null;
+    try { record = readJson(source, true); } catch {}
+    if (record?.binding === bindingKey(cfg)) continue;
+    ensurePrivateDir(quarantineDir);
+    const destination = path.join(quarantineDir, name);
+    if (fs.existsSync(destination)) {
+      if (!privateFile(destination)) throw new Error('the Discord quarantine destination is unsafe');
+      fs.unlinkSync(source);
+    } else fs.renameSync(source, destination);
+  }
+  for (const name of jsonFiles(sentDir)) {
+    const source = path.join(sentDir, name);
+    let record = null;
+    try { record = readJson(source, true); } catch {}
+    if (record?.binding === bindingKey(cfg)) continue;
+    ensurePrivateDir(sentQuarantineDir);
+    const destination = path.join(sentQuarantineDir, name);
+    if (fs.existsSync(destination)) {
+      if (!privateFile(destination)) throw new Error('the Discord sent-ledger quarantine destination is unsafe');
+      fs.unlinkSync(source);
+    } else fs.renameSync(source, destination);
+  }
+  try { if (privateFile(errorFile)) fs.unlinkSync(errorFile); } catch {}
+}
+
+function activeTaskLinkCount(cfg) {
+  let count = 0;
+  let names = [];
+  try { names = fs.readdirSync(stateRoot).filter((item) => item.endsWith('.meta')).sort(); } catch {}
+  for (const name of names) {
+    const file = path.join(stateRoot, name);
+    if (!privateFile(file)) continue;
+    const meta = metaValues(file);
+    if (baseKeyRe.test(meta.discord_request || '') && meta.discord_binding === bindingKey(cfg)
+      && requestMatches(meta.discord_request, cfg)) count += 1;
+  }
+  return count;
+}
+
+function replyCapacityUsage(cfg) {
+  const pendingReservations = jsonFiles(inboxDir).filter((name) => {
+    const key = name.slice(0, -5);
+    return requestMatches(key, cfg) && !privateFile(path.join(sentDir, `${key}.json`));
+  }).length;
+  return jsonFiles(sentDir).length + pendingReservations + activeTaskLinkCount(cfg);
+}
 
 function emitPollError(message) {
   let prior = null;
@@ -541,6 +669,7 @@ async function cmdPoll() {
   const cfg = loadConfig();
   if (!configReady(cfg) || !cfg.enabled) return;
   if (pendingCount() >= maxInbox) { wakePending(); return; }
+  if (replyCapacityUsage(cfg) >= maxSent) { emitPollError('the Discord reply ledger has no capacity for another request'); wakePending(); return; }
   let token;
   try { token = loadToken(cfg.token_owner); await verifyAudience(cfg, token); }
   catch (error) {
@@ -549,7 +678,7 @@ async function cmdPoll() {
   }
   let cursor;
   let messages;
-  try { cursor = cursorRead(); messages = await fetchNewMessages(cfg, token, cursor); }
+  try { cursor = cursorRead(cfg); messages = await fetchNewMessages(cfg, token, cursor); }
   catch (error) {
     if (error instanceof ApiError && error.kind === 'rate-limit') { wakePending(); return; }
     emitPollError(error.message); return;
@@ -564,7 +693,7 @@ async function cmdPoll() {
     const selfOrBot = message?.author?.bot === true || authorId === cfg.bot_id || message?.webhook_id || message?.application_id;
     if (!isOwner || selfOrBot || !acceptableType || message.edited_timestamp
       || message.channel_id !== cfg.channel_id) {
-      cursorWrite(message.id);
+      cursorWrite(message.id, cfg);
       continue;
     }
     const text = messageSourceText(message);
@@ -574,13 +703,17 @@ async function cmdPoll() {
     }
     const kind = [...text].length > maxRequestChars ? 'oversized' : 'message';
     const key = `dc-${message.id}`;
+    if (replyCapacityUsage(cfg) >= maxSent) {
+      emitPollError('the Discord reply ledger has no capacity for another request');
+      break;
+    }
     const record = {
       schema: 'fm-discord-request.v1', request_id: key, message_id: message.id,
       guild_id: cfg.guild_id, channel_id: cfg.channel_id, author_id: cfg.owner_id,
-      kind, text: kind === 'message' ? text : '', received_at: Math.floor(Date.now() / 1000)
+      bot_id: cfg.bot_id, binding: bindingKey(cfg), kind, text: kind === 'message' ? text : '', received_at: Math.floor(Date.now() / 1000)
     };
     createOnce(path.join(inboxDir, `${key}.json`), `${JSON.stringify(record)}\n`);
-    cursorWrite(message.id);
+    cursorWrite(message.id, cfg);
     accepted += 1;
   }
   if (accepted || pendingCount()) wakePending();
@@ -663,10 +796,6 @@ function splitMessage(text) {
   return chunks;
 }
 
-function requestExists(key) {
-  return privateFile(path.join(inboxDir, `${key}.json`)) || privateFile(path.join(archiveDir, `${key}.json`));
-}
-
 function metaFile(task) {
   if (!taskRe.test(task)) throw new Error('invalid task id');
   ensurePlainDir(stateRoot);
@@ -684,34 +813,40 @@ function metaValues(file) {
 
 function rewriteMeta(file, values) {
   if (!privateFile(file)) throw new Error('the task record is unavailable or unsafe');
-  const kept = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line && !/^discord_request=|^discord_request_ts=|^discord_updates=/.test(line));
-  if (values) kept.push(`discord_request=${values.request}`, `discord_request_ts=${values.timestamp}`, `discord_updates=${values.updates}`);
+  const kept = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line && !/^discord_request=|^discord_request_ts=|^discord_updates=|^discord_binding=/.test(line));
+  if (values) kept.push(`discord_request=${values.request}`, `discord_request_ts=${values.timestamp}`, `discord_updates=${values.updates}`, `discord_binding=${values.binding}`);
   atomicWrite(file, `${kept.join('\n')}\n`, 0o600, false);
 }
 
-function linkInfo(task) {
+function linkInfo(task, cfg) {
   const file = metaFile(task);
   if (!privateFile(file)) return null;
   const meta = metaValues(file);
   if (!baseKeyRe.test(meta.discord_request || '')) return null;
+  if (meta.discord_binding !== bindingKey(cfg) || !requestMatches(meta.discord_request, cfg)) return null;
   const raw = meta.discord_updates ?? '0';
   if (!/^[0-9]{1,3}$/.test(raw) || Number(raw) > 998) throw new Error('the Discord task link has an invalid update count');
   const updates = Number(raw);
-  return { file, request: meta.discord_request, updates };
+  return { file, request: meta.discord_request, updates, binding: meta.discord_binding };
 }
 
 function cmdLink(args) {
   if (args.length !== 2 || !baseKeyRe.test(args[1])) usage(2);
-  if (!requestExists(args[1])) throw new Error('the Discord request does not exist');
+  const cfg = loadConfig();
+  if (!configReady(cfg) || !requestMatches(args[1], cfg)) throw new Error('the Discord request does not belong to the configured identity binding');
   const file = metaFile(args[0]);
   if (!privateFile(file)) throw new Error('there is no such private task record');
-  rewriteMeta(file, { request: args[1], timestamp: Math.floor(Date.now() / 1000), updates: 0 });
+  const existing = linkInfo(args[0], cfg);
+  if (!existing && replyCapacityUsage(cfg) >= maxSent) throw new Error('the Discord reply ledger has no capacity to reserve for linked work');
+  rewriteMeta(file, { request: args[1], timestamp: Math.floor(Date.now() / 1000), updates: 0, binding: bindingKey(cfg) });
   process.stdout.write(`linked: ${args[0]} -> ${args[1]}\n`);
 }
 
 function cmdLinkCheck(args) {
   if (args.length !== 1) usage(2);
-  const info = linkInfo(args[0]);
+  const cfg = loadConfig();
+  if (!configReady(cfg)) return;
+  const info = linkInfo(args[0], cfg);
   const max = boundedInt(process.env.FM_DISCORD_TASK_UPDATE_MAX, 3, 0, 998);
   if (info && info.updates < max) process.stdout.write(`${info.request} ${info.updates}\n`);
 }
@@ -725,30 +860,30 @@ function cmdLinkClear(args) {
 function updateTaskLink(task, info, final) {
   if (!task || !info) return;
   if (final) rewriteMeta(info.file, null);
-  else rewriteMeta(info.file, { request: info.request, timestamp: Math.floor(Date.now() / 1000), updates: info.updates + 1 });
+  else rewriteMeta(info.file, { request: info.request, timestamp: Math.floor(Date.now() / 1000), updates: info.updates + 1, binding: info.binding });
 }
 
 async function cmdReply(args) {
   const opts = parseOptions(args);
+  const cfg = loadConfig();
+  if (!configReady(cfg) || !cfg.enabled) throw new Error('the Discord channel is not enabled');
   let key = opts._[0] || '';
   let taskInfo = null;
   if (opts.final && !opts.task) fatal('--final requires --task', 2);
   if ((opts.event || opts.task) && opts._.length) usage(2);
   if (opts.event) key = `event-${opts.event}`;
   if (opts.task) {
-    taskInfo = linkInfo(opts.task);
+    taskInfo = linkInfo(opts.task, cfg);
     if (!taskInfo) throw new Error('that task has no Discord conversation waiting on it');
     const updateMax = boundedInt(process.env.FM_DISCORD_TASK_UPDATE_MAX, 3, 0, 998);
     if (!opts.final && taskInfo.updates >= updateMax) throw new Error('the Discord task update budget is spent; reserve the next key for the final outcome');
     key = `${taskInfo.request}.u${taskInfo.updates + 1}`;
   }
   if (!keyRe.test(key) || opts._.length > 1) usage(2);
-  if (key.startsWith('dc-') && !key.includes('.u') && !requestExists(key)) throw new Error('the Discord request does not exist');
+  if (key.startsWith('dc-') && !key.includes('.u') && !requestMatches(key, cfg)) throw new Error('the Discord request does not belong to the configured identity binding');
   if (!opts['text-file']) fatal('--text-file is required', 2);
   const text = opts['text-file'] === '-' ? readStdin() : fs.readFileSync(opts['text-file'], 'utf8');
   const chunks = splitMessage(text);
-  const cfg = loadConfig();
-  if (!configReady(cfg) || !cfg.enabled) throw new Error('the Discord channel is not enabled');
   const token = loadToken(cfg.token_owner);
   const ledgerFile = path.join(sentDir, `${key}.json`);
   const hash = crypto.createHash('sha256').update(JSON.stringify(chunks)).digest('hex');
@@ -756,17 +891,21 @@ async function cmdReply(args) {
   let messageIds = [];
   if (privateFile(ledgerFile)) {
     const prior = readJson(ledgerFile, true);
+    if (prior.binding !== bindingKey(cfg)) throw new Error('the Discord reply ledger does not belong to the configured identity binding');
     if (prior.status === 'sent') fatal(`${key} was already answered; refusing a duplicate`, 3);
     if (!opts.resend) fatal(`${key} has an interrupted or uncertain delivery; inspect Discord, then use --resend explicitly`, 4);
     if (prior.content_hash !== hash) fatal('the reply text changed after delivery began; refusing to mix message versions', 4);
     start = Number.isSafeInteger(prior.chunks_sent) ? prior.chunks_sent : 0;
     messageIds = Array.isArray(prior.message_ids) ? prior.message_ids.filter((id) => snowflakeRe.test(id)) : [];
   } else {
-    if (jsonFiles(sentDir).length >= maxSent) throw new Error('the Discord reply ledger is full; remove records only after reviewing their delivery history');
-    createOnce(ledgerFile, `${JSON.stringify({ schema: 'fm-discord-sent.v1', key, status: 'pending', chunks_sent: 0, chunks_total: chunks.length, content_hash: hash, updated_at: Math.floor(Date.now() / 1000) })}\n`);
+    const reserved = (baseKeyRe.test(key) && pendingRequestMatches(key, cfg)) || Boolean(taskInfo);
+    if ((!reserved || (taskInfo && !opts.final)) && replyCapacityUsage(cfg) >= maxSent) {
+      throw new Error('the Discord reply ledger is full; remove records only after reviewing their delivery history');
+    }
+    createOnce(ledgerFile, `${JSON.stringify({ schema: 'fm-discord-sent.v1', binding: bindingKey(cfg), key, status: 'pending', chunks_sent: 0, chunks_total: chunks.length, content_hash: hash, updated_at: Math.floor(Date.now() / 1000) })}\n`);
   }
   const ledger = (status, count, detail = undefined) => writeJson(ledgerFile, {
-    schema: 'fm-discord-sent.v1', key, status, chunks_sent: count, chunks_total: chunks.length,
+    schema: 'fm-discord-sent.v1', binding: bindingKey(cfg), key, status, chunks_sent: count, chunks_total: chunks.length,
     content_hash: hash, message_ids: messageIds, detail, updated_at: Math.floor(Date.now() / 1000)
   });
   for (let i = start; i < chunks.length; i += 1) {
