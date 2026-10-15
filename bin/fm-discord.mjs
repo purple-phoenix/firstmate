@@ -55,7 +55,7 @@ const apiBase = resolveApiBase();
 const snowflakeRe = /^[0-9]{1,20}$/;
 const bindingRe = /^[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}$/;
 const tokenRe = /^[A-Za-z0-9._-]{40,200}$/;
-const keyRe = /^(dc-[0-9]{1,20}(?:\.u[0-9]{1,3})?|event-[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
+const keyRe = /^(dc-[0-9]{1,20}(?:\.t[a-f0-9]{64}\.u[0-9]{1,3})?|event-[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
 const baseKeyRe = /^dc-[0-9]{1,20}$/;
 const taskRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const VIEW_CHANNEL = 1n << 10n;
@@ -868,7 +868,8 @@ function cmdLink(args) {
   if (!privateFile(file)) throw new Error('there is no such private task record');
   const existing = linkInfo(args[0], cfg);
   if (!existing && !taskLinkReserved(file) && replyCapacityUsage(cfg) >= maxSent) throw new Error('the Discord reply ledger has no capacity to reserve for linked work');
-  rewriteMeta(file, { request: args[1], timestamp: Math.floor(Date.now() / 1000), updates: 0, binding: bindingKey(cfg) });
+  const updates = existing?.request === args[1] ? existing.updates : 0;
+  rewriteMeta(file, { request: args[1], timestamp: Math.floor(Date.now() / 1000), updates, binding: bindingKey(cfg) });
   process.stdout.write(`linked: ${args[0]} -> ${args[1]}\n`);
 }
 
@@ -893,6 +894,17 @@ function updateTaskLink(task, info, final) {
   else rewriteMeta(info.file, { request: info.request, timestamp: Math.floor(Date.now() / 1000), updates: info.updates + 1, binding: info.binding });
 }
 
+function taskReplyKey(task, info) {
+  const identity = crypto.createHash('sha256').update(task).digest('hex');
+  return `${info.request}.t${identity}.u${info.updates + 1}`;
+}
+
+function ackTaskRequest(key) {
+  const pending = path.join(inboxDir, `${key}.json`);
+  const archived = path.join(archiveDir, `${key}.json`);
+  if (fs.existsSync(pending) || fs.existsSync(archived)) ackRequest(key);
+}
+
 async function cmdReply(args) {
   const opts = parseOptions(args);
   const cfg = loadConfig();
@@ -907,7 +919,7 @@ async function cmdReply(args) {
     if (!taskInfo) throw new Error('that task has no Discord conversation waiting on it');
     const updateMax = boundedInt(process.env.FM_DISCORD_TASK_UPDATE_MAX, 3, 0, 998);
     if (!opts.final && taskInfo.updates >= updateMax) throw new Error('the Discord task update budget is spent; reserve the next key for the final outcome');
-    key = `${taskInfo.request}.u${taskInfo.updates + 1}`;
+    key = taskReplyKey(opts.task, taskInfo);
   }
   if (!keyRe.test(key) || opts._.length > 1) usage(2);
   if (key.startsWith('dc-') && !key.includes('.u') && !requestMatches(key, cfg)) throw new Error('the Discord request does not belong to the configured identity binding');
@@ -970,6 +982,9 @@ async function cmdReply(args) {
   ledger('sent', chunks.length);
   if (baseKeyRe.test(key)) {
     try { ackRequest(key); }
+    catch (error) { fatal(`posted: ${key} (${chunks.length} message(s)), but local acknowledgement failed: ${error.message}`, 7); }
+  } else if (opts.final && taskInfo) {
+    try { ackTaskRequest(taskInfo.request); }
     catch (error) { fatal(`posted: ${key} (${chunks.length} message(s)), but local acknowledgement failed: ${error.message}`, 7); }
   }
   updateTaskLink(opts.task, taskInfo, Boolean(opts.final));

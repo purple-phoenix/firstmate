@@ -51,6 +51,7 @@ Exit 4 means delivery is uncertain and must be checked in Discord before an expl
 Exit 5 means Discord definitely refused or deferred the unsent chunk.
 Exit 6 means privacy verification stopped delivery; review and locally confirm the exact new audience before trying again.
 Exit 7 means Discord confirmed the reply but the local request acknowledgement failed; repair the named private-state issue and run `bin/fm-discord.sh inbox ack <request_id>` without sending again.
+For a terminal task reply, the task link remains after exit 7; after acknowledging the original request, clear that retained link with `bin/fm-discord.sh link-clear <task-id>`.
 
 When a request starts longer work, link it immediately after dispatch:
 
@@ -59,7 +60,7 @@ bin/fm-discord.sh link <task-id> <request_id>
 ```
 
 Later milestones use `bin/fm-discord.sh reply --task <task-id> --text-file <path>`.
-The terminal outcome adds `--final` and clears the link only after confirmed delivery.
+The terminal outcome adds `--final`, acknowledges the original request, and clears the link only after both confirmed delivery and local acknowledgement.
 Spend the default update budget only on a meaningful result, review-ready handoff, decision, or real blocker.
 
 ## Error wakes and private reporting

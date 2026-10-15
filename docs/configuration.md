@@ -1981,7 +1981,8 @@ Audience verification includes Discord's guild-owner and Administrator bypass be
 
 When a Discord message starts longer work, `bin/fm-discord.sh link` validates the original request and stores `discord_request=`, `discord_request_ts=`, `discord_updates=`, and the exact `discord_binding=` in the existing private task metadata.
 The durable binding, rather than indefinite retention of the answered request, remains the authority for later task outcomes.
-`reply --task` derives a fresh `.u<n>` ledger key, and `--final` clears the link only after a confirmed complete post.
+`reply --task` derives a fresh ledger key from the request, a stable hash of the task identity, and its monotonic update number.
+`--final` acknowledges the original request and clears the link only after both a confirmed complete post and successful local acknowledgement; an already-pruned archive record is already acknowledged.
 
 The poll wakes firstmate with `discord-message <n> pending` or one deduplicated `discord-mode-error ...` line.
 The `discord-captain-channel` skill owns handling and outbound voice.

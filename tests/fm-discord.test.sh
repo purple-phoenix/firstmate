@@ -256,6 +256,81 @@ dc reply --task work-from-discord --final --text-file "$TMP/final.txt" >/dev/nul
 [ -z "$(dc link-check work-from-discord)" ] || fail "confirmed final delivery must close the task conversation"
 pass "linked work milestones and final outcomes survive process restarts and deduplicate by key"
 
+# Multiple tasks retain distinct claims, acknowledge their shared request, and preserve relink counters.
+TASK_HOME="$TMP/task-lifecycle-home"
+mkdir -p "$TASK_HOME/config" "$TASK_HOME/state"
+update_control '.extra_viewer = false | .extra_admin = false'
+printf '%s\n' "$TOKEN" | dc_at "$TASK_HOME" token --owner file >/dev/null
+dc_at "$TASK_HOME" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$TASK_HOME" enable >/dev/null
+update_control ".messages += [{id:\"250000000000000001\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"start two tasks\",attachments:[]}]"
+dc_at "$TASK_HOME" poll >/dev/null
+printf 'window=test\n' > "$TASK_HOME/state/task-one.meta"
+printf 'window=test\n' > "$TASK_HOME/state/task-two.meta"
+chmod 600 "$TASK_HOME/state/task-one.meta" "$TASK_HOME/state/task-two.meta"
+dc_at "$TASK_HOME" link task-one dc-250000000000000001 >/dev/null
+dc_at "$TASK_HOME" link task-two dc-250000000000000001 >/dev/null
+printf 'first task finished\n' > "$TMP/task-one-final.txt"
+printf 'second task finished\n' > "$TMP/task-two-final.txt"
+count=$(jq 'length' "$FAKE/posted.json")
+dc_at "$TASK_HOME" reply --task task-one --final --text-file "$TMP/task-one-final.txt" >/dev/null
+[ "$(dc_at "$TASK_HOME" inbox pending-count)" = 0 ] || fail "a terminal task reply without a base reply must acknowledge its request"
+dc_at "$TASK_HOME" reply --task task-two --final --text-file "$TMP/task-two-final.txt" >/dev/null
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 2))" ] || fail "two tasks from one request must each post exactly once"
+[ -z "$(dc_at "$TASK_HOME" link-check task-one)$(dc_at "$TASK_HOME" link-check task-two)" ] || fail "both confirmed task finals must clear their links"
+pass "terminal replies acknowledge shared requests with distinct task claims"
+
+update_control ".messages += [{id:\"250000000000000002\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"start relinked task\",attachments:[]}]"
+dc_at "$TASK_HOME" poll >/dev/null
+printf 'window=test\n' > "$TASK_HOME/state/relinked-task.meta"
+chmod 600 "$TASK_HOME/state/relinked-task.meta"
+dc_at "$TASK_HOME" link relinked-task dc-250000000000000002 >/dev/null
+printf 'first milestone\n' > "$TMP/relinked-one.txt"
+printf 'second milestone\n' > "$TMP/relinked-two.txt"
+dc_at "$TASK_HOME" reply --task relinked-task --text-file "$TMP/relinked-one.txt" >/dev/null
+dc_at "$TASK_HOME" link relinked-task dc-250000000000000002 >/dev/null
+assert_contains "$(dc_at "$TASK_HOME" link-check relinked-task)" "dc-250000000000000002 1" "idempotent relinking must preserve the update counter"
+count=$(jq 'length' "$FAKE/posted.json")
+dc_at "$TASK_HOME" reply --task relinked-task --text-file "$TMP/relinked-two.txt" >/dev/null
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 1))" ] || fail "the next milestone after relinking must use a fresh claim"
+assert_contains "$(dc_at "$TASK_HOME" link-check relinked-task)" "dc-250000000000000002 2" "the relinked task must advance monotonically"
+dc_at "$TASK_HOME" reply --task relinked-task --final --text-file "$TMP/final.txt" >/dev/null
+pass "idempotent task relinking preserves monotonic delivery keys"
+
+# A posted terminal result retains its link when local acknowledgement fails.
+ACK_HOME="$TMP/task-ack-home"
+mkdir -p "$ACK_HOME/config" "$ACK_HOME/state"
+printf '%s\n' "$TOKEN" | dc_at "$ACK_HOME" token --owner file >/dev/null
+dc_at "$ACK_HOME" configure --guild "$GUILD" --channel "$CHANNEL" --owner "$OWNER" >/dev/null
+dc_at "$ACK_HOME" enable >/dev/null
+update_control ".messages += [
+  {id:\"260000000000000001\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"terminal task\",attachments:[]},
+  {id:\"260000000000000002\",channel_id:\"$CHANNEL\",guild_id:\"$GUILD\",type:0,author:{id:\"$OWNER\",bot:false},content:\"archive blocker\",attachments:[]}
+]"
+dc_at "$ACK_HOME" poll >/dev/null
+printf 'window=test\n' > "$ACK_HOME/state/ack-failure-task.meta"
+chmod 600 "$ACK_HOME/state/ack-failure-task.meta"
+dc_at "$ACK_HOME" link ack-failure-task dc-260000000000000001 >/dev/null
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$ACK_HOME" inbox ack dc-260000000000000002
+count=$(jq 'length' "$FAKE/posted.json")
+set +e
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$ACK_HOME" reply --task ack-failure-task --final --text-file "$TMP/final.txt" >/dev/null 2>&1
+ack_failure_rc=$?
+set -e
+[ "$ack_failure_rc" = 7 ] || fail "a posted task final with failed local acknowledgement must return exit 7"
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 1))" ] || fail "acknowledgement failure must occur after exactly one confirmed post"
+assert_contains "$(dc_at "$ACK_HOME" link-check ack-failure-task)" "dc-260000000000000001 0" "acknowledgement failure must preserve the task link"
+[ "$(dc_at "$ACK_HOME" inbox pending-count)" = 1 ] || fail "failed task acknowledgement must leave the original request pending"
+printf 'blocker handled\n' > "$TMP/archive-blocker.txt"
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$ACK_HOME" reply dc-260000000000000002 --text-file "$TMP/archive-blocker.txt" >/dev/null
+FM_DISCORD_ARCHIVE_MAX=1 dc_at "$ACK_HOME" inbox ack dc-260000000000000001
+dc_at "$ACK_HOME" link-clear ack-failure-task
+[ "$(jq 'length' "$FAKE/posted.json")" = "$((count + 2))" ] || fail "local recovery must not resend the terminal task result"
+[ "$(dc_at "$ACK_HOME" inbox pending-count)" = 0 ] || fail "explicit recovery must acknowledge the original task request"
+[ -z "$(dc_at "$ACK_HOME" link-check ack-failure-task)" ] || fail "explicit recovery must clear the retained task link"
+update_control '.messages |= map(select(((.id | startswith("25000000000000000")) or (.id | startswith("26000000000000000"))) | not))'
+pass "terminal acknowledgement failure preserves explicit no-resend recovery"
+
 # Established task links survive bounded archive pruning but retain binding and audience checks.
 PRUNE_HOME="$TMP/prune-home"
 mkdir -p "$PRUNE_HOME/config" "$PRUNE_HOME/state"
