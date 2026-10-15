@@ -1592,7 +1592,7 @@ The locked session-start bootstrap step turns the token into local generated sta
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
 
-Watcher check cadence for Relay, Telegram, and the dashboard is owned by the "Watcher check cadence" section and by `bin/fm-cadence.sh`.
+Watcher check cadence for Relay, Telegram, Discord, and the dashboard is owned by the "Watcher check cadence" section and by `bin/fm-cadence.sh`.
 Arming the Relay shim is one input to that shared cadence owner; bootstrap never writes a second cadence file for Relay alone.
 
 When the token is removed or empty, the next locked session-start bootstrap step removes the shim.
@@ -1859,7 +1859,7 @@ This section is the single owner of when that default is replaced, and `bin/fm-c
 
 A home with an **armed inbound captain channel** sweeps every 30 seconds instead.
 A channel poll is the only thing that notices an inbound captain message, so a 300-second sweep is a 300-second delivery delay, which is the whole reason the faster cadence exists.
-The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), the dashboard command-and-chat channel (`state/fm-dash.check.sh`), or any combination.
+The armed channels are exactly the ones that already require a live supervision cycle with an empty fleet: X-mode relay polling (`state/x-watch.check.sh`), the Telegram captain channel (`state/fm-telegram.check.sh`), the Discord captain channel (`state/fm-discord.check.sh`), the dashboard command-and-chat channel (`state/fm-dash.check.sh`), or any combination.
 `bin/fm-supervision-lib.sh` owns that predicate for both purposes, so there is no second definition of "armed".
 
 The entire mechanism is one generated file, `config/check-cadence.env` (gitignored, mode 0600), whose canonical content declares `FM_CHECK_INTERVAL=30`.
@@ -1942,6 +1942,48 @@ Updates are bounded by `FM_TG_TASK_UPDATE_MAX` (default 3, clamped to 998 so the
 
 The poll wakes firstmate with `tg-message <n> pending` while messages are unclaimed, or reports a distinct configuration or transport failure once as `tg-mode-error ...` until it clears.
 The `telegram-captain-channel` skill owns what firstmate does with either wake.
+
+## Discord captain channel (config/discord.json)
+
+[`discord-channel.md`](discord-channel.md) owns operator setup, Discord application permissions and intents, supported conversation behavior, privacy limits, and rollback.
+This section owns the local configuration and durable-state schema.
+
+`config/discord.json` is a gitignored mode-0600 `fm-discord.v1` record with `enabled`, `token_owner`, public bot identity, exact `guild_id`, `channel_id`, and `owner_id` strings, and an explicit `approved_audience_ids` list.
+Snowflakes stay decimal strings so JavaScript number precision cannot alter an identity.
+The owner remains the sole inbound authority even when the locally confirmed audience list later includes read-only viewers.
+
+`token_owner` is `keychain` or `file`.
+The macOS keychain service is `firstmate-discord-bot`, with an account derived from the exact home path so homes do not share credentials.
+The cross-platform file fallback is `config/discord-token`, a gitignored mode-0600 file.
+The token is read from standard input for storage and is never accepted in arguments, config, state, generated checks, logs, or status output.
+
+Enabling writes and registers the credential-free `state/fm-discord.check.sh`, seeds `state/discord/cursor` from the newest current channel message when no cursor exists, and joins the shared inbound-channel cadence.
+The check runs one bounded official Discord HTTP API poll and opens no port or webhook.
+Unlike Telegram's bounded long poll, Discord is an ordinary registered check on the shared cadence.
+
+All connector-owned runtime records live below mode-0700 `state/discord/`:
+
+- `cursor` is the highest classified Discord message snowflake.
+- `inbox/dc-<message_id>.json` and `inbox/archive/` contain private `fm-discord-request.v1` records; intake stops at 100 pending records, and the archive keeps at most 100 records by pruning only the oldest answered request.
+- `sent/<key>.json` contains create-only `fm-discord-sent.v1` reply claims, exact confirmed-chunk counts, and verified Discord message IDs, capped at 500 records so duplicate memory cannot grow without bound.
+- `rate-limit.json` persists Discord's bounded `Retry-After` deadline.
+- `poll-error.json` deduplicates an unchanged configuration, credential, permission, privacy, backlog, or availability failure.
+
+Ingress publishes an accepted request before advancing the cursor.
+Replayed messages hit the same create-only request filename and cannot duplicate work.
+Inbox presentation does not acknowledge a request; a confirmed complete reply moves it into the archive, so interruption before handling leaves it pending for the next supervision turn.
+Polling walks backward from Discord's newest `after` page until it reaches the prior cursor, bounded by `FM_DISCORD_MAX_PAGES` (default 5); exceeding that bound advances nothing.
+Replies are capped by `FM_DISCORD_REPLY_MAX_CHUNKS` (default 6), use no allowed mentions, and set Discord's unique enforced nonce per key and chunk in addition to the local ledger.
+
+Every poll and every outbound chunk recomputes the effective audience from the exact channel object, guild roles, guild owner, channel overwrites, and the complete paginated guild-member list.
+The list is bounded by `FM_DISCORD_MAX_PAGES` pages of 1,000 members; a larger or incomplete guild is unverifiable and private delivery stops.
+Audience verification includes Discord's guild-owner and Administrator bypass behavior and requires a guild text channel rather than a thread.
+
+When a Discord message starts longer work, `bin/fm-discord.sh link` stores `discord_request=`, `discord_request_ts=`, and `discord_updates=` in the existing private task metadata.
+`reply --task` derives a fresh `.u<n>` ledger key, and `--final` clears the link only after a confirmed complete post.
+
+The poll wakes firstmate with `discord-message <n> pending` or one deduplicated `discord-mode-error ...` line.
+The `discord-captain-channel` skill owns handling and outbound voice.
 
 ## Trusted external process-event adapters (config/extensions.d)
 

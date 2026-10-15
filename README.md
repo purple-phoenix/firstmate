@@ -171,7 +171,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, opt-in Relay lets the same fleet answer public mentions, and the optional Telegram channel plus tailnet dashboard give private captain reachability on the same supervision cycle.
+Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, opt-in Relay lets the same fleet answer public mentions, and the optional Telegram, Discord, and tailnet dashboard channels give private captain reachability on the same supervision cycle.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
@@ -217,6 +217,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
 - [docs/telegram-channel.md](docs/telegram-channel.md) - current setup, supported messages, privacy limitation, and opt-out for the optional Telegram captain channel.
+- [docs/discord-channel.md](docs/discord-channel.md) - current setup, owner and audience binding, supported messages, and rollback for the optional self-hosted Discord captain channel.
 - [docs/dashboard-service.md](docs/dashboard-service.md) - optional tailnet-only capacity dashboard service with captain chat and exact PR merge approvals.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
