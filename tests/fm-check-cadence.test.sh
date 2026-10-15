@@ -4,7 +4,7 @@
 # "Watcher check cadence".
 #
 # The contract under test: a home with an armed inbound captain channel (X-mode
-# relay polling, the Telegram captain channel, the dashboard command-and-chat
+# relay polling, the Telegram or Discord captain channel, the dashboard command-and-chat
 # channel, or any combination) generates ONE config/check-cadence.env exporting
 # FM_CHECK_INTERVAL=30; a home with none has no such file and keeps
 # fm-watch.sh's 300s default. All channels share the single file, so several
@@ -50,8 +50,9 @@ path_mode() {
 
 arm_x()        { : > "$1/state/x-watch.check.sh"; }
 arm_telegram() { : > "$1/state/fm-telegram.check.sh"; }
+arm_discord()  { : > "$1/state/fm-discord.check.sh"; }
 arm_dash()     { : > "$1/state/fm-dash.check.sh"; }
-disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.sh "$1"/state/fm-dash.check.sh; }
+disarm()       { rm -f "$1"/state/x-watch.check.sh "$1"/state/fm-telegram.check.sh "$1"/state/fm-discord.check.sh "$1"/state/fm-dash.check.sh; }
 
 # The cadence a watcher process would actually start with through the validated
 # launch boundary.
@@ -91,6 +92,18 @@ test_telegram_only_home_goes_fast() {
   assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/check-cadence.env" "cadence must be 30s"
   assert_interval "$home" 30 "a Telegram-only home must start its watcher at 30s"
   pass "a Telegram-only home runs its check on the 30s cadence"
+}
+
+test_discord_only_home_goes_fast() {
+  local home out
+  home=$(make_home discord-only)
+  arm_discord "$home"
+  out=$(cadence "$home" reconcile)
+  assert_contains "$out" "CADENCE: 30s check cadence armed for the Discord captain channel" \
+    "arming Discord must announce the 30s cadence"
+  assert_present "$home/config/check-cadence.env" "Discord alone must arm the cadence file"
+  assert_interval "$home" 30 "a Discord-only home must start its watcher at 30s"
+  pass "a Discord-only home runs its check on the 30s cadence"
 }
 
 test_x_only_home_goes_fast() {
@@ -398,6 +411,7 @@ test_path_command_needs_no_home_state() {
 
 test_default_home_keeps_the_default_cadence
 test_telegram_only_home_goes_fast
+test_discord_only_home_goes_fast
 test_x_only_home_goes_fast
 test_dashboard_only_home_goes_fast
 test_both_channels_share_one_cadence_owner

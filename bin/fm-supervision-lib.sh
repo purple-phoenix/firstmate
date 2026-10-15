@@ -27,13 +27,14 @@ fm_sup_stat_mtime() {
 
 # fm_supervision_channel_armed <state-dir>
 # Exit 0 (true) exactly when an inbound captain channel is armed in this home:
-# X-mode relay polling, the Telegram captain channel, the dashboard
+# X-mode relay polling, the Telegram or Discord captain channel, the dashboard
 # command-and-chat channel (its registered check delivers captain clicks and
 # chat messages), or any combination. This is the single owner of that
 # predicate - bin/fm-cadence.sh reuses it.
 fm_supervision_channel_armed() {
   local state=$1
-  [ -f "$state/x-watch.check.sh" ] || [ -f "$state/fm-telegram.check.sh" ] || [ -f "$state/fm-dash.check.sh" ]
+  [ -f "$state/x-watch.check.sh" ] || [ -f "$state/fm-telegram.check.sh" ] \
+    || [ -f "$state/fm-discord.check.sh" ] || [ -f "$state/fm-dash.check.sh" ]
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
@@ -51,7 +52,7 @@ fm_supervision_channel_armed() {
 #                         no longer validates needs the watcher precisely so the
 #                         sweep can report the rejection instead of going quiet.
 #   FM_SUP_NEEDED         true/false - in-flight work, an armed inbound captain
-#                         channel (X-mode relay, Telegram, or dashboard), a
+#                         channel (X-mode relay, Telegram, Discord, or dashboard), a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
 #                         or a registered custom check

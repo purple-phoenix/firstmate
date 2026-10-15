@@ -78,7 +78,7 @@
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim, and prints an FMX line. cadence_setup then
 #          reconciles the watcher check cadence for whichever inbound captain
-#          channels are armed (X mode, the Telegram channel, the dashboard
+#          channels are armed (X mode, Telegram, Discord, the dashboard
 #          channel) via bin/fm-cadence.sh, printing a CADENCE line only on a
 #          real transition.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
@@ -1029,7 +1029,7 @@ x_mode_setup() {
 
 # Converge config/check-cadence.env with this home's armed inbound captain
 # channels, whatever changed them: an X opt-in or opt-out just above, or a
-# Telegram/dashboard enable/disable/uninstall run outside bootstrap entirely.
+# Telegram/Discord/dashboard enable/disable/uninstall run outside bootstrap entirely.
 # Prints one CADENCE: line only on a real transition, because a running watcher
 # read its cadence at process start and will not see the new value until it
 # restarts.

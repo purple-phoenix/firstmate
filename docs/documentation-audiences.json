@@ -32,6 +32,7 @@
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
     "docs/remote-secondmates.md",
+    "docs/discord-channel.md",
     "docs/telegram-channel.md"
   ],
   "requiredOwnerPointers": [
@@ -108,6 +109,10 @@
       "target": "docs/verification/trace-context.md"
     },
     {
+      "source": "docs/discord-channel.md",
+      "target": "docs/verification/discord-channel.md"
+    },
+    {
       "source": "docs/telegram-channel.md",
       "target": "docs/verification/telegram-channel.md"
     }
@@ -155,6 +160,10 @@
     },
     {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/discord-captain-channel/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -378,6 +387,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/discord-channel.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
@@ -531,6 +544,10 @@
     },
     {
       "path": "docs/verification/devin.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/discord-channel.md",
       "audience": "maintainer-verification"
     },
     {
